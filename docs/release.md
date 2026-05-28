@@ -28,15 +28,14 @@ Do not commit generated or local files:
 Update `Cargo.toml`:
 
 ```toml
-version = "0.2.1"
-```
+version = "0.2.2"```
 
 ## Tag release
 
 ```bash
-git tag -a v0.2.1 -m "Ferrum v0.2.1"
+git tag -a v0.2.2 -m "Ferrum v0.2.2"
 git push origin main
-git push origin v0.2.1
+git push origin v0.2.2
 ```
 
 Pushing a `v*` tag triggers `.github/workflows/release.yml`.
@@ -46,8 +45,8 @@ Pushing a `v*` tag triggers `.github/workflows/release.yml`.
 The release workflow builds Linux x86_64 and uploads:
 
 ```text
-ferrum-v0.2.1-x86_64-unknown-linux-gnu.tar.gz
-ferrum-v0.2.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+ferrum-v0.2.2-x86_64-unknown-linux-gnu.tar.gz
+ferrum-v0.2.2-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 The tarball includes:
@@ -61,7 +60,7 @@ LICENSE
 Manual packaging equivalent:
 
 ```bash
-version=v0.2.1
+version=v0.2.2
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 mkdir -p "$package"
@@ -76,8 +75,8 @@ sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
 Release notes should include:
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.2.1/ferrum-v0.2.1-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.2.1-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.2.2/ferrum-v0.2.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.2.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
