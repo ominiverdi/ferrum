@@ -1,21 +1,25 @@
 # Ferrum
 
-Ferrum is a small Rust-native Linux coding agent inspired by Pi's minimal harness model.
-It is not a Pi port: no TypeScript runtime, no extension system, no npm compatibility, and no SDK compatibility.
+Ferrum is a small Rust-native coding agent for Linux.
 
-Current status: early MVP. Useful, but not hardened.
+It provides a simple CLI, local file and shell tools, JSONL sessions, AGENTS.md context loading, OpenAI-compatible providers, ChatGPT/Codex OAuth, and a minimal MCP stdio bridge.
+
+Ferrum is inspired by Pi's agent-harness ideas, but it is a separate Rust project. It does not aim to support Pi extensions, packages, themes, or SDK compatibility.
+
+Status: early MVP. Useful for real work, still evolving.
 
 ## Features
 
-- Linux CLI coding agent
-- Print mode and basic interactive mode
+- Linux-native CLI
+- Print mode and interactive mode
+- JSONL sessions with resume
+- AGENTS.md context loading
+- Configurable context budget and thinking level
+- Minimal MCP stdio tool bridge
 - OpenAI Codex / ChatGPT OAuth provider
 - OpenAI-compatible Chat Completions provider
 - OpenCode Go preset
 - Minimax OpenAI-compatible preset
-- JSONL sessions with resume
-- AGENTS.md context loading
-- Minimal MCP stdio tool bridge
 - Built-in tools:
   - `read`
   - `write`
@@ -30,6 +34,8 @@ Current status: early MVP. Useful, but not hardened.
 From source:
 
 ```bash
+git clone https://github.com/ominiverdi/ferrum.git
+cd ferrum
 cargo install --path .
 ```
 
@@ -37,6 +43,32 @@ Then:
 
 ```bash
 ferrum --help
+```
+
+## Quick start
+
+Run a one-shot prompt:
+
+```bash
+ferrum -p "summarize this repo"
+```
+
+Pipe input:
+
+```bash
+cat src/main.rs | ferrum -p "review this file"
+```
+
+Start an interactive session:
+
+```bash
+ferrum
+```
+
+Resume the latest session:
+
+```bash
+ferrum --resume
 ```
 
 ## Configuration
@@ -58,7 +90,7 @@ thinking = "off"
 [[mcp.servers]]
 name = "filesystem"
 command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/ominiverdi/github"]
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/projects"]
 enabled = true
 ```
 
@@ -93,7 +125,7 @@ model = "gpt-5.3-codex"
 
 ### OpenCode Go
 
-Set your key outside the repo:
+Set an API key:
 
 ```bash
 export OPENCODE_API_KEY=...
@@ -111,7 +143,7 @@ Default endpoint:
 https://opencode.ai/zen/go/v1
 ```
 
-Override envs:
+Optional overrides:
 
 ```bash
 export OPENCODE_GO_BASE_URL=...
@@ -134,22 +166,7 @@ export MINIMAX_BASE_URL=...
 ferrum --provider minimax --model <model> -p "hello"
 ```
 
-## Usage
-
-Print mode:
-
-```bash
-ferrum -p "summarize this repo"
-cat src/main.rs | ferrum -p "review this file"
-```
-
-Interactive mode:
-
-```bash
-ferrum
-```
-
-Interactive commands:
+## Interactive commands
 
 ```text
 /help
@@ -161,17 +178,27 @@ Interactive commands:
 /quit
 ```
 
-Resume latest session:
+## MCP
 
-```bash
-ferrum --resume
+Ferrum supports local MCP stdio servers configured in `config.toml`.
+
+Example:
+
+```toml
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/projects"]
+enabled = true
 ```
 
-Resume a specific session:
+Discovered MCP tools are exposed as:
 
-```bash
-ferrum --resume ~/.config/ferrum/sessions/<file>.jsonl
+```text
+mcp__<server>__<tool>
 ```
+
+See `docs/mcp.md` for details.
 
 ## Context files
 
@@ -191,22 +218,21 @@ Sessions are JSONL files under:
 ~/.config/ferrum/sessions/
 ```
 
-Use `/session` to view the current path and approximate context size.
+Use `/session` to view the current session path, message count, approximate token count, and file size.
 
 ## Safety notes
 
-- Do not put secrets in this repo.
-- API keys should come from environment variables or provider OAuth storage.
-- Tool execution has your local user permissions.
+- API keys are read from environment variables or provider OAuth storage.
+- Tools run with your local user permissions.
 - `bash`, `write`, and `edit` can mutate files.
 - Print mode does not ask for mutation confirmations.
 
 ## Development
 
 ```bash
+cargo fmt --check
 cargo test
-cargo fmt
-cargo run -- --help
+cargo build --release
 ```
 
 Docs:
