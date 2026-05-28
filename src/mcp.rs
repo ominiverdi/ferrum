@@ -2,14 +2,17 @@ use crate::{agent::tools::ToolDefinition, config::McpServerConfig};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, process::Stdio};
+use std::{collections::HashMap, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
+    time::timeout,
 };
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MAX_MCP_OUTPUT_CHARS: usize = 20_000;
+const MCP_START_TIMEOUT: Duration = Duration::from_secs(10);
+const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct McpManager {
     servers: Vec<McpServer>,
@@ -24,9 +27,34 @@ impl McpManager {
         let mut tool_routes = HashMap::new();
 
         for server_config in configs.iter().filter(|server| server.enabled) {
-            let mut server = McpServer::start(server_config).await?;
+            let mut server = match timeout(MCP_START_TIMEOUT, McpServer::start(server_config)).await
+            {
+                Ok(Ok(server)) => server,
+                Ok(Err(error)) => {
+                    eprintln!("[mcp] failed to start `{}`: {error}", server_config.name);
+                    continue;
+                }
+                Err(_) => {
+                    eprintln!("[mcp] timed out starting `{}`", server_config.name);
+                    continue;
+                }
+            };
             let server_index = servers.len();
-            for tool in server.list_tools().await? {
+            let listed_tools = match timeout(MCP_REQUEST_TIMEOUT, server.list_tools()).await {
+                Ok(Ok(tools)) => tools,
+                Ok(Err(error)) => {
+                    eprintln!(
+                        "[mcp] failed to list tools for `{}`: {error}",
+                        server_config.name
+                    );
+                    continue;
+                }
+                Err(_) => {
+                    eprintln!("[mcp] timed out listing tools for `{}`", server_config.name);
+                    continue;
+                }
+            };
+            for tool in listed_tools {
                 let exposed_name = format!(
                     "mcp__{}__{}",
                     sanitize_name(&server_config.name),
@@ -85,11 +113,14 @@ struct McpServer {
 
 impl McpServer {
     async fn start(config: &McpServerConfig) -> Result<Self> {
-        let mut child = Command::new(&config.command)
+        let mut command = Command::new(&config.command);
+        command
             .args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command
             .spawn()
             .with_context(|| format!("failed to start MCP server `{}`", config.name))?;
 
@@ -136,15 +167,18 @@ impl McpServer {
     }
 
     async fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String> {
-        let value = self
-            .request(
+        let value = timeout(
+            MCP_REQUEST_TIMEOUT,
+            self.request(
                 "tools/call",
                 json!({
                     "name": name,
                     "arguments": arguments,
                 }),
-            )
-            .await?;
+            ),
+        )
+        .await
+        .with_context(|| format!("MCP tool `{name}` timed out"))??;
         Ok(truncate_output(render_tool_result(&value)))
     }
 
@@ -182,32 +216,38 @@ impl McpServer {
 
     async fn write_message(&mut self, message: &Value) -> Result<()> {
         let body = serde_json::to_vec(message)?;
-        self.stdin
-            .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
-            .await?;
         self.stdin.write_all(&body).await?;
+        self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await?;
         Ok(())
     }
 
     async fn read_message(&mut self) -> Result<Value> {
-        let mut content_length = None;
-        loop {
-            let mut line = String::new();
-            let bytes = self.stdout.read_line(&mut line).await?;
-            if bytes == 0 {
-                anyhow::bail!("MCP server closed stdout");
-            }
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed.is_empty() {
-                break;
-            }
-            if let Some(value) = trimmed.strip_prefix("Content-Length:") {
-                content_length = Some(value.trim().parse::<usize>()?);
-            }
+        let mut line = String::new();
+        let bytes = self.stdout.read_line(&mut line).await?;
+        if bytes == 0 {
+            anyhow::bail!("MCP server closed stdout");
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if !trimmed.starts_with("Content-Length:") {
+            return serde_json::from_str(trimmed).context("failed to parse MCP JSON-RPC line");
         }
 
-        let len = content_length.context("MCP message missing Content-Length")?;
+        let len = trimmed
+            .strip_prefix("Content-Length:")
+            .context("MCP message missing Content-Length")?
+            .trim()
+            .parse::<usize>()?;
+        loop {
+            line.clear();
+            let bytes = self.stdout.read_line(&mut line).await?;
+            if bytes == 0 {
+                anyhow::bail!("MCP server closed stdout before body");
+            }
+            if line.trim_end_matches(['\r', '\n']).is_empty() {
+                break;
+            }
+        }
         let mut body = vec![0; len];
         self.stdout.read_exact(&mut body).await?;
         serde_json::from_slice(&body).context("failed to parse MCP JSON-RPC message")
