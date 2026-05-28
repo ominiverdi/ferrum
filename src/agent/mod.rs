@@ -73,8 +73,13 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
                         }
                     }
                 }
-                state.run_turn(prompt, config).await?;
-                println!();
+                match state.run_turn(prompt, config).await {
+                    Ok(()) => println!(),
+                    Err(error) => {
+                        eprintln!("Error: {error}");
+                        continue;
+                    }
+                }
             }
             Err(ReadlineError::Interrupted) => {
                 let now = Instant::now();
