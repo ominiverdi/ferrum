@@ -20,6 +20,10 @@ pub struct Args {
     #[arg(long)]
     pub thinking: Option<String>,
 
+    /// Attach a local image file to the prompt. Repeatable. Supports png, jpg, jpeg, webp.
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<String>,
+
     /// Resume the latest session, or a specific JSONL session path
     #[arg(long, value_name = "PATH")]
     pub resume: Option<Option<String>>,

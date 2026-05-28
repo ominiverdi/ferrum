@@ -2,17 +2,22 @@ pub mod messages;
 pub mod tools;
 
 use crate::{config::Config, context, mcp, providers, session, tools as builtin_tools};
-use anyhow::Result;
+use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustyline::{DefaultEditor, error::ReadlineError};
 use std::{
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    process::Command,
     time::{Duration, Instant},
 };
 
-pub async fn run_print(prompt: String, config: &Config) -> Result<()> {
+pub async fn run_print(prompt: String, images: Vec<String>, config: &Config) -> Result<()> {
     let mut state = AgentState::new(config)?;
+    state.attach_images(images)?;
+    let (prompt, pasted_images) = extract_pasted_images(&prompt, &state.cwd);
+    state.attach_images(pasted_images)?;
     state.run_turn(prompt, config).await
 }
 
@@ -36,8 +41,22 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
                     continue;
                 }
                 let _ = rl.add_history_entry(input);
-                if input.starts_with('/') {
-                    match handle_command(input, config, &mut state) {
+                let (prompt, image_paths) = extract_pasted_images(input, &state.cwd);
+                if !image_paths.is_empty() {
+                    match state.attach_images(image_paths) {
+                        Ok(()) => {
+                            if prompt.trim().is_empty() {
+                                continue;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            continue;
+                        }
+                    }
+                }
+                if prompt.starts_with('/') {
+                    match handle_command(&prompt, config, &mut state) {
                         Ok(CommandAction::Continue) => continue,
                         Ok(CommandAction::Quit) => {
                             let _ = rl.save_history(&history);
@@ -49,7 +68,7 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
                         }
                     }
                 }
-                state.run_turn(input.to_string(), config).await?;
+                state.run_turn(prompt, config).await?;
                 println!();
             }
             Err(ReadlineError::Interrupted) => {
@@ -80,6 +99,7 @@ struct AgentState {
     messages: Vec<messages::Message>,
     cwd: std::path::PathBuf,
     mcp: Option<mcp::McpManager>,
+    pending_images: Vec<messages::ContentBlock>,
 }
 
 impl AgentState {
@@ -97,6 +117,7 @@ impl AgentState {
             messages,
             cwd,
             mcp: None,
+            pending_images: Vec::new(),
         })
     }
 
@@ -115,6 +136,7 @@ impl AgentState {
             messages,
             cwd,
             mcp: None,
+            pending_images: Vec::new(),
         })
     }
 
@@ -134,7 +156,12 @@ impl AgentState {
             );
         }
 
-        let user = messages::Message::text(messages::Role::User, prompt);
+        let images = std::mem::take(&mut self.pending_images);
+        let user = if images.is_empty() {
+            messages::Message::text(messages::Role::User, prompt)
+        } else {
+            messages::Message::with_images(messages::Role::User, prompt, images)
+        };
         self.session.append_message(&user)?;
         self.messages.push(user);
 
@@ -189,6 +216,25 @@ impl AgentState {
         }
 
         anyhow::bail!("agent loop exceeded maximum tool iterations")
+    }
+
+    fn attach_images(&mut self, specs: Vec<String>) -> Result<()> {
+        for spec in specs {
+            if spec.starts_with("data:image/") {
+                let image = messages::image_from_data_uri(&spec)?;
+                preview_attached_image(None, &image);
+                self.pending_images.push(image);
+                eprintln!("[image] attached pasted image");
+                continue;
+            }
+
+            let resolved = builtin_tools::path::resolve_to_cwd(&spec, &self.cwd)?;
+            let image = messages::image_from_path(&resolved)?;
+            preview_attached_image(Some(&resolved), &image);
+            self.pending_images.push(image);
+            eprintln!("[image] attached {}", resolved.display());
+        }
+        Ok(())
     }
 
     async fn ensure_mcp(&mut self, config: &Config) -> Result<()> {
@@ -247,6 +293,115 @@ impl AgentState {
     }
 }
 
+fn extract_pasted_images(input: &str, cwd: &Path) -> (String, Vec<String>) {
+    let mut prompt_parts = Vec::new();
+    let mut image_paths = Vec::new();
+
+    for part in input.split_whitespace() {
+        let trimmed = part.trim_matches(['\'', '"']);
+        if trimmed.starts_with("data:image/") {
+            image_paths.push(trimmed.to_string());
+        } else if looks_like_image_path(trimmed)
+            && builtin_tools::path::resolve_to_cwd(trimmed, cwd).is_ok_and(|path| path.is_file())
+        {
+            image_paths.push(trimmed.to_string());
+        } else {
+            prompt_parts.push(part);
+        }
+    }
+
+    (prompt_parts.join(" "), image_paths)
+}
+
+fn looks_like_image_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".webp")
+        || lower.starts_with("file://")
+            && (lower.contains(".png")
+                || lower.contains(".jpg")
+                || lower.contains(".jpeg")
+                || lower.contains(".webp"))
+}
+
+fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
+    let messages::ContentBlock::Image {
+        mime_type,
+        data_base64,
+        sha256,
+        ..
+    } = image
+    else {
+        return;
+    };
+
+    let mut temp_path = None;
+    let preview_path = if command_exists("chafa") {
+        if let Some(path) = path {
+            Some(path.to_path_buf())
+        } else {
+            temp_path = write_temp_image(image).ok();
+            temp_path.clone()
+        }
+    } else {
+        None
+    };
+
+    if let Some(path) = preview_path.as_deref() {
+        match Command::new("chafa")
+            .args(["--size", "80x24"])
+            .arg(path)
+            .status()
+        {
+            Ok(status) if status.success() => {
+                if let Some(path) = temp_path {
+                    let _ = fs::remove_file(path);
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(path) = temp_path {
+        let _ = fs::remove_file(path);
+    }
+
+    let approx_bytes = data_base64.len().saturating_mul(3) / 4;
+    let short_hash = sha256.get(..12).unwrap_or(sha256);
+    let source = match image {
+        messages::ContentBlock::Image { source, .. } => source.as_str(),
+        _ => "image",
+    };
+    eprintln!("[image] {source} ({mime_type}, ~{approx_bytes} bytes, sha256:{short_hash})");
+}
+
+fn write_temp_image(image: &messages::ContentBlock) -> Result<PathBuf> {
+    let messages::ContentBlock::Image {
+        mime_type,
+        data_base64,
+        sha256,
+        ..
+    } = image
+    else {
+        anyhow::bail!("not an image")
+    };
+    let ext = messages::image_extension(mime_type);
+    let path = std::env::temp_dir().join(format!("ferrum-image-{}.{}", &sha256[..12], ext));
+    let data = STANDARD
+        .decode(data_base64)
+        .context("failed to decode image for preview")?;
+    fs::write(&path, data).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn command_exists(command: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|path| path.join(command).is_file()))
+}
+
 struct SessionStats {
     messages: usize,
     chars: usize,
@@ -277,6 +432,7 @@ fn handle_command(
             println!(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
+            println!("  /image <path>         attach image to next message");
             println!("  /compact              compact current in-memory conversation");
             Ok(CommandAction::Continue)
         }
@@ -288,6 +444,7 @@ fn handle_command(
             println!("estimated_tokens: {}", stats.estimated_tokens);
             println!("max_context_tokens: {}", config.max_context_tokens);
             println!("file_bytes: {}", stats.file_bytes);
+            println!("pending_images: {}", state.pending_images.len());
             println!("model: {}", config.model);
             println!("thinking: {:?}", config.thinking);
             println!("provider: {:?}", config.provider);
@@ -312,6 +469,14 @@ fn handle_command(
                 config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
             }
             println!("thinking: {:?}", config.thinking);
+            Ok(CommandAction::Continue)
+        }
+        "/image" => {
+            let path = parts
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("usage: /image <path>"))?;
+            state.attach_images(vec![path.to_string()])?;
+            println!("attached image: {path}");
             Ok(CommandAction::Continue)
         }
         "/compact" => {

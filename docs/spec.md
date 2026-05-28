@@ -188,6 +188,8 @@ Provider adapters translate between this normalized model and provider-specific 
 - OpenCode Go OpenAI-compatible Chat Completions models
 - MiniMax API via `MINIMAX_API_KEY` and default server `https://api.minimax.io/v1`
 
+Image input is supported for providers/models that accept OpenAI-style multimodal content. Provider/model support varies.
+
 Anthropic-compatible APIs are deferred until the OpenAI-compatible provider and generic tool loop are stable.
 
 ### Provider Responsibilities

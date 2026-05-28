@@ -185,7 +185,7 @@ struct ChatRequest<'a> {
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: &'static str,
-    content: String,
+    content: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,16 +216,52 @@ impl ChatMessage {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
-        let content = message
+        let has_images = message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::Image { .. }));
+        let text = message
             .content
             .iter()
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
                 ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
-                ContentBlock::ToolUse { .. } => None,
+                ContentBlock::ToolUse { .. } | ContentBlock::Image { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("");
+        let content = if has_images {
+            serde_json::Value::Array(
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } if !text.is_empty() => {
+                            Some(serde_json::json!({
+                                "type": "text",
+                                "text": text,
+                            }))
+                        }
+                        ContentBlock::Image {
+                            mime_type,
+                            data_base64,
+                            ..
+                        } => Some(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{mime_type};base64,{data_base64}")
+                            }
+                        })),
+                        ContentBlock::ToolResult { content, .. } if !content.is_empty() => {
+                            Some(serde_json::json!({"type": "text", "text": content}))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        } else {
+            serde_json::Value::String(text)
+        };
         let tool_call_id = message.content.iter().find_map(|block| match block {
             ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.clone()),
             _ => None,
@@ -391,7 +427,7 @@ struct CodexText<'a> {
 enum ResponsesInput {
     Message {
         role: &'static str,
-        content: String,
+        content: serde_json::Value,
     },
     FunctionCall {
         #[serde(rename = "type")]
@@ -421,6 +457,37 @@ fn codex_instructions(messages: &[Message]) -> String {
         }
     }
     instructions
+}
+
+fn codex_message_content(message: &Message) -> serde_json::Value {
+    let has_images = message
+        .content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Image { .. }));
+    if !has_images {
+        return serde_json::Value::String(message.text_content());
+    }
+    serde_json::Value::Array(
+        message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } if !text.is_empty() => Some(serde_json::json!({
+                    "type": "input_text",
+                    "text": text,
+                })),
+                ContentBlock::Image {
+                    mime_type,
+                    data_base64,
+                    ..
+                } => Some(serde_json::json!({
+                    "type": "input_image",
+                    "image_url": format!("data:{mime_type};base64,{data_base64}"),
+                })),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
@@ -464,7 +531,7 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
                     });
                     emitted_special = true;
                 }
-                ContentBlock::Text { .. } => {}
+                ContentBlock::Text { .. } | ContentBlock::Image { .. } => {}
             }
         }
         if !emitted_special {
@@ -476,7 +543,7 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
             };
             inputs.push(ResponsesInput::Message {
                 role,
-                content: message.text_content(),
+                content: codex_message_content(message),
             });
         }
     }

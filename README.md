@@ -2,7 +2,7 @@
 
 Ferrum is a small Rust-native coding agent for Linux.
 
-It provides a simple CLI, local file and shell tools, JSONL sessions, AGENTS.md context loading, OpenAI-compatible providers, ChatGPT/Codex OAuth, and a minimal MCP stdio bridge.
+It provides a simple CLI, local file and shell tools, image input, JSONL sessions, AGENTS.md context loading, OpenAI-compatible providers, ChatGPT/Codex OAuth, and a minimal MCP stdio bridge.
 
 Ferrum is inspired by Pi's agent-harness ideas, but it is a separate Rust project. It does not aim to support Pi extensions, packages, themes, or SDK compatibility.
 
@@ -15,6 +15,7 @@ Status: early MVP. Useful for real work, still evolving.
 - JSONL sessions with resume
 - AGENTS.md context loading
 - Configurable context budget and thinking level
+- Image input with optional terminal previews
 - Minimal MCP stdio tool bridge
 - OpenAI Codex / ChatGPT OAuth provider
 - OpenAI-compatible Chat Completions provider
@@ -70,6 +71,12 @@ Pipe input:
 
 ```bash
 cat src/main.rs | ferrum -p "review this file"
+```
+
+Attach an image:
+
+```bash
+ferrum --image ./screenshot.png -p "describe this image"
 ```
 
 Start an interactive session:
@@ -188,9 +195,28 @@ ferrum --provider minimax --model <model> -p "hello"
 /model [name]
 /provider [name]
 /thinking [level]
+/image <path>
 /compact
 /quit
 ```
+
+## Images
+
+Ferrum supports local PNG, JPEG, and WebP attachments:
+
+```bash
+ferrum --image ./screenshot.png -p "describe this image"
+```
+
+In interactive mode, attach an image to the next message:
+
+```text
+/image ./screenshot.png
+```
+
+Ferrum can also detect pasted image file paths and `data:image/...;base64,...` blocks. If `chafa` is installed, Ferrum renders a terminal preview; otherwise it prints image metadata.
+
+See `docs/images.md` for details.
 
 ## MCP
 
@@ -257,6 +283,7 @@ Docs:
 - `docs/config.md`
 - `docs/tools.md`
 - `docs/sessions.md`
+- `docs/images.md`
 - `docs/mcp.md`
 
 ## License

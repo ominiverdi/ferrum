@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     }
 
     if let Some(prompt) = args.print_prompt() {
-        agent::run_print(prompt, &config).await?;
+        agent::run_print(prompt, args.images.clone(), &config).await?;
         return Ok(());
     }
 
