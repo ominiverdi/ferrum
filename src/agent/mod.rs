@@ -36,7 +36,8 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
     loop {
         match rl.readline("ferrum> ") {
             Ok(line) => {
-                let input = line.trim();
+                let cleaned = clean_interactive_input(&line);
+                let input = cleaned.trim();
                 if input.is_empty() {
                     continue;
                 }
@@ -291,6 +292,13 @@ impl AgentState {
         ));
         Ok(())
     }
+}
+
+fn clean_interactive_input(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| !ch.is_ascii_control() || matches!(ch, '\t' | '\n'))
+        .collect()
 }
 
 fn is_slash_command(input: &str) -> bool {
