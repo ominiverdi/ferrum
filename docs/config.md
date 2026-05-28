@@ -142,9 +142,11 @@ OPENCODE_GO_BASE_URL
 OPENCODE_GO_API_KEY_ENV
 ```
 
-Minimax:
+MiniMax:
 
 ```text
 MINIMAX_API_KEY
 MINIMAX_BASE_URL
 ```
+
+`MINIMAX_BASE_URL` defaults to `https://api.minimax.io/v1`.

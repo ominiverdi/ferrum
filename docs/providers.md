@@ -71,13 +71,20 @@ export OPENAI_BASE_URL=https://api.openai.com/v1
 ferrum --provider openai --model gpt-4.1 -p "hello"
 ```
 
-## Minimax
+## MiniMax
 
-Ferrum currently supports Minimax through its OpenAI-compatible endpoint:
+Ferrum reads a MiniMax API key from `MINIMAX_API_KEY`.
+
+Default base URL:
+
+```text
+https://api.minimax.io/v1
+```
+
+Override with `MINIMAX_BASE_URL` if needed.
 
 ```bash
 export MINIMAX_API_KEY=...
-export MINIMAX_BASE_URL=...
 ferrum --provider minimax --model <model> -p "hello"
 ```
 

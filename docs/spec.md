@@ -186,7 +186,7 @@ Provider adapters translate between this normalized model and provider-specific 
 - OpenAI-compatible Chat Completions API
 - OpenAI Codex / ChatGPT subscription OAuth backend
 - OpenCode Go OpenAI-compatible Chat Completions models
-- Minimax OpenAI-compatible API where available
+- MiniMax API via `MINIMAX_API_KEY` and default server `https://api.minimax.io/v1`
 
 Anthropic-compatible APIs are deferred until the OpenAI-compatible provider and generic tool loop are stable.
 

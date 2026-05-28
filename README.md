@@ -19,7 +19,7 @@ Status: early MVP. Useful for real work, still evolving.
 - OpenAI Codex / ChatGPT OAuth provider
 - OpenAI-compatible Chat Completions provider
 - OpenCode Go preset
-- Minimax provider preset
+- MiniMax provider preset
 - Built-in tools:
   - `read`
   - `write`
@@ -171,11 +171,12 @@ export OPENAI_BASE_URL=https://api.openai.com/v1
 ferrum --provider openai --model gpt-4.1 -p "hello"
 ```
 
-### Minimax
+### MiniMax
+
+Ferrum reads a MiniMax API key from `MINIMAX_API_KEY`. The default base URL is `https://api.minimax.io/v1`; override it with `MINIMAX_BASE_URL` if needed.
 
 ```bash
 export MINIMAX_API_KEY=...
-export MINIMAX_BASE_URL=...
 ferrum --provider minimax --model <model> -p "hello"
 ```
 
