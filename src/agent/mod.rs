@@ -149,7 +149,7 @@ impl AgentState {
             let response = provider
                 .complete(&config.model, &self.messages, &tools, config.thinking)
                 .await?;
-            print!("{}", response.text_content());
+            print!("{}", response.display_text());
             io::stdout().flush()?;
             self.session.append_message(&response)?;
 

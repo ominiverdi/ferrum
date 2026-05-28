@@ -51,4 +51,42 @@ impl Message {
             .collect::<Vec<_>>()
             .join("")
     }
+
+    pub fn display_text(&self) -> String {
+        strip_think_blocks(&self.text_content())
+    }
+}
+
+pub fn strip_think_blocks(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+
+    loop {
+        let Some(start) = rest.find("<think>") else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(&rest[..start]);
+        let after_start = &rest[start + "<think>".len()..];
+        let Some(end) = after_start.find("</think>") else {
+            break;
+        };
+        rest = &after_start[end + "</think>".len()..];
+    }
+
+    output.trim_start().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_think_blocks;
+
+    #[test]
+    fn strips_think_blocks() {
+        assert_eq!(
+            strip_think_blocks("<think>hidden</think>\n\nvisible"),
+            "visible"
+        );
+        assert_eq!(strip_think_blocks("a<think>b</think>c"), "ac");
+    }
 }
