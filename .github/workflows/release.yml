@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  linux-binary:
+    name: Linux x86_64 binary
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="x86_64-unknown-linux-gnu"
+          version="${GITHUB_REF_NAME}"
+          package="ferrum-${version}-${target}"
+          mkdir -p "${package}"
+          cp target/release/ferrum "${package}/"
+          cp README.md LICENSE "${package}/"
+          tar -czf "${package}.tar.gz" "${package}"
+          sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ferrum-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+            ferrum-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz.sha256
