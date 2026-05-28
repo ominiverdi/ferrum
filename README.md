@@ -31,17 +31,30 @@ Status: early MVP. Useful for real work, still evolving.
 
 ## Install
 
-From source:
+### Linux binary
+
+Download the latest release asset from GitHub:
+
+```bash
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.2.1/ferrum-v0.2.1-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.2.1-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+ferrum --help
+```
+
+Optional checksum verification:
+
+```bash
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.2.1/ferrum-v0.2.1-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.2.1/ferrum-v0.2.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.2.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+```
+
+### From source
 
 ```bash
 git clone https://github.com/ominiverdi/ferrum.git
 cd ferrum
 cargo install --path .
-```
-
-Then:
-
-```bash
 ferrum --help
 ```
 
