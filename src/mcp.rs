@@ -1,0 +1,278 @@
+use crate::{agent::tools::ToolDefinition, config::McpServerConfig};
+use anyhow::{Context, Result};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{collections::HashMap, process::Stdio};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin, ChildStdout, Command},
+};
+
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+const MAX_MCP_OUTPUT_CHARS: usize = 20_000;
+
+pub struct McpManager {
+    servers: Vec<McpServer>,
+    tools: Vec<ToolDefinition>,
+    tool_routes: HashMap<String, (usize, String)>,
+}
+
+impl McpManager {
+    pub async fn start(configs: &[McpServerConfig]) -> Result<Self> {
+        let mut servers = Vec::new();
+        let mut tools = Vec::new();
+        let mut tool_routes = HashMap::new();
+
+        for server_config in configs.iter().filter(|server| server.enabled) {
+            let mut server = McpServer::start(server_config).await?;
+            let server_index = servers.len();
+            for tool in server.list_tools().await? {
+                let exposed_name = format!(
+                    "mcp__{}__{}",
+                    sanitize_name(&server_config.name),
+                    sanitize_name(&tool.name)
+                );
+                tool_routes.insert(exposed_name.clone(), (server_index, tool.name.clone()));
+                tools.push(ToolDefinition {
+                    name: exposed_name,
+                    description: format!(
+                        "MCP tool `{}` from server `{}`. {}",
+                        tool.name,
+                        server_config.name,
+                        tool.description.unwrap_or_default()
+                    ),
+                    input_schema: tool
+                        .input_schema
+                        .unwrap_or_else(|| json!({"type":"object"})),
+                });
+            }
+            servers.push(server);
+        }
+
+        Ok(Self {
+            servers,
+            tools,
+            tool_routes,
+        })
+    }
+
+    pub fn definitions(&self) -> &[ToolDefinition] {
+        &self.tools
+    }
+
+    pub fn has_tool(&self, name: &str) -> bool {
+        self.tool_routes.contains_key(name)
+    }
+
+    pub async fn call(&mut self, exposed_name: &str, arguments: &Value) -> Result<String> {
+        let (server_index, tool_name) = self
+            .tool_routes
+            .get(exposed_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown MCP tool: {exposed_name}"))?;
+        self.servers[server_index]
+            .call_tool(&tool_name, arguments)
+            .await
+    }
+}
+
+struct McpServer {
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    _child: Child,
+    next_id: u64,
+}
+
+impl McpServer {
+    async fn start(config: &McpServerConfig) -> Result<Self> {
+        let mut child = Command::new(&config.command)
+            .args(&config.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start MCP server `{}`", config.name))?;
+
+        let stdin = child
+            .stdin
+            .take()
+            .context("MCP server stdin was not piped")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("MCP server stdout was not piped")?;
+        let mut server = Self {
+            stdin,
+            stdout: BufReader::new(stdout),
+            _child: child,
+            next_id: 1,
+        };
+        server.initialize().await?;
+        Ok(server)
+    }
+
+    async fn initialize(&mut self) -> Result<()> {
+        self.request(
+            "initialize",
+            json!({
+                "protocolVersion": MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "ferrum",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }),
+        )
+        .await?;
+        self.notification("notifications/initialized", json!({}))
+            .await
+    }
+
+    async fn list_tools(&mut self) -> Result<Vec<McpTool>> {
+        let value = self.request("tools/list", json!({})).await?;
+        serde_json::from_value::<McpToolsListResult>(value)
+            .map(|result| result.tools)
+            .context("failed to parse MCP tools/list response")
+    }
+
+    async fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String> {
+        let value = self
+            .request(
+                "tools/call",
+                json!({
+                    "name": name,
+                    "arguments": arguments,
+                }),
+            )
+            .await?;
+        Ok(truncate_output(render_tool_result(&value)))
+    }
+
+    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+        .await?;
+
+        loop {
+            let message = self.read_message().await?;
+            if message.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = message.get("error") {
+                anyhow::bail!("MCP {method} failed: {error}");
+            }
+            return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    async fn notification(&mut self, method: &str, params: Value) -> Result<()> {
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }))
+        .await
+    }
+
+    async fn write_message(&mut self, message: &Value) -> Result<()> {
+        let body = serde_json::to_vec(message)?;
+        self.stdin
+            .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+            .await?;
+        self.stdin.write_all(&body).await?;
+        self.stdin.flush().await?;
+        Ok(())
+    }
+
+    async fn read_message(&mut self) -> Result<Value> {
+        let mut content_length = None;
+        loop {
+            let mut line = String::new();
+            let bytes = self.stdout.read_line(&mut line).await?;
+            if bytes == 0 {
+                anyhow::bail!("MCP server closed stdout");
+            }
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break;
+            }
+            if let Some(value) = trimmed.strip_prefix("Content-Length:") {
+                content_length = Some(value.trim().parse::<usize>()?);
+            }
+        }
+
+        let len = content_length.context("MCP message missing Content-Length")?;
+        let mut body = vec![0; len];
+        self.stdout.read_exact(&mut body).await?;
+        serde_json::from_slice(&body).context("failed to parse MCP JSON-RPC message")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct McpToolsListResult {
+    tools: Vec<McpTool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpTool {
+    name: String,
+    description: Option<String>,
+    #[serde(rename = "inputSchema")]
+    input_schema: Option<Value>,
+}
+
+fn render_tool_result(value: &Value) -> String {
+    if let Some(content) = value.get("content").and_then(Value::as_array) {
+        let mut text = String::new();
+        for item in content {
+            if item.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(part) = item.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(part);
+                }
+            }
+        }
+        if !text.is_empty() {
+            return text;
+        }
+    }
+    value.to_string()
+}
+
+fn truncate_output(mut output: String) -> String {
+    if output.chars().count() <= MAX_MCP_OUTPUT_CHARS {
+        return output;
+    }
+    let tail = output
+        .chars()
+        .rev()
+        .take(MAX_MCP_OUTPUT_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    output.clear();
+    output.push_str("[truncated MCP output]\n");
+    output.push_str(&tail);
+    output
+}
+
+fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}

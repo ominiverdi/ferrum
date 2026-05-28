@@ -19,6 +19,12 @@ provider = "openai-codex"
 model = "gpt-5.3-codex"
 max_context_tokens = 256000
 thinking = "off"
+
+[[mcp.servers]]
+name = "example"
+command = "example-mcp-server"
+args = []
+enabled = true
 ```
 
 ### provider
@@ -84,6 +90,26 @@ Interactive:
 
 ```text
 /thinking high
+```
+
+## MCP servers
+
+Ferrum supports MCP stdio servers configured in TOML:
+
+```toml
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/ominiverdi/github"]
+enabled = true
+```
+
+Only stdio MCP is supported initially. HTTP/SSE MCP is not implemented.
+
+Discovered MCP tools are exposed with namespaced names:
+
+```text
+mcp__filesystem__read_file
 ```
 
 ## Environment variables

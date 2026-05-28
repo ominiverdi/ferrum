@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod config;
 mod context;
+mod mcp;
 mod providers;
 mod session;
 mod tools;

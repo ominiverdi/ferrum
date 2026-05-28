@@ -10,6 +10,17 @@ pub struct Config {
     pub offline: bool,
     pub max_context_tokens: usize,
     pub thinking: ThinkingLevel,
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,6 +89,13 @@ struct FileConfig {
     provider: Option<String>,
     max_context_tokens: Option<usize>,
     thinking: Option<String>,
+    mcp: Option<FileMcpConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FileMcpConfig {
+    #[serde(default)]
+    servers: Vec<McpServerConfig>,
 }
 
 impl Config {
@@ -118,6 +136,7 @@ impl Config {
                 .map(ThinkingLevel::parse)
                 .transpose()?
                 .unwrap_or(ThinkingLevel::Off),
+            mcp_servers: file_config.mcp.map(|mcp| mcp.servers).unwrap_or_default(),
         })
     }
 
@@ -154,6 +173,10 @@ impl Config {
     pub fn auth_path(&self) -> PathBuf {
         self.config_dir.join("auth.json")
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn provider_from_name(name: &str, config_dir: &std::path::Path) -> Result<ProviderConfig> {

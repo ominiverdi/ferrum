@@ -2,6 +2,8 @@
 
 Ferrum tools are provider-neutral. Providers only translate tool definitions and tool calls to/from their API format. Execution happens in the core agent loop.
 
+Native tools are always available. MCP stdio tools can be added through config and are exposed as `mcp__<server>__<tool>`.
+
 ## read
 
 Read a text file.

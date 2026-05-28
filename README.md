@@ -15,6 +15,7 @@ Current status: early MVP. Useful, but not hardened.
 - Minimax OpenAI-compatible preset
 - JSONL sessions with resume
 - AGENTS.md context loading
+- Minimal MCP stdio tool bridge
 - Built-in tools:
   - `read`
   - `write`
@@ -53,6 +54,12 @@ provider = "openai-codex"
 model = "gpt-5.3-codex"
 max_context_tokens = 256000
 thinking = "off"
+
+[[mcp.servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/ominiverdi/github"]
+enabled = true
 ```
 
 Thinking levels:
@@ -210,6 +217,7 @@ Docs:
 - `docs/config.md`
 - `docs/tools.md`
 - `docs/sessions.md`
+- `docs/mcp.md`
 
 ## License
 

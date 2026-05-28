@@ -28,7 +28,7 @@ Do not commit:
 Update `Cargo.toml`:
 
 ```toml
-version = "0.1.0"
+version = "0.2.0"
 ```
 
 ## License
@@ -38,6 +38,6 @@ Ferrum is MIT licensed. See `LICENSE`.
 ## Suggested tag
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```

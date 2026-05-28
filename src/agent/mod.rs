@@ -1,7 +1,7 @@
 pub mod messages;
 pub mod tools;
 
-use crate::{config::Config, context, providers, session, tools as builtin_tools};
+use crate::{config::Config, context, mcp, providers, session, tools as builtin_tools};
 use anyhow::Result;
 use rustyline::{DefaultEditor, error::ReadlineError};
 use std::{
@@ -79,6 +79,7 @@ struct AgentState {
     session: session::JsonlSession,
     messages: Vec<messages::Message>,
     cwd: std::path::PathBuf,
+    mcp: Option<mcp::McpManager>,
 }
 
 impl AgentState {
@@ -95,6 +96,7 @@ impl AgentState {
             session: session::JsonlSession::create(config.sessions_dir())?,
             messages,
             cwd,
+            mcp: None,
         })
     }
 
@@ -112,6 +114,7 @@ impl AgentState {
             session: session::JsonlSession::open(path)?,
             messages,
             cwd,
+            mcp: None,
         })
     }
 
@@ -135,8 +138,12 @@ impl AgentState {
         self.session.append_message(&user)?;
         self.messages.push(user);
 
+        self.ensure_mcp(config).await?;
         let provider = providers::from_config(&config.provider);
-        let tools = builtin_tools::definitions();
+        let mut tools = builtin_tools::definitions();
+        if let Some(mcp) = &self.mcp {
+            tools.extend_from_slice(mcp.definitions());
+        }
 
         for _ in 0..8 {
             let response = provider
@@ -164,11 +171,10 @@ impl AgentState {
 
             for (id, name, input) in tool_uses {
                 eprintln!("\n[tool] {name} {input}");
-                let (content, is_error) =
-                    match builtin_tools::execute(&name, &input, &self.cwd).await {
-                        Ok(output) => (output, false),
-                        Err(error) => (error.to_string(), true),
-                    };
+                let (content, is_error) = match self.execute_tool(&name, &input).await {
+                    Ok(output) => (output, false),
+                    Err(error) => (error.to_string(), true),
+                };
                 let result = messages::Message {
                     role: messages::Role::Tool,
                     content: vec![messages::ContentBlock::ToolResult {
@@ -183,6 +189,22 @@ impl AgentState {
         }
 
         anyhow::bail!("agent loop exceeded maximum tool iterations")
+    }
+
+    async fn ensure_mcp(&mut self, config: &Config) -> Result<()> {
+        if self.mcp.is_none() && !config.mcp_servers.is_empty() {
+            self.mcp = Some(mcp::McpManager::start(&config.mcp_servers).await?);
+        }
+        Ok(())
+    }
+
+    async fn execute_tool(&mut self, name: &str, input: &serde_json::Value) -> Result<String> {
+        if let Some(mcp) = &mut self.mcp {
+            if mcp.has_tool(name) {
+                return mcp.call(name, input).await;
+            }
+        }
+        builtin_tools::execute(name, input, &self.cwd).await
     }
 
     fn stats(&self) -> SessionStats {
