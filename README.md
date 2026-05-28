@@ -19,7 +19,7 @@ Status: early MVP. Useful for real work, still evolving.
 - OpenAI Codex / ChatGPT OAuth provider
 - OpenAI-compatible Chat Completions provider
 - OpenCode Go preset
-- Minimax OpenAI-compatible preset
+- Minimax provider preset
 - Built-in tools:
   - `read`
   - `write`

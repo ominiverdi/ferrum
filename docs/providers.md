@@ -73,7 +73,7 @@ ferrum --provider openai --model gpt-4.1 -p "hello"
 
 ## Minimax
 
-Ferrum currently treats Minimax as OpenAI-compatible when pointed at a compatible endpoint:
+Ferrum currently supports Minimax through its OpenAI-compatible endpoint:
 
 ```bash
 export MINIMAX_API_KEY=...
