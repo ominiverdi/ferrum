@@ -41,13 +41,12 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
                     continue;
                 }
                 let _ = rl.add_history_entry(input);
-                let (prompt, image_paths) = extract_pasted_images(input, &state.cwd);
-                if !image_paths.is_empty() {
-                    match state.attach_images(image_paths) {
-                        Ok(()) => {
-                            if prompt.trim().is_empty() {
-                                continue;
-                            }
+                if is_slash_command(input) {
+                    match handle_command(input, config, &mut state) {
+                        Ok(CommandAction::Continue) => continue,
+                        Ok(CommandAction::Quit) => {
+                            let _ = rl.save_history(&history);
+                            return Ok(());
                         }
                         Err(error) => {
                             eprintln!("Error: {error}");
@@ -55,12 +54,13 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
                         }
                     }
                 }
-                if prompt.starts_with('/') {
-                    match handle_command(&prompt, config, &mut state) {
-                        Ok(CommandAction::Continue) => continue,
-                        Ok(CommandAction::Quit) => {
-                            let _ = rl.save_history(&history);
-                            return Ok(());
+                let (prompt, image_paths) = extract_pasted_images(input, &state.cwd);
+                if !image_paths.is_empty() {
+                    match state.attach_images(image_paths) {
+                        Ok(()) => {
+                            if prompt.trim().is_empty() {
+                                continue;
+                            }
                         }
                         Err(error) => {
                             eprintln!("Error: {error}");
@@ -291,6 +291,21 @@ impl AgentState {
         ));
         Ok(())
     }
+}
+
+fn is_slash_command(input: &str) -> bool {
+    matches!(
+        input.split_whitespace().next().unwrap_or(""),
+        "/quit"
+            | "/exit"
+            | "/help"
+            | "/session"
+            | "/model"
+            | "/provider"
+            | "/thinking"
+            | "/image"
+            | "/compact"
+    )
 }
 
 fn extract_pasted_images(input: &str, cwd: &Path) -> (String, Vec<String>) {
