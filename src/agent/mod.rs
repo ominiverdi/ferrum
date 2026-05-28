@@ -37,7 +37,12 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
         match rl.readline("ferrum> ") {
             Ok(line) => {
                 let input = line.trim();
-                if input.is_empty() || input == "\u{16}" {
+                if input.is_empty() {
+                    continue;
+                }
+                let input_with_clipboard_paths = replace_paste_image_triggers(input);
+                let input = input_with_clipboard_paths.trim();
+                if input.is_empty() {
                     continue;
                 }
                 let _ = rl.add_history_entry(input);
@@ -218,6 +223,14 @@ impl AgentState {
         anyhow::bail!("agent loop exceeded maximum tool iterations")
     }
 
+    fn attach_clipboard_image(&mut self) -> Result<()> {
+        let image = read_clipboard_image()?;
+        preview_attached_image(None, &image);
+        self.pending_images.push(image);
+        eprintln!("[image] attached clipboard image");
+        Ok(())
+    }
+
     fn attach_images(&mut self, specs: Vec<String>) -> Result<()> {
         for spec in specs {
             if spec.starts_with("data:image/") {
@@ -293,6 +306,25 @@ impl AgentState {
     }
 }
 
+fn replace_paste_image_triggers(input: &str) -> String {
+    let mut output = input.to_string();
+    for trigger in ["\u{16}", "\u{1b}[118;6u", "[118;6u"] {
+        while output.contains(trigger) {
+            match save_clipboard_image_to_temp() {
+                Ok(path) => {
+                    eprintln!("[image] clipboard saved as {}", path.display());
+                    output = output.replacen(trigger, &format!(" {} ", path.display()), 1);
+                }
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    output = output.replacen(trigger, " ", 1);
+                }
+            }
+        }
+    }
+    output
+}
+
 fn is_slash_command(input: &str) -> bool {
     matches!(
         input.split_whitespace().next().unwrap_or(""),
@@ -304,6 +336,7 @@ fn is_slash_command(input: &str) -> bool {
             | "/provider"
             | "/thinking"
             | "/image"
+            | "/paste-image"
             | "/compact"
     )
 }
@@ -339,6 +372,96 @@ fn looks_like_image_path(path: &str) -> bool {
                 || lower.contains(".jpg")
                 || lower.contains(".jpeg")
                 || lower.contains(".webp"))
+}
+
+fn read_clipboard_image() -> Result<messages::ContentBlock> {
+    let (mime_type, data) = read_clipboard_image_bytes()?;
+    messages::image_from_bytes(mime_type, data, "clipboard".to_string())
+}
+
+fn save_clipboard_image_to_temp() -> Result<PathBuf> {
+    let (mime_type, data) = read_clipboard_image_bytes()?;
+    let image = messages::image_from_bytes(mime_type, data, "clipboard".to_string())?;
+    let messages::ContentBlock::Image {
+        mime_type,
+        data_base64,
+        sha256,
+        ..
+    } = image
+    else {
+        anyhow::bail!("clipboard did not contain an image")
+    };
+    let path = std::env::temp_dir().join(format!(
+        "ferrum-clipboard-{}.{}",
+        &sha256[..12],
+        messages::image_extension(&mime_type)
+    ));
+    let bytes = STANDARD
+        .decode(data_base64)
+        .context("failed to decode clipboard image")?;
+    fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(path)
+}
+
+fn read_clipboard_image_bytes() -> Result<(String, Vec<u8>)> {
+    let x11 =
+        std::env::var("XDG_SESSION_TYPE").is_ok_and(|value| value.eq_ignore_ascii_case("x11"));
+    let xclip_attempts: &[(&str, &[&str], &str)] = &[
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/png", "-o"],
+            "image/png",
+        ),
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/jpeg", "-o"],
+            "image/jpeg",
+        ),
+        (
+            "xclip",
+            &["-selection", "clipboard", "-t", "image/webp", "-o"],
+            "image/webp",
+        ),
+    ];
+    let wayland_attempts: &[(&str, &[&str], &str)] = &[
+        (
+            "wl-paste",
+            &["--no-newline", "--type", "image/png"],
+            "image/png",
+        ),
+        (
+            "wl-paste",
+            &["--no-newline", "--type", "image/jpeg"],
+            "image/jpeg",
+        ),
+        (
+            "wl-paste",
+            &["--no-newline", "--type", "image/webp"],
+            "image/webp",
+        ),
+    ];
+
+    let attempts = if x11 {
+        [xclip_attempts, wayland_attempts].concat()
+    } else {
+        [wayland_attempts, xclip_attempts].concat()
+    };
+
+    for (command, args, mime_type) in attempts {
+        if !command_exists(command) {
+            continue;
+        }
+        let Ok(output) = Command::new(command).args(args).output() else {
+            continue;
+        };
+        if output.status.success() && !output.stdout.is_empty() {
+            return Ok((mime_type.to_string(), output.stdout));
+        }
+    }
+
+    anyhow::bail!(
+        "could not read image from clipboard; install wl-clipboard or xclip, or use /image <path>"
+    )
 }
 
 fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
@@ -448,6 +571,7 @@ fn handle_command(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
             println!("  /image <path>         attach image to next message");
+            println!("  /paste-image          attach image from clipboard");
             println!("  /compact              compact current in-memory conversation");
             Ok(CommandAction::Continue)
         }
@@ -492,6 +616,11 @@ fn handle_command(
                 .ok_or_else(|| anyhow::anyhow!("usage: /image <path>"))?;
             state.attach_images(vec![path.to_string()])?;
             println!("attached image: {path}");
+            Ok(CommandAction::Continue)
+        }
+        "/paste-image" => {
+            state.attach_clipboard_image()?;
+            println!("attached clipboard image");
             Ok(CommandAction::Continue)
         }
         "/compact" => {

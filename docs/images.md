@@ -40,6 +40,12 @@ Attach an image to the next message:
 /image ./screenshot.png
 ```
 
+Attach the current clipboard image:
+
+```text
+/paste-image
+```
+
 Then send the prompt:
 
 ```text
@@ -50,7 +56,7 @@ You can also paste one or more image file paths directly into the prompt. Ferrum
 
 If your terminal or file manager pastes images as `data:image/...;base64,...`, Ferrum creates a temporary preview file on the fly and attaches the image.
 
-Raw clipboard pixel data cannot be read from a plain terminal unless the terminal converts it to a path or data URI.
+If your terminal sends Ctrl+V as a key sequence instead of text, Ferrum attempts to read the clipboard image with `xclip` on X11 or `wl-paste` on Wayland, writes it to `/tmp/ferrum-clipboard-<hash>.<ext>`, and processes that generated path like a normal pasted image path.
 
 ## Preview
 

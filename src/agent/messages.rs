@@ -110,7 +110,7 @@ pub fn image_from_path(path: &Path) -> Result<ContentBlock> {
     image_from_bytes(mime_type, data, path.display().to_string())
 }
 
-fn image_from_bytes(mime_type: String, data: Vec<u8>, source: String) -> Result<ContentBlock> {
+pub fn image_from_bytes(mime_type: String, data: Vec<u8>, source: String) -> Result<ContentBlock> {
     if data.len() > MAX_IMAGE_BYTES {
         anyhow::bail!(
             "image is too large: {} bytes > {} bytes",
