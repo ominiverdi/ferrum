@@ -2,7 +2,7 @@
 
 Ferrum is a small Rust-native coding agent for Linux.
 
-It provides a simple CLI, local file and shell tools, image input, JSONL sessions, AGENTS.md context loading, OpenAI-compatible providers, ChatGPT/Codex OAuth, and a minimal MCP stdio bridge.
+It provides a simple CLI, local file and shell tools, image input, JSONL sessions, AGENTS.md context loading, configurable OpenAI-compatible providers, ChatGPT/Codex OAuth, Agent Skills, and a minimal MCP stdio bridge.
 
 Ferrum is inspired by Pi's agent-harness ideas, but it is a separate Rust project. It does not aim to support Pi extensions, packages, themes, or SDK compatibility.
 
@@ -19,17 +19,10 @@ Status: early MVP. Useful for real work, still evolving.
 - Agent Skills-style instruction packages
 - Minimal MCP stdio tool bridge
 - OpenAI Codex / ChatGPT OAuth provider
-- OpenAI-compatible Chat Completions provider
-- OpenCode Go preset
-- MiniMax provider preset
-- Built-in tools:
-  - `read`
-  - `write`
-  - `edit`
-  - `bash`
-  - `grep`
-  - `find`
-  - `ls`
+- OpenAI-compatible providers for remote APIs and local servers
+- Config-backed provider registry
+- Live model listing for supported providers
+- Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
 
 ## Install
 
@@ -92,117 +85,35 @@ Resume the latest session:
 ferrum --resume
 ```
 
-## Configuration
+## Minimal config
 
-Default config path:
-
-```text
-~/.config/ferrum/config.toml
-```
-
-Example:
+Ferrum reads config from `~/.config/ferrum/config.toml`.
 
 ```toml
 provider = "openai-codex"
-model = "gpt-5.3-codex"
-max_context_tokens = 256000
+model = "gpt-5.5"
 thinking = "off"
+max_context_tokens = 256000
 
 [providers.openai-codex]
 type = "openai-codex"
 base_url = "https://chatgpt.com/backend-api"
 default_model = "gpt-5.5"
 
-[providers.opencode-go]
+[providers.example-openai-compatible]
 type = "openai-compatible"
-base_url = "https://opencode.ai/zen/go/v1"
-api_key_env = "OPENCODE_API_KEY"
-default_model = "kimi-k2.6"
-
-[[mcp.servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/projects"]
-enabled = true
+base_url = "https://example.com/v1"
+api_key_env = "EXAMPLE_API_KEY"
+default_model = "example-model"
 ```
 
-Thinking levels:
-
-```text
-off|minimal|low|medium|high|xhigh
-```
-
-CLI overrides:
-
-```bash
-ferrum --provider opencode-go --model kimi-k2.6 --thinking minimal -p "hello"
-```
-
-## Providers
-
-### OpenAI Codex / ChatGPT subscription
-
-Login:
+Login for ChatGPT/Codex OAuth:
 
 ```bash
 ferrum login openai
 ```
 
-Config:
-
-```toml
-provider = "openai-codex"
-model = "gpt-5.3-codex"
-
-[providers.openai-codex]
-type = "openai-codex"
-base_url = "https://chatgpt.com/backend-api"
-default_model = "gpt-5.5"
-```
-
-### OpenCode Go
-
-Set an API key:
-
-```bash
-export OPENCODE_API_KEY=...
-```
-
-Run:
-
-```bash
-ferrum --provider opencode-go --model kimi-k2.6 -p "hello"
-```
-
-Default endpoint:
-
-```text
-https://opencode.ai/zen/go/v1
-```
-
-Optional overrides:
-
-```bash
-export OPENCODE_GO_BASE_URL=...
-export OPENCODE_GO_API_KEY_ENV=MY_KEY_ENV_NAME
-```
-
-### OpenAI-compatible
-
-```bash
-export OPENAI_API_KEY=...
-export OPENAI_BASE_URL=https://api.openai.com/v1
-ferrum --provider openai --model gpt-4.1 -p "hello"
-```
-
-### MiniMax
-
-Ferrum reads a MiniMax API key from `MINIMAX_API_KEY`. The default base URL is `https://api.minimax.io/v1`; override it with `MINIMAX_BASE_URL` if needed.
-
-```bash
-export MINIMAX_API_KEY=...
-ferrum --provider minimax --model <model> -p "hello"
-```
+OpenAI-compatible providers use environment-backed keys. Do not put secret values in `config.toml`.
 
 ## Interactive commands
 
@@ -215,92 +126,31 @@ ferrum --provider minimax --model <model> -p "hello"
 /providers
 /thinking [level]
 /image <path>
+/paste-image
+/skills
+/skill:<name> [args]
 /compact
 /quit
 ```
 
-## Images
-
-Ferrum supports local PNG, JPEG, and WebP attachments:
-
-```bash
-ferrum --image ./screenshot.png -p "describe this image"
-```
-
-In interactive mode, attach an image to the next message:
+Shell shortcuts:
 
 ```text
-/image ./screenshot.png
+!<cmd>   run shell command and send output to model
+!!<cmd>  run shell command and print output only
 ```
 
-Ferrum can also detect pasted image file paths and `data:image/...;base64,...` blocks. If `chafa` is installed, Ferrum renders a terminal preview; otherwise it prints image metadata.
+## Documentation
 
-See `docs/images.md` for details.
-
-## Skills
-
-Ferrum discovers Agent Skills-style packages globally and per project.
-
-Commands:
-
-```text
-/skills
-/skill <name> [args]
-/skill:<name> [args]
-```
-
-Skill locations:
-
-```text
-~/.config/ferrum/skills/
-~/.agents/skills/
-.ferrum/skills/
-.agents/skills/
-```
-
-See `docs/skills.md` for details.
-
-## MCP
-
-Ferrum supports local MCP stdio servers configured in `config.toml`.
-
-Example:
-
-```toml
-[[mcp.servers]]
-name = "filesystem"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/me/projects"]
-enabled = true
-```
-
-Discovered MCP tools are exposed as:
-
-```text
-mcp__<server>__<tool>
-```
-
-See `docs/mcp.md` for details.
-
-## Context files
-
-Ferrum loads `AGENTS.md` files in this order:
-
-1. `~/.config/ferrum/AGENTS.md`
-2. parent directories from filesystem root to cwd
-3. cwd `AGENTS.md`
-
-Files are deduplicated, bounded, and included in the system prompt.
-
-## Sessions
-
-Sessions are JSONL files under:
-
-```text
-~/.config/ferrum/sessions/
-```
-
-Use `/session` to view the current session path, message count, approximate token count, and file size.
+- Configuration: [`docs/config.md`](docs/config.md)
+- Providers: [`docs/providers.md`](docs/providers.md)
+- Tools: [`docs/tools.md`](docs/tools.md)
+- Sessions: [`docs/sessions.md`](docs/sessions.md)
+- Images: [`docs/images.md`](docs/images.md)
+- MCP: [`docs/mcp.md`](docs/mcp.md)
+- Skills: [`docs/skills.md`](docs/skills.md)
+- Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
+- Release process: [`docs/release.md`](docs/release.md)
 
 ## Safety notes
 
@@ -316,18 +166,6 @@ cargo fmt --check
 cargo test
 cargo build --release
 ```
-
-Docs:
-
-- `docs/spec.md`
-- `docs/roadmap.md`
-- `docs/providers.md`
-- `docs/config.md`
-- `docs/tools.md`
-- `docs/sessions.md`
-- `docs/images.md`
-- `docs/skills.md`
-- `docs/mcp.md`
 
 ## License
 
