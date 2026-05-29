@@ -68,6 +68,6 @@ Ferrum warns at 80% and compacts automatically at the configured limit.
 
 ## Compaction
 
-`/compact` currently creates a local summary from visible text and stores a `compaction` entry.
+`/compact` summarizes older conversation with the current provider/model, keeps recent context, and stores a `compaction` entry. The summary is loaded back as system context when the session is resumed.
 
-Future improvement: model-generated compaction summaries.
+Manual compaction is skipped when there is nothing old enough to summarize or when the resulting context would not be smaller. Automatic compaction can force a fallback local summary if model-generated compaction fails while the session is over budget.

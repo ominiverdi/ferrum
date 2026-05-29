@@ -6,12 +6,16 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustyline::{DefaultEditor, error::ReadlineError};
 use std::{
+    fmt::Write as FmtWrite,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant},
 };
+
+const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
+const COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 2_000;
 
 pub async fn run_print(prompt: String, images: Vec<String>, config: &Config) -> Result<()> {
     let mut state = AgentState::new(config)?;
@@ -78,6 +82,26 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
                                 println!("{marker} {model}");
                             }
                         }
+                        Err(error) => eprintln!("Error: {error}"),
+                    }
+                    continue;
+                }
+                if input == "/compact" || input.starts_with("/compact ") {
+                    let instructions = input.strip_prefix("/compact ").map(str::trim);
+                    match state.compact(config, instructions, false).await {
+                        Ok(CompactionOutcome::Compacted {
+                            before_tokens,
+                            after_tokens,
+                        }) => println!(
+                            "conversation compacted: {before_tokens} -> {after_tokens} estimated tokens"
+                        ),
+                        Ok(CompactionOutcome::Skipped {
+                            before_tokens,
+                            after_tokens,
+                            reason,
+                        }) => println!(
+                            "compaction skipped: {reason} ({before_tokens} -> {after_tokens} estimated tokens)"
+                        ),
                         Err(error) => eprintln!("Error: {error}"),
                     }
                     continue;
@@ -232,7 +256,18 @@ impl AgentState {
                 "[session] estimated context {} tokens exceeds limit {}; compacting",
                 stats.estimated_tokens, config.max_context_tokens
             );
-            self.compact()?;
+            let outcome = self.compact(config, None, true).await?;
+            match outcome {
+                CompactionOutcome::Compacted {
+                    before_tokens,
+                    after_tokens,
+                } => eprintln!(
+                    "[session] compacted context: {before_tokens} -> {after_tokens} estimated tokens"
+                ),
+                CompactionOutcome::Skipped { reason, .. } => {
+                    eprintln!("[session] compaction skipped: {reason}")
+                }
+            }
         } else if stats.estimated_tokens >= warn_tokens {
             eprintln!(
                 "[session] estimated context {} tokens is near limit {}",
@@ -371,26 +406,259 @@ impl AgentState {
         skills::expand_skill_prompt(skill, args)
     }
 
-    fn compact(&mut self) -> Result<()> {
-        let mut summary = String::new();
-        for message in self
+    async fn compact(
+        &mut self,
+        config: &Config,
+        custom_instructions: Option<&str>,
+        force: bool,
+    ) -> Result<CompactionOutcome> {
+        let before_tokens = estimated_tokens_for_messages(&self.messages);
+        let (system_messages, conversation): (Vec<_>, Vec<_>) = self
             .messages
             .iter()
-            .filter(|m| !matches!(m.role, messages::Role::System))
-        {
-            let text = message.text_content();
-            if !text.trim().is_empty() {
-                summary.push_str(&format!("{:?}: {}\n", message.role, text.trim()));
-            }
+            .cloned()
+            .partition(|message| matches!(message.role, messages::Role::System));
+
+        if conversation.is_empty() {
+            return Ok(CompactionOutcome::Skipped {
+                before_tokens,
+                after_tokens: before_tokens,
+                reason: "no conversation messages to compact".to_string(),
+            });
         }
-        self.messages
-            .retain(|m| matches!(m.role, messages::Role::System));
-        self.session.append_compaction(&summary)?;
-        self.messages.push(messages::Message::text(
+
+        let keep_recent_tokens = COMPACTION_KEEP_RECENT_TOKENS.min(config.max_context_tokens / 2);
+        let split_index = split_for_compaction(&conversation, keep_recent_tokens.max(1));
+        let (to_summarize, recent) = conversation.split_at(split_index);
+        if to_summarize.is_empty() {
+            return Ok(CompactionOutcome::Skipped {
+                before_tokens,
+                after_tokens: before_tokens,
+                reason: "conversation is already within recent-context budget".to_string(),
+            });
+        }
+
+        let summary = match self
+            .generate_compaction_summary(config, to_summarize, custom_instructions)
+            .await
+        {
+            Ok(summary) if !summary.trim().is_empty() => summary,
+            Ok(_) => anyhow::bail!("compaction summary was empty"),
+            Err(error) if force => {
+                eprintln!(
+                    "[session] model compaction failed: {error}; using local fallback summary"
+                );
+                local_compaction_summary(to_summarize, custom_instructions)
+            }
+            Err(error) => return Err(error).context("model compaction failed"),
+        };
+
+        let summary_message = messages::Message::text(
             messages::Role::System,
-            format!("Conversation summary before compaction:\n{}", summary),
-        ));
-        Ok(())
+            format!(
+                "The conversation history before this point was compacted into the following summary:\n\n<summary>\n{}\n</summary>",
+                summary.trim()
+            ),
+        );
+
+        let mut compacted_messages = system_messages;
+        compacted_messages.push(summary_message.clone());
+        compacted_messages.extend(recent.iter().cloned());
+        let after_tokens = estimated_tokens_for_messages(&compacted_messages);
+
+        if !force && after_tokens >= before_tokens {
+            return Ok(CompactionOutcome::Skipped {
+                before_tokens,
+                after_tokens,
+                reason: "summary would not reduce context".to_string(),
+            });
+        }
+
+        self.session.append_compaction(summary.trim())?;
+        self.messages = compacted_messages;
+        Ok(CompactionOutcome::Compacted {
+            before_tokens,
+            after_tokens,
+        })
+    }
+
+    async fn generate_compaction_summary(
+        &self,
+        config: &Config,
+        messages: &[messages::Message],
+        custom_instructions: Option<&str>,
+    ) -> Result<String> {
+        let provider = providers::from_config(&config.provider);
+        let prompt = compaction_prompt(messages, custom_instructions);
+        let request_messages = vec![
+            messages::Message::text(
+                messages::Role::System,
+                "You are a context summarization assistant. Read the conversation transcript and produce only the requested structured summary. Do not continue the conversation.",
+            ),
+            messages::Message::text(messages::Role::User, prompt),
+        ];
+        let response = provider
+            .complete(&config.model, &request_messages, &[], config.thinking)
+            .await?;
+        Ok(response.text_content())
+    }
+}
+
+#[derive(Debug)]
+enum CompactionOutcome {
+    Compacted {
+        before_tokens: usize,
+        after_tokens: usize,
+    },
+    Skipped {
+        before_tokens: usize,
+        after_tokens: usize,
+        reason: String,
+    },
+}
+
+fn split_for_compaction(messages: &[messages::Message], keep_recent_tokens: usize) -> usize {
+    let mut accumulated = 0usize;
+    for (index, message) in messages.iter().enumerate().rev() {
+        accumulated = accumulated.saturating_add(estimated_tokens_for_message(message));
+        if accumulated >= keep_recent_tokens {
+            return index;
+        }
+    }
+    0
+}
+
+fn estimated_tokens_for_messages(messages: &[messages::Message]) -> usize {
+    messages
+        .iter()
+        .map(estimated_tokens_for_message)
+        .sum::<usize>()
+}
+
+fn estimated_tokens_for_message(message: &messages::Message) -> usize {
+    message_text_for_compaction(message)
+        .chars()
+        .count()
+        .div_ceil(4)
+}
+
+fn compaction_prompt(messages: &[messages::Message], custom_instructions: Option<&str>) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("<conversation>\n");
+    for message in messages {
+        let text = message_text_for_compaction(message);
+        if !text.trim().is_empty() {
+            let _ = writeln!(prompt, "{}\n", text.trim());
+        }
+    }
+    prompt.push_str("</conversation>\n\n");
+    prompt.push_str(
+        "The messages above are a conversation to summarize. Create a structured context checkpoint summary that another coding assistant will use to continue the work.\n\n\
+Use this EXACT format:\n\n\
+## Goal\n\
+[What is the user trying to accomplish?]\n\n\
+## Constraints & Preferences\n\
+- [Constraints, preferences, requirements, or \"(none)\"]\n\n\
+## Progress\n\
+### Done\n\
+- [x] [Completed tasks/changes]\n\n\
+### In Progress\n\
+- [ ] [Current work]\n\n\
+### Blocked\n\
+- [Issues preventing progress, or \"(none)\"]\n\n\
+## Key Decisions\n\
+- **[Decision]**: [Brief rationale]\n\n\
+## Next Steps\n\
+1. [Ordered list of what should happen next]\n\n\
+## Critical Context\n\
+- [Exact file paths, commands, errors, provider/model details, or \"(none)\"]\n\n\
+Keep each section concise. Preserve exact file paths, function names, commands, and error messages.",
+    );
+    if let Some(instructions) = custom_instructions.filter(|value| !value.trim().is_empty()) {
+        prompt.push_str("\n\nAdditional focus:\n");
+        prompt.push_str(instructions.trim());
+    }
+    prompt
+}
+
+fn local_compaction_summary(
+    messages: &[messages::Message],
+    custom_instructions: Option<&str>,
+) -> String {
+    let mut summary = String::new();
+    summary.push_str("## Goal\n(unknown; model summarization failed)\n\n");
+    summary.push_str("## Constraints & Preferences\n- (unknown)\n\n");
+    summary.push_str("## Progress\n### Done\n");
+    for message in messages {
+        let text = message_text_for_compaction(message);
+        if !text.trim().is_empty() {
+            let _ = writeln!(
+                summary,
+                "- {:?}: {}",
+                message.role,
+                truncate_chars(text.trim(), 500)
+            );
+        }
+    }
+    summary.push_str("\n### In Progress\n- (unknown)\n\n");
+    summary.push_str("### Blocked\n- model-generated compaction failed\n\n");
+    summary.push_str("## Key Decisions\n- (unknown)\n\n");
+    summary.push_str("## Next Steps\n1. Continue from the retained recent conversation.\n\n");
+    summary.push_str("## Critical Context\n- This is a local fallback summary.\n");
+    if let Some(instructions) = custom_instructions.filter(|value| !value.trim().is_empty()) {
+        summary.push_str("- User compaction focus: ");
+        summary.push_str(instructions.trim());
+        summary.push('\n');
+    }
+    summary
+}
+
+fn message_text_for_compaction(message: &messages::Message) -> String {
+    let mut output = String::new();
+    let _ = writeln!(output, "[{:?}]", message.role);
+    for block in &message.content {
+        match block {
+            messages::ContentBlock::Text { text } if !text.trim().is_empty() => {
+                let _ = writeln!(output, "{}", text.trim());
+            }
+            messages::ContentBlock::ToolUse { name, input, .. } => {
+                let _ = writeln!(output, "tool_call: {name} {input}");
+            }
+            messages::ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                let label = if *is_error {
+                    "tool_error"
+                } else {
+                    "tool_result"
+                };
+                let _ = writeln!(
+                    output,
+                    "{label}: {}",
+                    truncate_chars(content.trim(), COMPACTION_TOOL_RESULT_MAX_CHARS)
+                );
+            }
+            messages::ContentBlock::Image {
+                mime_type,
+                sha256,
+                source,
+                ..
+            } => {
+                let _ = writeln!(output, "image: {source} ({mime_type}, sha256:{sha256})");
+            }
+            _ => {}
+        }
+    }
+    output
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}\n[truncated]")
+    } else {
+        truncated
     }
 }
 
@@ -827,9 +1095,7 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/compact" => {
-            state.compact()?;
-            println!("conversation compacted and persisted");
-            Ok(CommandAction::Continue)
+            anyhow::bail!("/compact is async; this command should be handled before sync commands")
         }
         _ => {
             println!("unknown command: {command}");

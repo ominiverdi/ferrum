@@ -203,6 +203,19 @@ Core loop:
 
 Provider adapters serialize and parse provider-specific payloads only. They do not execute tools.
 
+## Compaction
+
+Ferrum compaction is Pi-inspired but simpler:
+
+1. Preserve system messages.
+2. Keep recent non-system conversation, up to a recent-context token budget.
+3. Summarize older non-system messages with the current provider/model using a structured summary prompt.
+4. Store the summary as a `compaction` session entry and insert it as system context.
+5. For manual `/compact`, skip if there is nothing old enough to summarize or if the resulting context is not smaller.
+6. For automatic over-budget compaction, fall back to a local heuristic summary if model-generated compaction fails.
+
+The summary format tracks goal, constraints, progress, blockers, key decisions, next steps, and critical context.
+
 ## Normalized message model
 
 ```rust
