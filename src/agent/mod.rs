@@ -1,7 +1,7 @@
 pub mod messages;
 pub mod tools;
 
-use crate::{config::Config, context, mcp, providers, session, tools as builtin_tools};
+use crate::{config::Config, context, mcp, providers, session, skills, tools as builtin_tools};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustyline::{DefaultEditor, error::ReadlineError};
@@ -46,7 +46,20 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
                     continue;
                 }
                 let _ = rl.add_history_entry(input);
-                if is_slash_command(input) {
+                if input.starts_with('!') {
+                    match handle_bang_command(input, config, &mut state).await {
+                        Ok(CommandAction::Continue) => continue,
+                        Ok(CommandAction::Quit) => {
+                            let _ = rl.save_history(&history);
+                            return Ok(());
+                        }
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            continue;
+                        }
+                    }
+                }
+                if should_handle_as_command(input, &state.cwd) {
                     match handle_command(input, config, &mut state) {
                         Ok(CommandAction::Continue) => continue,
                         Ok(CommandAction::Quit) => {
@@ -107,6 +120,7 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
 struct AgentState {
     session: session::JsonlSession,
     messages: Vec<messages::Message>,
+    skills: Vec<skills::Skill>,
     cwd: std::path::PathBuf,
     mcp: Option<mcp::McpManager>,
     pending_images: Vec<messages::ContentBlock>,
@@ -122,9 +136,17 @@ impl AgentState {
                 system_context,
             ));
         }
+        let skills = skills::discover(&config.config_dir, &cwd)?;
+        if let Some(skill_context) = skills::render_available_skills(&skills) {
+            messages.push(messages::Message::text(
+                messages::Role::System,
+                skill_context,
+            ));
+        }
         Ok(Self {
             session: session::JsonlSession::create(config.sessions_dir())?,
             messages,
+            skills,
             cwd,
             mcp: None,
             pending_images: Vec::new(),
@@ -138,12 +160,20 @@ impl AgentState {
             None => session::jsonl::latest_session(&config.sessions_dir())?
                 .ok_or_else(|| anyhow::anyhow!("no sessions found"))?,
         };
-        let messages = session::jsonl::load_messages(&path)?;
+        let mut messages = session::jsonl::load_messages(&path)?;
         let count = messages.len();
         println!("resumed {} ({count} messages)", path.display());
+        let skills = skills::discover(&config.config_dir, &cwd)?;
+        if let Some(skill_context) = skills::render_available_skills(&skills) {
+            messages.push(messages::Message::text(
+                messages::Role::System,
+                skill_context,
+            ));
+        }
         Ok(Self {
             session: session::JsonlSession::open(path)?,
             messages,
+            skills,
             cwd,
             mcp: None,
             pending_images: Vec::new(),
@@ -330,20 +360,17 @@ fn replace_paste_image_triggers(input: &str) -> String {
     output
 }
 
-fn is_slash_command(input: &str) -> bool {
-    matches!(
-        input.split_whitespace().next().unwrap_or(""),
-        "/quit"
-            | "/exit"
-            | "/help"
-            | "/session"
-            | "/model"
-            | "/provider"
-            | "/thinking"
-            | "/image"
-            | "/paste-image"
-            | "/compact"
-    )
+fn should_handle_as_command(input: &str, cwd: &Path) -> bool {
+    let first = input.split_whitespace().next().unwrap_or("");
+    if first.is_empty() || !first.starts_with('/') {
+        return false;
+    }
+    if looks_like_image_path(first)
+        && builtin_tools::path::resolve_to_cwd(first, cwd).is_ok_and(|path| path.is_file())
+    {
+        return false;
+    }
+    true
 }
 
 fn extract_pasted_images(input: &str, cwd: &Path) -> (String, Vec<String>) {
@@ -557,6 +584,61 @@ enum CommandAction {
     Quit,
 }
 
+async fn handle_bang_command(
+    input: &str,
+    config: &Config,
+    state: &mut AgentState,
+) -> Result<CommandAction> {
+    let (send_to_model, command) = if let Some(command) = input.strip_prefix("!!") {
+        (false, command.trim())
+    } else if let Some(command) = input.strip_prefix('!') {
+        (true, command.trim())
+    } else {
+        unreachable!()
+    };
+
+    if command.is_empty() {
+        anyhow::bail!("usage: !<command> or !!<command>");
+    }
+
+    eprintln!("[bash] {command}");
+    let output = builtin_tools::bash::run(command, &state.cwd, Duration::from_secs(120)).await?;
+    let rendered = render_bash_output(command, &output);
+
+    if send_to_model {
+        state.run_turn(rendered, config).await?;
+        println!();
+    } else {
+        print!("{rendered}");
+        if !rendered.ends_with('\n') {
+            println!();
+        }
+    }
+
+    Ok(CommandAction::Continue)
+}
+
+fn render_bash_output(command: &str, output: &builtin_tools::bash::BashOutput) -> String {
+    format!(
+        "Shell command executed: `{}`\nstatus: {:?}\ntimed_out: {}\nstdout:\n{}\nstderr:\n{}",
+        command, output.status, output.timed_out, output.stdout, output.stderr
+    )
+}
+
+fn load_skill_command(state: &mut AgentState, name: &str, args: Option<&str>) -> Result<()> {
+    let skill = state
+        .skills
+        .iter()
+        .find(|skill| skill.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown skill: {name}"))?;
+    let message = skills::load_skill_message(skill, args)?;
+    let system = messages::Message::text(messages::Role::System, message);
+    state.session.append_message(&system)?;
+    state.messages.push(system);
+    println!("loaded skill: {}", skill.name);
+    Ok(())
+}
+
 fn handle_command(
     input: &str,
     config: &mut Config,
@@ -569,7 +651,11 @@ fn handle_command(
         "/help" => {
             println!("commands:");
             println!("  /quit | /exit          exit");
+            println!("  /version              show Ferrum version");
             println!("  /session              show session path/status/size");
+            println!("  /skills               list available skills");
+            println!("  /skill <name> [args]  load a skill into context");
+            println!("  /skill:<name> [args]  load a skill into context");
             println!("  /model [name]         show or set model");
             println!("  /provider [name]      show or set provider");
             println!(
@@ -577,7 +663,13 @@ fn handle_command(
             );
             println!("  /image <path>         attach image to next message");
             println!("  /paste-image          attach image from clipboard");
+            println!("  !<cmd>                run shell command and send output to model");
+            println!("  !!<cmd>               run shell command and print output only");
             println!("  /compact              compact current in-memory conversation");
+            Ok(CommandAction::Continue)
+        }
+        "/version" => {
+            println!("ferrum {}", env!("CARGO_PKG_VERSION"));
             Ok(CommandAction::Continue)
         }
         "/session" => {
@@ -589,9 +681,38 @@ fn handle_command(
             println!("max_context_tokens: {}", config.max_context_tokens);
             println!("file_bytes: {}", stats.file_bytes);
             println!("pending_images: {}", state.pending_images.len());
+            println!("skills: {}", state.skills.len());
             println!("model: {}", config.model);
             println!("thinking: {:?}", config.thinking);
             println!("provider: {:?}", config.provider);
+            Ok(CommandAction::Continue)
+        }
+        "/skills" => {
+            if state.skills.is_empty() {
+                println!("no skills found");
+            } else {
+                for skill in &state.skills {
+                    println!("{} - {}", skill.name, skill.description);
+                    println!("  {}", skill.path.display());
+                }
+            }
+            Ok(CommandAction::Continue)
+        }
+        "/skill" => {
+            let name = parts
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("usage: /skill <name> [args]"))?;
+            let args = parts.collect::<Vec<_>>().join(" ");
+            load_skill_command(state, name, (!args.is_empty()).then_some(args.as_str()))?;
+            Ok(CommandAction::Continue)
+        }
+        command if command.starts_with("/skill:") => {
+            let name = command.trim_start_matches("/skill:");
+            if name.is_empty() {
+                anyhow::bail!("usage: /skill:<name> [args]");
+            }
+            let args = parts.collect::<Vec<_>>().join(" ");
+            load_skill_command(state, name, (!args.is_empty()).then_some(args.as_str()))?;
             Ok(CommandAction::Continue)
         }
         "/model" => {

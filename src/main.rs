@@ -6,6 +6,7 @@ mod context;
 mod mcp;
 mod providers;
 mod session;
+mod skills;
 mod tools;
 
 use anyhow::Result;

@@ -16,6 +16,7 @@ Status: early MVP. Useful for real work, still evolving.
 - AGENTS.md context loading
 - Configurable context budget and thinking level
 - Image input with optional terminal previews
+- Agent Skills-style instruction packages
 - Minimal MCP stdio tool bridge
 - OpenAI Codex / ChatGPT OAuth provider
 - OpenAI-compatible Chat Completions provider
@@ -218,6 +219,29 @@ Ferrum can also detect pasted image file paths and `data:image/...;base64,...` b
 
 See `docs/images.md` for details.
 
+## Skills
+
+Ferrum discovers Agent Skills-style packages globally and per project.
+
+Commands:
+
+```text
+/skills
+/skill <name> [args]
+/skill:<name> [args]
+```
+
+Skill locations:
+
+```text
+~/.config/ferrum/skills/
+~/.agents/skills/
+.ferrum/skills/
+.agents/skills/
+```
+
+See `docs/skills.md` for details.
+
 ## MCP
 
 Ferrum supports local MCP stdio servers configured in `config.toml`.
@@ -284,6 +308,7 @@ Docs:
 - `docs/tools.md`
 - `docs/sessions.md`
 - `docs/images.md`
+- `docs/skills.md`
 - `docs/mcp.md`
 
 ## License
