@@ -192,6 +192,11 @@ fn provider_from_name(name: &str, config_dir: &std::path::Path) -> Result<Provid
             base_url: env::var("MINIMAX_BASE_URL")
                 .unwrap_or_else(|_| "https://api.minimax.io/v1".to_string()),
         }),
+        "llama" => Ok(ProviderConfig::OpenAiCompat {
+            api_key_env: "LLAMA_API_KEY".to_string(),
+            base_url: env::var("LLAMA_BASE_URL")
+                .unwrap_or_else(|_| "http://localhost:8080/v1".to_string()),
+        }),
         "opencode-go" => Ok(ProviderConfig::OpenAiCompat {
             api_key_env: env::var("OPENCODE_GO_API_KEY_ENV")
                 .unwrap_or_else(|_| "OPENCODE_API_KEY".to_string()),

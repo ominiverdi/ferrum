@@ -37,6 +37,7 @@ Supported values:
 - `openai-compatible`
 - `opencode-go`
 - `minimax`
+- `llama`
 
 ### model
 
@@ -150,3 +151,12 @@ MINIMAX_BASE_URL
 ```
 
 `MINIMAX_BASE_URL` defaults to `https://api.minimax.io/v1`.
+
+llama.cpp:
+
+```text
+LLAMA_API_KEY
+LLAMA_BASE_URL
+```
+
+`LLAMA_BASE_URL` defaults to `http://localhost:8080/v1`.

@@ -71,6 +71,28 @@ export OPENAI_BASE_URL=https://api.openai.com/v1
 ferrum --provider openai --model gpt-4.1 -p "hello"
 ```
 
+## llama.cpp (local)
+
+Requires a running llama.cpp server with its OpenAI-compatible endpoint enabled.
+
+```bash
+export LLAMA_API_KEY=not-needed
+ferrum --provider llama --model <model> -p "hello"
+```
+
+Default base URL:
+
+```text
+http://localhost:8080/v1
+```
+
+Override with `LLAMA_BASE_URL`:
+
+```bash
+export LLAMA_BASE_URL=http://192.168.1.100:8080/v1
+ferrum --provider llama --model qwen2.5-coder-7b -p "hello"
+```
+
 ## MiniMax
 
 Ferrum reads a MiniMax API key from `MINIMAX_API_KEY`.
