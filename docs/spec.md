@@ -1,60 +1,88 @@
 # Ferrum Project Spec
 
 ## Summary
-Ferrum is a Linux-only, Rust-native coding agent. It is inspired by Pi's minimal harness model, but intentionally drops TypeScript, extensions, npm packages, SDK compatibility, and cross-platform support.
 
-The product target is a fast daily-driver CLI/TUI agent for local coding work.
+Ferrum is a Linux-only, Rust-native coding agent. It is inspired by Pi's useful agent-harness ideas, but it is not a compatibility port.
+
+The target is a small, predictable daily-driver CLI agent for local coding work.
 
 ## Principles
+
 1. Linux first, Linux only for v1.
 2. Barebone beats feature-complete.
 3. Fast startup and low runtime overhead matter.
 4. Tool correctness matters more than UI richness.
-5. Provider logic should be explicit, testable, and isolated.
-6. Sessions must be durable and inspectable.
-7. Configuration should be simple files and environment variables.
+5. Provider logic stays explicit, testable, and thin.
+6. Tool execution and file mutation stay provider-neutral in the core loop.
+7. Sessions are durable, JSONL, and inspectable.
+8. Configuration uses simple files and environment variables.
+9. Secrets are never hardcoded, logged, or committed.
 
 ## Modes
 
-### Print Mode
+### Print mode
+
 Single-shot mode:
 
 ```bash
 ferrum -p "summarize this repo"
 cat file.rs | ferrum -p "review"
-ferrum --provider opencode-go --model kimi-k2.6 -p "review this repo"
+ferrum --provider openai-codex --model gpt-5.5 -p "review this repo"
+ferrum --image screenshot.png -p "describe this image"
 ```
 
-Requirements:
+Behavior:
+
 - Accept prompt args.
 - Accept stdin.
-- Accept provider/model overrides from CLI.
-- Stream assistant output to stdout.
+- Accept provider/model/thinking overrides from CLI.
+- Accept repeated `--image` attachments.
+- Print assistant output to stdout.
 - Return non-zero on unrecoverable errors.
+- Persist session entries.
 
-### Interactive Mode
+### Interactive mode
+
 Default mode:
 
 ```bash
 ferrum
 ```
 
-Requirements:
-- Prompt editor.
-- Streaming assistant output.
-- Tool call/result display.
-- Ctrl+C abort behavior.
-- Session autosave.
-- Minimal slash commands.
+Behavior:
 
-Initial slash commands:
-- `/quit`
-- `/model`
-- `/provider`
+- Line-oriented REPL using `rustyline`.
+- History stored under the Ferrum config directory.
+- Session autosave.
+- Provider errors are reported without exiting the REPL.
+- Ctrl+D exits.
+- Ctrl+C once clears/returns to prompt; double Ctrl+C exits.
+
+Slash commands:
+
+- `/quit`, `/exit`
+- `/help`
+- `/version`
 - `/session`
+- `/model [name]`
+- `/models`
+- `/provider [name]`
+- `/providers`
+- `/thinking [off|minimal|low|medium|high|xhigh]`
+- `/skills`
+- `/skill:<name> [args]`
+- `/skill <name> [args]`
+- `/image <path>`
+- `/paste-image`
 - `/compact`
 
+Shell shortcuts:
+
+- `!!<cmd>` runs a shell command and prints output only.
+- `!<cmd>` runs a shell command and sends formatted output to the model.
+
 Session resume:
+
 - `ferrum --resume` resumes the latest JSONL session.
 - `ferrum --resume <path>` resumes a specific JSONL session.
 
@@ -66,89 +94,116 @@ Default config directory:
 ~/.config/ferrum/
 ```
 
-Initial files:
+Main files:
 
 ```text
 ~/.config/ferrum/config.toml
+~/.config/ferrum/auth.json
+~/.config/ferrum/AGENTS.md
 ~/.config/ferrum/sessions/
+~/.config/ferrum/skills/
 ```
 
-Initial config keys:
+Config example:
 
 ```toml
 provider = "openai-codex"
-model = "gpt-5.3-codex"
+model = "gpt-5.5"
 max_context_tokens = 256000
-thinking = "off" # off|minimal|low|medium|high|xhigh
+thinking = "off"
+
+[providers.openai-codex]
+type = "openai-codex"
+base_url = "https://chatgpt.com/backend-api"
+default_model = "gpt-5.5"
+
+[providers.opencode-go]
+type = "openai-compatible"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key_env = "OPENCODE_API_KEY"
+default_model = "kimi-k2.6"
+
+[providers.minimax]
+type = "openai-compatible"
+base_url = "https://api.minimax.io/v1"
+api_key_env = "MINIMAX_API_KEY"
+default_model = "MiniMax-M2"
+
+[[mcp.servers]]
+name = "time"
+command = "uvx"
+args = ["mcp-server-time"]
+enabled = true
 ```
 
+Provider entries:
+
+- `type = "openai-codex"` uses ChatGPT OAuth and the Codex Responses backend.
+- `type = "openai-compatible"` uses Chat Completions with `base_url` and `api_key_env`.
+- `type = "fake"` is for local tests/offline mode.
+
+Secrets:
+
+- API keys are read from environment variables named by `api_key_env`.
+- ChatGPT/Codex OAuth credentials are stored in `auth.json` with user-only permissions where possible.
+- Secret values must not be committed or logged.
+
 Environment variables:
-- `OPENAI_API_KEY`
-- `OPENAI_BASE_URL`
-- `OPENAI_CODEX_BASE_URL`
-- `OPENCODE_API_KEY`
-- `OPENCODE_GO_API_KEY_ENV`
-- `OPENCODE_GO_BASE_URL`
-- `MINIMAX_API_KEY`
-- `MINIMAX_BASE_URL`
+
 - `FERRUM_CONFIG_DIR`
 - `FERRUM_OFFLINE`
+- `FERRUM_CODEX_CLIENT_VERSION`
+- Provider-specific env vars referenced by `api_key_env`
+- Legacy provider shorthand env vars remain supported for compatibility.
 
-No secrets are committed. No secrets are logged.
+## Context files
 
-## Context Files
 Ferrum loads context from `AGENTS.md` files:
 
 1. Global: `~/.config/ferrum/AGENTS.md`
 2. Parent directories walking from filesystem root to cwd
 3. Current directory
 
-Files are deduplicated, concatenated in load order, bounded in size, and included in the system prompt. More specific later files override earlier files when instructions conflict.
+Files are deduplicated, bounded, and included in the system prompt. More specific later files override earlier instructions when conflicts exist.
+
+Ferrum also injects runtime context describing current version, provider, model, thinking level, cwd, config dir, and supported interactive commands.
 
 ## Sessions
-Sessions are JSONL files. They should remain human-inspectable and append-only where possible. Ferrum tracks approximate context size by text characters divided by four, plus message count and JSONL file bytes.
 
-Default location:
+Sessions are JSONL files under:
 
 ```text
 ~/.config/ferrum/sessions/
 ```
 
-Minimum entry types:
+Current persisted entry types:
+
 - `header`
 - `message`
-- `tool_result`
-- `model_change`
-- `compaction` later
+- `compaction`
 
-Each entry should include:
-- `id`
-- `parent_id` where applicable
-- `timestamp_ms`
-- `type`
+Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Timestamps are `u64` milliseconds.
 
-Tree-style branching is optional after v1. The schema should not prevent it.
+Sessions should remain human-inspectable and append-oriented. Future branching/forking must preserve backward compatibility.
 
-## Agent Loop
+## Agent loop
+
 Core loop:
 
-1. Build context from system prompt, context files, session history, current user message, and tool definitions.
+1. Build context from runtime system prompt, context files, skills summary, session history, current user message, and tool definitions.
 2. Send request to selected provider.
-3. Stream assistant deltas to UI/stdout.
-4. Accumulate final assistant message.
+3. Receive final assistant message.
+4. Display assistant text with `<think>...</think>` blocks hidden from terminal output while preserving raw session content.
 5. If assistant requested tools:
-   - execute tools
+   - execute tools in the core loop
    - append tool results
    - repeat provider request
 6. If no tool calls, finish.
-7. Persist messages and tool results to session.
+7. Persist user, assistant, and tool messages to session.
 
-Abort must cancel:
-- active provider stream
-- active tool execution where possible
-- queued loop work
+Provider adapters serialize and parse provider-specific payloads only. They do not execute tools.
 
-## Normalized Message Model
+## Normalized message model
 
 ```rust
 enum Role {
@@ -159,7 +214,7 @@ enum Role {
 }
 
 enum ContentBlock {
-    Text(String),
+    Text { text: String },
     ToolUse {
         id: String,
         name: String,
@@ -170,6 +225,11 @@ enum ContentBlock {
         content: String,
         is_error: bool,
     },
+    Image {
+        mime_type: String,
+        data_base64: String,
+        source: Option<String>,
+    },
 }
 
 struct Message {
@@ -178,107 +238,168 @@ struct Message {
 }
 ```
 
-Provider adapters translate between this normalized model and provider-specific payloads. Tool use remains provider-neutral in the core agent loop; adapters only serialize/deserialize provider-specific tool call formats.
-
 ## Providers
 
-### v1 Providers
-- OpenAI-compatible Chat Completions API
-- OpenAI Codex / ChatGPT subscription OAuth backend
-- OpenCode Go OpenAI-compatible Chat Completions models
-- MiniMax API via `MINIMAX_API_KEY` and default server `https://api.minimax.io/v1`
+### OpenAI Codex / ChatGPT
 
-Image input is supported for providers/models that accept OpenAI-style multimodal content. Provider/model support varies.
+- Auth: `ferrum login openai` OAuth.
+- Backend: `https://chatgpt.com/backend-api/codex/responses`.
+- Model listing: live `GET /codex/models?client_version=<version>`.
+- Supports reasoning effort mapping and tool calls.
+- Supports image input for compatible models.
 
-Anthropic-compatible APIs are deferred until the OpenAI-compatible provider and generic tool loop are stable.
+### OpenAI-compatible
 
-### Provider Responsibilities
-- Serialize normalized messages and tools.
-- Stream text deltas.
-- Stream or return tool calls.
-- Report usage when available.
-- Normalize provider errors.
-- Support cancellation through async abort/drop semantics.
+- Chat Completions wire format.
+- Configured through `[providers.<name>]` with `type = "openai-compatible"`.
+- Supports remote APIs and local `/v1` servers when they implement compatible chat, tool, and image semantics.
+- Examples include OpenCode Go, MiniMax, OpenAI-compatible proxies, LM Studio, vLLM, and Ollama-compatible `/v1` servers.
 
-Do not build a universal provider framework before two providers work end-to-end.
+### Fake
 
-## Built-in Tools
+- Local deterministic provider for tests/offline mode.
+
+### Deferred provider work
+
+- Anthropic-compatible `/messages` adapter.
+- Provider-specific compatibility flags after verification with real providers.
+- Richer streaming and usage reporting.
+
+## Built-in tools
 
 ### `read`
+
 Read a text file with optional offset/limit. Output is truncated safely.
 
 ### `write`
+
 Create or overwrite a file. Creates parent directories.
 
 ### `edit`
+
 Exact text replacement. Each old text must match exactly once. Multiple non-overlapping edits supported. Preserve UTF-8 BOM and existing LF/CRLF line endings.
 
 ### `bash`
-Run a shell command in cwd with timeout. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Long-running process management can come later.
+
+Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail.
 
 ### `grep`
-Search file contents. Prefer `ripgrep` integration if available, with Rust fallback later if needed.
+
+Search file contents.
 
 ### `find`
+
 Find files by name/glob.
 
 ### `ls`
+
 List directory contents.
 
-## Initial Repository Layout
+## MCP
+
+Ferrum supports stdio MCP servers configured under `[[mcp.servers]]`.
+
+Implemented methods:
+
+- `initialize`
+- `notifications/initialized`
+- `tools/list`
+- `tools/call`
+
+MCP tool names are exposed as:
+
+```text
+mcp__<server>__<tool>
+```
+
+HTTP/SSE MCP transports are deferred.
+
+## Images
+
+Ferrum supports PNG, JPEG, and WebP input.
+
+Sources:
+
+- CLI `--image <PATH>`
+- Interactive `/image <path>`
+- Interactive `/paste-image`
+- pasted file paths
+- `data:image/...;base64,...`
+
+Images are stored inline in session JSONL as base64 content blocks. Terminal previews use `chafa` when installed; otherwise Ferrum prints metadata.
+
+## Skills
+
+Ferrum discovers Agent Skills-style instruction packages.
+
+Locations:
+
+```text
+~/.config/ferrum/skills/
+~/.agents/skills/
+.ferrum/skills/
+.agents/skills/
+```
+
+Skills use `SKILL.md` with frontmatter:
+
+```yaml
+---
+name: example-skill
+description: What this skill is for.
+---
+```
+
+At startup, Ferrum adds only skill metadata to the system prompt. `/skill:<name> [args]` expands the full skill body into a Pi-style `<skill>` block and immediately runs a model turn with that expanded prompt.
+
+Skills are instructions, not trusted code. Ferrum does not automatically run skill scripts.
+
+## Repository layout
+
+Current high-level layout:
 
 ```text
 ferrum/
   Cargo.toml
   AGENTS.md
   docs/
-    spec.md
-    roadmap.md
   src/
     main.rs
     cli.rs
     config.rs
+    context.rs
+    mcp.rs
+    skills.rs
     agent/
-      mod.rs
-      loop.rs
       messages.rs
+      mod.rs
       tools.rs
+    auth/
+      mod.rs
+      openai_codex.rs
     providers/
+      fake.rs
       mod.rs
-      anthropic.rs
       openai.rs
-    tools/
+    session/
+      jsonl.rs
       mod.rs
+    tools/
+      bash.rs
+      edit.rs
+      find.rs
+      grep.rs
+      ls.rs
+      mod.rs
+      path.rs
       read.rs
       write.rs
-      edit.rs
-      bash.rs
-      grep.rs
-      find.rs
-      ls.rs
-    session/
-      mod.rs
-      jsonl.rs
-      manager.rs
-    tui/
-      mod.rs
-      app.rs
-      editor.rs
-      render.rs
 ```
 
-## First Milestone
-A minimal print-mode agent that can:
+## Quality bar
 
-1. Read config/API key.
-2. Send a prompt to Anthropic.
-3. Stream text output.
-4. Expose `read`, `ls`, `bash`, `write`, `edit`, `grep`, and `find` tools.
-5. Execute tool calls and continue the loop.
-6. Save a JSONL session.
-
-## Quality Bar
-- Unit tests for message conversion, edit tool, session JSONL, and provider stream parsing.
-- Integration test with fake provider before real API tests.
+- Unit tests for message conversion, edit behavior, session JSONL, skills, context loading, and path handling.
+- Local smoke tests before release.
 - No secret values in logs or tests.
-- Clear error messages.
+- Clear errors over silent fallback.
+- No publishing without local validation and explicit user approval.

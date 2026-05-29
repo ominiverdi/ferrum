@@ -1,5 +1,12 @@
 # Providers
 
+Ferrum supports two provider families today:
+
+- OpenAI Codex / ChatGPT through OAuth and the Codex Responses backend.
+- OpenAI-compatible Chat Completions providers for remote APIs and local servers.
+
+Provider entries are configured in `~/.config/ferrum/config.toml` under `[providers.<name>]`. API-key providers should reference an environment variable with `api_key_env`; do not put secret values in config.
+
 ## OpenAI Codex / ChatGPT subscription
 
 Authentication uses OAuth and stores credentials in:
@@ -20,24 +27,12 @@ Config:
 
 ```toml
 provider = "openai-codex"
-model = "gpt-5.3-codex"
+model = "gpt-5.5"
 
 [providers.openai-codex]
 type = "openai-codex"
 base_url = "https://chatgpt.com/backend-api"
 default_model = "gpt-5.5"
-```
-
-Endpoint default:
-
-```text
-https://chatgpt.com/backend-api
-```
-
-Override:
-
-```bash
-export OPENAI_CODEX_BASE_URL=...
 ```
 
 `/models` uses the live Codex catalog endpoint:
@@ -52,20 +47,38 @@ The compatibility version defaults to the current tested Codex CLI version and c
 export FERRUM_CODEX_CLIENT_VERSION=0.135.0
 ```
 
-## OpenCode Go
+You can override the base URL with:
 
-OpenCode Go is OpenAI-compatible for these documented models:
+```bash
+export OPENAI_CODEX_BASE_URL=...
+```
 
-- `glm-5.1`
-- `glm-5`
-- `kimi-k2.5`
-- `kimi-k2.6`
-- `deepseek-v4-pro`
-- `deepseek-v4-flash`
-- `mimo-v2.5`
-- `mimo-v2.5-pro`
+That environment variable is for legacy shorthand provider resolution. Prefer explicit `[providers.openai-codex]` config for normal use.
 
-Config:
+## OpenAI-compatible providers
+
+Use `type = "openai-compatible"` for providers that expose an OpenAI Chat Completions-compatible `/chat/completions` API.
+
+Config shape:
+
+```toml
+[providers.example]
+type = "openai-compatible"
+base_url = "https://example.com/v1"
+api_key_env = "EXAMPLE_API_KEY"
+default_model = "example-model"
+```
+
+Run:
+
+```bash
+export EXAMPLE_API_KEY=...
+ferrum --provider example --model example-model -p "hello"
+```
+
+Examples include OpenCode Go, MiniMax, OpenAI-compatible proxies, LM Studio, vLLM, and Ollama-compatible `/v1` servers.
+
+### OpenCode Go example
 
 ```toml
 [providers.opencode-go]
@@ -75,32 +88,14 @@ api_key_env = "OPENCODE_API_KEY"
 default_model = "kimi-k2.6"
 ```
 
-Run:
-
 ```bash
 export OPENCODE_API_KEY=...
 ferrum --provider opencode-go --model kimi-k2.6 -p "hello"
 ```
 
-Default base URL:
-
-```text
-https://opencode.ai/zen/go/v1
-```
-
 Some OpenCode Go models use Anthropic `/messages`; Ferrum does not support that adapter yet.
 
-## OpenAI-compatible
-
-```bash
-export OPENAI_API_KEY=...
-export OPENAI_BASE_URL=https://api.openai.com/v1
-ferrum --provider openai --model gpt-4.1 -p "hello"
-```
-
-## MiniMax
-
-Config:
+### MiniMax example
 
 ```toml
 [providers.minimax]
@@ -110,28 +105,28 @@ api_key_env = "MINIMAX_API_KEY"
 default_model = "MiniMax-M2"
 ```
 
-Ferrum reads a MiniMax API key from `MINIMAX_API_KEY`.
-
-Default base URL:
-
-```text
-https://api.minimax.io/v1
-```
-
-Override with `MINIMAX_BASE_URL` if needed.
-
 ```bash
 export MINIMAX_API_KEY=...
-ferrum --provider minimax --model <model> -p "hello"
+ferrum --provider minimax --model MiniMax-M2 -p "hello"
 ```
+
+## Live model listing
+
+`/models` queries the selected provider live where supported:
+
+- OpenAI Codex: `GET /codex/models?client_version=<version>`.
+- OpenAI-compatible providers: `GET /models`.
+- Fake provider: local `fake` model.
+
+Ferrum does not silently guess static model lists.
 
 ## Tool support
 
-Tool calling is implemented through Ferrum's normalized tool loop.
+Tool calling is implemented through Ferrum's normalized tool loop. Providers only translate tool definitions and tool calls.
 
 Verified:
 
 - OpenAI Codex Responses
-- OpenAI-compatible Chat Completions via OpenCode Go
+- OpenAI-compatible Chat Completions providers that implement OpenAI-style tools
 
 Providers that do not implement compatible tool calls may still answer text-only requests.

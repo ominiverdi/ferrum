@@ -16,7 +16,7 @@ export FERRUM_CONFIG_DIR=/path/to/config
 
 ```toml
 provider = "openai-codex"
-model = "gpt-5.3-codex"
+model = "gpt-5.5"
 max_context_tokens = 256000
 thinking = "off"
 
@@ -68,7 +68,7 @@ Provider-specific model id.
 Examples:
 
 ```toml
-model = "gpt-5.3-codex"
+model = "gpt-5.5"
 model = "kimi-k2.6"
 model = "gpt-4.1"
 ```
@@ -142,34 +142,34 @@ Core:
 ```text
 FERRUM_CONFIG_DIR
 FERRUM_OFFLINE
+FERRUM_CODEX_CLIENT_VERSION
 ```
 
-OpenAI-compatible:
+OpenAI-compatible providers read API keys from the environment variable named by `api_key_env`.
+
+Example:
+
+```toml
+[providers.example]
+type = "openai-compatible"
+base_url = "https://example.com/v1"
+api_key_env = "EXAMPLE_API_KEY"
+default_model = "example-model"
+```
+
+```bash
+export EXAMPLE_API_KEY=...
+```
+
+Legacy shorthand provider names still support these environment variables:
 
 ```text
 OPENAI_API_KEY
 OPENAI_BASE_URL
-```
-
-OpenAI Codex:
-
-```text
 OPENAI_CODEX_BASE_URL
-```
-
-OpenCode Go:
-
-```text
 OPENCODE_API_KEY
 OPENCODE_GO_BASE_URL
 OPENCODE_GO_API_KEY_ENV
-```
-
-MiniMax:
-
-```text
 MINIMAX_API_KEY
 MINIMAX_BASE_URL
 ```
-
-`MINIMAX_BASE_URL` defaults to `https://api.minimax.io/v1`.

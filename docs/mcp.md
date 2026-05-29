@@ -2,7 +2,7 @@
 
 Ferrum supports a minimal MCP stdio client.
 
-Status: early v0.2 feature. It is useful for local servers, but not a complete MCP implementation.
+Status: early feature. It is useful for local stdio servers, but not a complete MCP implementation.
 
 ## Supported
 

@@ -142,6 +142,7 @@ Shell shortcuts:
 
 ## Documentation
 
+- Architecture/spec: [`docs/spec.md`](docs/spec.md)
 - Configuration: [`docs/config.md`](docs/config.md)
 - Providers: [`docs/providers.md`](docs/providers.md)
 - Tools: [`docs/tools.md`](docs/tools.md)
