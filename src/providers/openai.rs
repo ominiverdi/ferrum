@@ -37,8 +37,7 @@ impl Provider for OpenAiCompatProvider {
         thinking: ThinkingLevel,
     ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
         Box::pin(async move {
-            let api_key = env::var(&self.api_key_env)
-                .with_context(|| format!("{} is not set", self.api_key_env))?;
+            let api_key = env::var(&self.api_key_env).unwrap_or_default();
             let request = ChatRequest {
                 model,
                 messages: messages.iter().map(ChatMessage::from_message).collect(),
