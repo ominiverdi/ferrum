@@ -21,6 +21,11 @@ Config:
 ```toml
 provider = "openai-codex"
 model = "gpt-5.3-codex"
+
+[providers.openai-codex]
+type = "openai-codex"
+base_url = "https://chatgpt.com/backend-api"
+default_model = "gpt-5.5"
 ```
 
 Endpoint default:
@@ -33,6 +38,18 @@ Override:
 
 ```bash
 export OPENAI_CODEX_BASE_URL=...
+```
+
+`/models` uses the live Codex catalog endpoint:
+
+```text
+GET https://chatgpt.com/backend-api/codex/models?client_version=<version>
+```
+
+The compatibility version defaults to the current tested Codex CLI version and can be overridden:
+
+```bash
+export FERRUM_CODEX_CLIENT_VERSION=0.135.0
 ```
 
 ## OpenCode Go
@@ -48,7 +65,17 @@ OpenCode Go is OpenAI-compatible for these documented models:
 - `mimo-v2.5`
 - `mimo-v2.5-pro`
 
-Config or CLI:
+Config:
+
+```toml
+[providers.opencode-go]
+type = "openai-compatible"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key_env = "OPENCODE_API_KEY"
+default_model = "kimi-k2.6"
+```
+
+Run:
 
 ```bash
 export OPENCODE_API_KEY=...
@@ -72,6 +99,16 @@ ferrum --provider openai --model gpt-4.1 -p "hello"
 ```
 
 ## MiniMax
+
+Config:
+
+```toml
+[providers.minimax]
+type = "openai-compatible"
+base_url = "https://api.minimax.io/v1"
+api_key_env = "MINIMAX_API_KEY"
+default_model = "MiniMax-M2"
+```
 
 Ferrum reads a MiniMax API key from `MINIMAX_API_KEY`.
 

@@ -26,6 +26,8 @@ This is a new project, not a compatibility port.
 - Auto-update checks.
 
 ## Engineering Rules
+- Implement changes locally first, run local tests, then wait for explicit user approval before pushing, tagging, creating releases, or otherwise publishing.
+- Never publish untested or user-unapproved code.
 - Prefer simple Rust modules over abstractions until duplication hurts.
 - Keep provider adapters thin and explicit.
 - Avoid speculative generalization.

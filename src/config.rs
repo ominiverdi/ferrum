@@ -1,12 +1,14 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::PathBuf};
+use std::{collections::BTreeMap, env, fs, path::PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub config_dir: PathBuf,
     pub model: String,
+    pub provider_name: String,
     pub provider: ProviderConfig,
+    pub providers: BTreeMap<String, ProviderDefinition>,
     pub offline: bool,
     pub max_context_tokens: usize,
     pub thinking: ThinkingLevel,
@@ -83,6 +85,15 @@ pub enum ProviderConfig {
     },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderDefinition {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub base_url: Option<String>,
+    pub api_key_env: Option<String>,
+    pub default_model: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct FileConfig {
     model: Option<String>,
@@ -90,6 +101,8 @@ struct FileConfig {
     max_context_tokens: Option<usize>,
     thinking: Option<String>,
     mcp: Option<FileMcpConfig>,
+    #[serde(default)]
+    providers: BTreeMap<String, ProviderDefinition>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -116,18 +129,21 @@ impl Config {
 
         let offline = env::var("FERRUM_OFFLINE")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let providers = file_config.providers;
         let provider_name = if offline {
             "fake".to_string()
         } else {
             file_config.provider.unwrap_or_else(|| "fake".to_string())
         };
 
-        let provider = provider_from_name(&provider_name, &config_dir)?;
+        let provider = resolve_provider(&provider_name, &providers, &config_dir)?;
 
         Ok(Self {
             config_dir,
             model: file_config.model.unwrap_or_else(|| "fake".to_string()),
+            provider_name,
             provider,
+            providers,
             offline,
             max_context_tokens: file_config.max_context_tokens.unwrap_or(256_000),
             thinking: file_config
@@ -162,7 +178,15 @@ impl Config {
         if self.offline && provider != "fake" {
             anyhow::bail!("cannot override provider to {provider} while FERRUM_OFFLINE is set");
         }
-        self.provider = provider_from_name(provider, &self.config_dir)?;
+        self.provider = resolve_provider(provider, &self.providers, &self.config_dir)?;
+        self.provider_name = provider.to_string();
+        if let Some(default_model) = self
+            .providers
+            .get(provider)
+            .and_then(|definition| definition.default_model.as_ref())
+        {
+            self.model = default_model.clone();
+        }
         Ok(())
     }
 
@@ -179,7 +203,46 @@ fn default_true() -> bool {
     true
 }
 
-fn provider_from_name(name: &str, config_dir: &std::path::Path) -> Result<ProviderConfig> {
+fn resolve_provider(
+    name: &str,
+    providers: &BTreeMap<String, ProviderDefinition>,
+    config_dir: &std::path::Path,
+) -> Result<ProviderConfig> {
+    if let Some(definition) = providers.get(name) {
+        return provider_from_definition(name, definition, config_dir);
+    }
+    legacy_provider_from_name(name, config_dir)
+}
+
+fn provider_from_definition(
+    name: &str,
+    definition: &ProviderDefinition,
+    config_dir: &std::path::Path,
+) -> Result<ProviderConfig> {
+    match definition.kind.as_str() {
+        "fake" => Ok(ProviderConfig::Fake),
+        "openai-compatible" => Ok(ProviderConfig::OpenAiCompat {
+            api_key_env: definition
+                .api_key_env
+                .clone()
+                .with_context(|| format!("providers.{name}.api_key_env is required"))?,
+            base_url: definition
+                .base_url
+                .clone()
+                .with_context(|| format!("providers.{name}.base_url is required"))?,
+        }),
+        "openai-codex" => Ok(ProviderConfig::OpenAiCodex {
+            base_url: definition
+                .base_url
+                .clone()
+                .unwrap_or_else(|| "https://chatgpt.com/backend-api".to_string()),
+            auth_path: config_dir.join("auth.json"),
+        }),
+        other => anyhow::bail!("unsupported provider type for {name}: {other}"),
+    }
+}
+
+fn legacy_provider_from_name(name: &str, config_dir: &std::path::Path) -> Result<ProviderConfig> {
     match name {
         "fake" => Ok(ProviderConfig::Fake),
         "openai" | "openai-compatible" => Ok(ProviderConfig::OpenAiCompat {

@@ -59,6 +59,29 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
                         }
                     }
                 }
+                if let Some((name, args)) = parse_skill_invocation(input) {
+                    match state.expand_skill_prompt(name, args.as_deref()) {
+                        Ok(prompt) => match state.run_turn(prompt, config).await {
+                            Ok(()) => println!(),
+                            Err(error) => eprintln!("Error: {error}"),
+                        },
+                        Err(error) => eprintln!("Error: {error}"),
+                    }
+                    continue;
+                }
+                if input == "/models" {
+                    match providers::list_models(&config.provider).await {
+                        Ok(providers::ModelList::Live { source, models }) => {
+                            println!("models from {source}:");
+                            for model in models {
+                                let marker = if model == config.model { "*" } else { " " };
+                                println!("{marker} {model}");
+                            }
+                        }
+                        Err(error) => eprintln!("Error: {error}"),
+                    }
+                    continue;
+                }
                 if should_handle_as_command(input, &state.cwd) {
                     match handle_command(input, config, &mut state) {
                         Ok(CommandAction::Continue) => continue,
@@ -117,6 +140,19 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
     }
 }
 
+fn runtime_context(config: &Config, cwd: &Path) -> String {
+    format!(
+        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
+        env!("CARGO_PKG_VERSION"),
+        config.provider_name,
+        config.model,
+        config.thinking,
+        cwd.display(),
+        config.config_dir.display(),
+        config.max_context_tokens,
+    )
+}
+
 struct AgentState {
     session: session::JsonlSession,
     messages: Vec<messages::Message>,
@@ -130,6 +166,10 @@ impl AgentState {
     fn new(config: &Config) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let mut messages = Vec::new();
+        messages.push(messages::Message::text(
+            messages::Role::System,
+            runtime_context(config, &cwd),
+        ));
         if let Some(system_context) = context::load_context(&config.config_dir, &cwd)? {
             messages.push(messages::Message::text(
                 messages::Role::System,
@@ -163,6 +203,10 @@ impl AgentState {
         let mut messages = session::jsonl::load_messages(&path)?;
         let count = messages.len();
         println!("resumed {} ({count} messages)", path.display());
+        messages.push(messages::Message::text(
+            messages::Role::System,
+            runtime_context(config, &cwd),
+        ));
         let skills = skills::discover(&config.config_dir, &cwd)?;
         if let Some(skill_context) = skills::render_available_skills(&skills) {
             messages.push(messages::Message::text(
@@ -318,6 +362,15 @@ impl AgentState {
         }
     }
 
+    fn expand_skill_prompt(&self, name: &str, args: Option<&str>) -> Result<String> {
+        let skill = self
+            .skills
+            .iter()
+            .find(|skill| skill.name == name)
+            .ok_or_else(|| anyhow::anyhow!("unknown skill: {name}"))?;
+        skills::expand_skill_prompt(skill, args)
+    }
+
     fn compact(&mut self) -> Result<()> {
         let mut summary = String::new();
         for message in self
@@ -358,6 +411,29 @@ fn replace_paste_image_triggers(input: &str) -> String {
         }
     }
     output
+}
+
+fn parse_skill_invocation(input: &str) -> Option<(&str, Option<String>)> {
+    if let Some(rest) = input.strip_prefix("/skill:") {
+        let (name, args) = split_name_args(rest);
+        return (!name.is_empty()).then_some((name, args));
+    }
+    if let Some(rest) = input.strip_prefix("/skill ") {
+        let (name, args) = split_name_args(rest.trim());
+        return (!name.is_empty()).then_some((name, args));
+    }
+    None
+}
+
+fn split_name_args(input: &str) -> (&str, Option<String>) {
+    let mut parts = input.splitn(2, char::is_whitespace);
+    let name = parts.next().unwrap_or("");
+    let args = parts
+        .next()
+        .map(str::trim)
+        .filter(|args| !args.is_empty())
+        .map(str::to_string);
+    (name, args)
 }
 
 fn should_handle_as_command(input: &str, cwd: &Path) -> bool {
@@ -625,20 +701,6 @@ fn render_bash_output(command: &str, output: &builtin_tools::bash::BashOutput) -
     )
 }
 
-fn load_skill_command(state: &mut AgentState, name: &str, args: Option<&str>) -> Result<()> {
-    let skill = state
-        .skills
-        .iter()
-        .find(|skill| skill.name == name)
-        .ok_or_else(|| anyhow::anyhow!("unknown skill: {name}"))?;
-    let message = skills::load_skill_message(skill, args)?;
-    let system = messages::Message::text(messages::Role::System, message);
-    state.session.append_message(&system)?;
-    state.messages.push(system);
-    println!("loaded skill: {}", skill.name);
-    Ok(())
-}
-
 fn handle_command(
     input: &str,
     config: &mut Config,
@@ -657,7 +719,9 @@ fn handle_command(
             println!("  /skill <name> [args]  load a skill into context");
             println!("  /skill:<name> [args]  load a skill into context");
             println!("  /model [name]         show or set model");
+            println!("  /models               list known models for current provider");
             println!("  /provider [name]      show or set provider");
+            println!("  /providers            list configured providers");
             println!(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
@@ -684,7 +748,7 @@ fn handle_command(
             println!("skills: {}", state.skills.len());
             println!("model: {}", config.model);
             println!("thinking: {:?}", config.thinking);
-            println!("provider: {:?}", config.provider);
+            println!("provider: {}", config.provider_name);
             Ok(CommandAction::Continue)
         }
         "/skills" => {
@@ -699,21 +763,10 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/skill" => {
-            let name = parts
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("usage: /skill <name> [args]"))?;
-            let args = parts.collect::<Vec<_>>().join(" ");
-            load_skill_command(state, name, (!args.is_empty()).then_some(args.as_str()))?;
-            Ok(CommandAction::Continue)
+            anyhow::bail!("usage: /skill:<name> [args]")
         }
         command if command.starts_with("/skill:") => {
-            let name = command.trim_start_matches("/skill:");
-            if name.is_empty() {
-                anyhow::bail!("usage: /skill:<name> [args]");
-            }
-            let args = parts.collect::<Vec<_>>().join(" ");
-            load_skill_command(state, name, (!args.is_empty()).then_some(args.as_str()))?;
-            Ok(CommandAction::Continue)
+            anyhow::bail!("unknown skill invocation: {command}")
         }
         "/model" => {
             if let Some(model) = parts.next() {
@@ -722,11 +775,35 @@ fn handle_command(
             println!("model: {}", config.model);
             Ok(CommandAction::Continue)
         }
+        "/models" => {
+            anyhow::bail!("/models is async; this command should be handled before sync commands")
+        }
         "/provider" => {
             if let Some(provider) = parts.next() {
                 config.set_provider(provider)?;
             }
-            println!("provider: {:?}", config.provider);
+            println!("provider: {}", config.provider_name);
+            println!("model: {}", config.model);
+            Ok(CommandAction::Continue)
+        }
+        "/providers" => {
+            if config.providers.is_empty() {
+                println!("no configured providers in config.toml");
+            } else {
+                for (name, definition) in &config.providers {
+                    let marker = if name == &config.provider_name {
+                        "*"
+                    } else {
+                        " "
+                    };
+                    let default_model = definition
+                        .default_model
+                        .as_deref()
+                        .map(|model| format!(" default_model={model}"))
+                        .unwrap_or_default();
+                    println!("{marker} {name} type={}{}", definition.kind, default_model);
+                }
+            }
             Ok(CommandAction::Continue)
         }
         "/thinking" => {

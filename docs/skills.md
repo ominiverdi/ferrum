@@ -72,7 +72,9 @@ Name rules:
 
 At startup, Ferrum discovers skills and adds only skill names, descriptions, paths, and dirs to the system prompt.
 
-Full skill instructions are loaded on demand with slash commands or by the model reading the skill file.
+Slash-command invocation expands the full skill body into a Pi-style `<skill>` block and immediately runs a model turn with that expanded prompt. Frontmatter is stripped before expansion. Skill-relative files should be resolved relative to the skill directory shown in the block.
+
+The model can also inspect skill files with tools when appropriate.
 
 ## Commands
 
@@ -82,7 +84,7 @@ List skills:
 /skills
 ```
 
-Load a skill:
+Run a skill:
 
 ```text
 /skill pdf-tools
@@ -90,7 +92,7 @@ Load a skill:
 /skill:pdf-tools extract file.pdf
 ```
 
-Loading a skill appends the full skill file as a system message and persists it in the JSONL session.
+Running a skill sends the expanded skill prompt as the next user turn and persists the resulting conversation in the JSONL session.
 
 ## Security
 

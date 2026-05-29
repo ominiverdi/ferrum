@@ -57,22 +57,22 @@ pub fn render_available_skills(skills: &[Skill]) -> Option<String> {
     Some(output)
 }
 
-pub fn load_skill_message(skill: &Skill, args: Option<&str>) -> Result<String> {
+pub fn expand_skill_prompt(skill: &Skill, args: Option<&str>) -> Result<String> {
     let content = fs::read_to_string(&skill.path)
         .with_context(|| format!("failed to read skill {}", skill.path.display()))?;
-    let mut message = format!(
-        "Loaded skill `{}` from {}. Resolve relative paths from {}.\n\n<skill name=\"{}\">\n{}\n</skill>",
-        skill.name,
-        skill.path.display(),
-        skill.dir.display(),
+    let body = strip_frontmatter(&content).trim();
+    let skill_block = format!(
+        "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
         escape_xml(&skill.name),
-        content
+        escape_xml(&skill.path.display().to_string()),
+        skill.dir.display(),
+        body
     );
     if let Some(args) = args.filter(|args| !args.trim().is_empty()) {
-        message.push_str("\n\nUser skill arguments:\n");
-        message.push_str(args.trim());
+        Ok(format!("{skill_block}\n\n{}", args.trim()))
+    } else {
+        Ok(skill_block)
     }
-    Ok(message)
 }
 
 fn add_skills_from_dir(skills: &mut Vec<Skill>, dir: &Path, direct_md: bool) -> Result<()> {
@@ -155,6 +155,16 @@ fn extract_frontmatter(text: &str) -> Option<&str> {
     let rest = text.strip_prefix("---\n")?;
     let end = rest.find("\n---")?;
     Some(&rest[..end])
+}
+
+fn strip_frontmatter(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix("---\n") else {
+        return text;
+    };
+    let Some(end) = rest.find("\n---") else {
+        return text;
+    };
+    &rest[end + "\n---".len()..]
 }
 
 fn parse_frontmatter_fields(frontmatter: &str) -> HashMap<String, String> {

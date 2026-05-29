@@ -38,17 +38,17 @@ Status: early MVP. Useful for real work, still evolving.
 Download the latest release asset from GitHub:
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.3.0/ferrum-v0.3.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.3.0-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.0/ferrum-v0.4.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.0-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
 Optional checksum verification:
 
 ```bash
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.3.0/ferrum-v0.3.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.3.0/ferrum-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.0/ferrum-v0.4.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.0/ferrum-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### From source
@@ -108,6 +108,17 @@ model = "gpt-5.3-codex"
 max_context_tokens = 256000
 thinking = "off"
 
+[providers.openai-codex]
+type = "openai-codex"
+base_url = "https://chatgpt.com/backend-api"
+default_model = "gpt-5.5"
+
+[providers.opencode-go]
+type = "openai-compatible"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key_env = "OPENCODE_API_KEY"
+default_model = "kimi-k2.6"
+
 [[mcp.servers]]
 name = "filesystem"
 command = "npx"
@@ -142,6 +153,11 @@ Config:
 ```toml
 provider = "openai-codex"
 model = "gpt-5.3-codex"
+
+[providers.openai-codex]
+type = "openai-codex"
+base_url = "https://chatgpt.com/backend-api"
+default_model = "gpt-5.5"
 ```
 
 ### OpenCode Go
@@ -194,7 +210,9 @@ ferrum --provider minimax --model <model> -p "hello"
 /help
 /session
 /model [name]
+/models
 /provider [name]
+/providers
 /thinking [level]
 /image <path>
 /compact

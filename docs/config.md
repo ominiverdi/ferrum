@@ -20,6 +20,23 @@ model = "gpt-5.3-codex"
 max_context_tokens = 256000
 thinking = "off"
 
+[providers.openai-codex]
+type = "openai-codex"
+base_url = "https://chatgpt.com/backend-api"
+default_model = "gpt-5.5"
+
+[providers.opencode-go]
+type = "openai-compatible"
+base_url = "https://opencode.ai/zen/go/v1"
+api_key_env = "OPENCODE_API_KEY"
+default_model = "kimi-k2.6"
+
+[providers.minimax]
+type = "openai-compatible"
+base_url = "https://api.minimax.io/v1"
+api_key_env = "MINIMAX_API_KEY"
+default_model = "MiniMax-M2"
+
 [[mcp.servers]]
 name = "example"
 command = "example-mcp-server"
@@ -29,14 +46,20 @@ enabled = true
 
 ### provider
 
-Supported values:
+The active provider name. In normal use this should match a key under `[providers]`.
 
-- `fake`
-- `openai-codex`
-- `openai`
-- `openai-compatible`
-- `opencode-go`
-- `minimax`
+Ferrum still accepts legacy built-in names for compatibility, but `/providers` lists only providers configured in `config.toml`.
+
+### providers
+
+Configured providers live under `[providers.<name>]`.
+
+Fields:
+
+- `type`: `openai-codex`, `openai-compatible`, or `fake`
+- `base_url`: provider endpoint
+- `api_key_env`: environment variable for `openai-compatible` providers
+- `default_model`: model selected when `/provider <name>` switches to this provider
 
 ### model
 
