@@ -126,26 +126,47 @@ fn visit(
     } else {
         pattern.to_string()
     };
-    for (index, line) in text.lines().enumerate() {
-        let search_line = haystack.lines().nth(index).unwrap_or("");
+    let lines = text.lines().collect::<Vec<_>>();
+    let search_lines = haystack.lines().collect::<Vec<_>>();
+    for index in 0..lines.len() {
+        let search_line = search_lines.get(index).copied().unwrap_or("");
         let matched = if options.literal {
             search_line.contains(&needle)
         } else {
             search_line.contains(&needle)
         };
         if matched {
-            matches.push(format!(
-                "{}:{}:{}",
-                path.display(),
-                index + 1,
-                truncate_line(line)
-            ));
-            if matches.len() >= limit {
+            push_fallback_match(path, &lines, index, options.context.unwrap_or(0), matches);
+            if count_match_lines(matches) >= limit {
                 break;
             }
         }
     }
     Ok(())
+}
+
+fn push_fallback_match(
+    path: &Path,
+    lines: &[&str],
+    match_index: usize,
+    context: usize,
+    matches: &mut Vec<String>,
+) {
+    let start = match_index.saturating_sub(context);
+    let end = (match_index + context + 1).min(lines.len());
+    for index in start..end {
+        let separator = if index == match_index { ':' } else { '-' };
+        let rendered = format!(
+            "{}{}{}:{}",
+            path.display(),
+            separator,
+            index + 1,
+            truncate_line(lines[index])
+        );
+        if !matches.contains(&rendered) {
+            matches.push(rendered);
+        }
+    }
 }
 
 fn format_grep_output(output: &str, limit: usize) -> String {
