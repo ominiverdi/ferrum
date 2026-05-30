@@ -4,6 +4,8 @@ Ferrum tools are provider-neutral. Providers only translate tool definitions and
 
 Native tools are always available. MCP stdio tools can be added through config and are exposed as `mcp__<server>__<tool>`.
 
+Interactive mode renders tool calls in a readable multiline format and prints a bounded preview of tool results. Full tool results remain in the model/session context unless the underlying tool output itself was bounded.
+
 ## read
 
 Read a text file.
@@ -107,6 +109,10 @@ List directory contents.
   "path": "."
 }
 ```
+
+## Tool loop budget
+
+Ferrum limits tool rounds per user turn. If the budget is exhausted, Ferrum makes one final no-tools model call asking the assistant to summarize findings and next steps instead of returning a raw loop-limit error.
 
 ## Safety
 

@@ -168,9 +168,9 @@ Environment variables:
 
 ## Context files
 
-Ferrum loads context from `AGENTS.md` files:
+Ferrum loads context from `AGENTS.md` and `agents.md` files:
 
-1. Global: `~/.config/ferrum/AGENTS.md`
+1. Global: `~/.config/ferrum/AGENTS.md` or `~/.config/ferrum/agents.md`
 2. Parent directories walking from filesystem root to cwd
 3. Current directory
 
@@ -205,11 +205,14 @@ Core loop:
 3. Receive final assistant message.
 4. Display assistant text with `<think>...</think>` blocks hidden from terminal output while preserving raw session content.
 5. If assistant requested tools:
+   - render tool calls in readable multiline terminal format
    - execute tools in the core loop
    - append tool results
+   - print a bounded result preview
    - repeat provider request
-6. If no tool calls, finish.
-7. Persist user, assistant, and tool messages to session.
+6. If the per-turn tool-round budget is exhausted, make one final no-tools provider request asking for findings and next steps.
+7. If no tool calls, finish.
+8. Persist user, assistant, and tool messages to session.
 
 Provider adapters serialize and parse provider-specific payloads only. They do not execute tools.
 

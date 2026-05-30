@@ -5,6 +5,7 @@ use crate::{config::Config, context, mcp, providers, session, skills, tools as b
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustyline::{DefaultEditor, error::ReadlineError};
+use similar::{ChangeTag, TextDiff};
 use std::{
     fmt::Write as FmtWrite,
     fs,
@@ -16,6 +17,8 @@ use std::{
 
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 2_000;
+const MAX_TOOL_ROUNDS: usize = 8;
+const TOOL_PREVIEW_MAX_CHARS: usize = 4_000;
 
 pub async fn run_print(prompt: String, images: Vec<String>, config: &Config) -> Result<()> {
     let mut state = AgentState::new(config)?;
@@ -173,7 +176,7 @@ pub async fn run_interactive(
 
 fn runtime_context(config: &Config, cwd: &Path) -> String {
     format!(
-        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
+        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If a tool budget is exhausted, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer ls/find/grep for file exploration when they fit.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
         env!("CARGO_PKG_VERSION"),
         config.provider_name,
         config.model,
@@ -318,7 +321,7 @@ impl AgentState {
             tools.extend_from_slice(mcp.definitions());
         }
 
-        for _ in 0..8 {
+        for _ in 0..MAX_TOOL_ROUNDS {
             let response = provider
                 .complete(&config.model, &self.messages, &tools, config.thinking)
                 .await?;
@@ -343,11 +346,13 @@ impl AgentState {
             }
 
             for (id, name, input) in tool_uses {
-                eprintln!("\n[tool] {name} {input}");
+                eprintln!();
+                render_tool_call(&name, &input);
                 let (content, is_error) = match self.execute_tool(&name, &input).await {
                     Ok(output) => (output, false),
                     Err(error) => (error.to_string(), true),
                 };
+                render_tool_result(&name, &content, is_error);
                 let result = messages::Message {
                     role: messages::Role::Tool,
                     content: vec![messages::ContentBlock::ToolResult {
@@ -361,7 +366,21 @@ impl AgentState {
             }
         }
 
-        anyhow::bail!("agent loop exceeded maximum tool iterations")
+        let mut final_messages = self.messages.clone();
+        final_messages.push(messages::Message::text(
+            messages::Role::System,
+            format!(
+                "The tool round budget ({MAX_TOOL_ROUNDS}) is exhausted. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
+            ),
+        ));
+        let final_response = provider
+            .complete(&config.model, &final_messages, &[], config.thinking)
+            .await?;
+        print!("{}", final_response.display_text());
+        io::stdout().flush()?;
+        self.session.append_message(&final_response)?;
+        self.messages.push(final_response);
+        Ok(())
     }
 
     fn attach_clipboard_image(&mut self) -> Result<()> {
@@ -607,6 +626,151 @@ impl AgentState {
             .await?;
         Ok(response.text_content())
     }
+}
+
+fn render_tool_call(name: &str, input: &serde_json::Value) {
+    eprintln!("[tool:{name}]");
+    match name {
+        "bash" => {
+            if let Some(command) = input.get("command").and_then(|value| value.as_str()) {
+                eprintln!("command:");
+                for line in command.lines() {
+                    eprintln!("  {line}");
+                }
+            }
+            if let Some(timeout) = input
+                .get("timeout_seconds")
+                .and_then(|value| value.as_u64())
+            {
+                eprintln!("timeout: {timeout}s");
+            }
+        }
+        "read" => {
+            eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            if let Some(offset) = input.get("offset").and_then(|value| value.as_u64()) {
+                eprintln!("offset: {offset}");
+            }
+            if let Some(limit) = input.get("limit").and_then(|value| value.as_u64()) {
+                eprintln!("limit: {limit}");
+            }
+        }
+        "ls" => eprintln!("path: {}", json_str(input, "path").unwrap_or(".")),
+        "grep" => {
+            eprintln!(
+                "pattern: {}",
+                json_str(input, "pattern").unwrap_or("<missing>")
+            );
+            eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+        }
+        "find" => {
+            eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            if let Some(name) = json_str(input, "name") {
+                eprintln!("name: {name}");
+            }
+            if let Some(extension) = json_str(input, "extension") {
+                eprintln!("extension: {extension}");
+            }
+        }
+        "write" => {
+            eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            if let Some(content) = json_str(input, "content") {
+                eprintln!(
+                    "content: {} lines, {} bytes",
+                    content.lines().count(),
+                    content.len()
+                );
+                let preview = truncate_chars(content, TOOL_PREVIEW_MAX_CHARS);
+                if !preview.is_empty() {
+                    eprintln!("preview:\n{}", indent_block(&preview));
+                    if content.chars().count() > TOOL_PREVIEW_MAX_CHARS {
+                        eprintln!("  [content truncated for display]");
+                    }
+                }
+            }
+        }
+        "edit" => render_edit_call(input),
+        _ => {
+            let rendered =
+                serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+            eprintln!("args:\n{}", indent_block(&rendered));
+        }
+    }
+}
+
+fn render_edit_call(input: &serde_json::Value) {
+    eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+    let Some(edits) = input.get("edits").and_then(|value| value.as_array()) else {
+        let rendered = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+        eprintln!("args:\n{}", indent_block(&rendered));
+        return;
+    };
+
+    eprintln!("edits: {}", edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        let old_text = json_str(edit, "old_text").unwrap_or("");
+        let new_text = json_str(edit, "new_text").unwrap_or("");
+        eprintln!();
+        eprintln!("edit {}:", index + 1);
+        render_text_diff(old_text, new_text);
+    }
+}
+
+fn render_text_diff(old_text: &str, new_text: &str) {
+    eprintln!("--- old");
+    eprintln!("+++ new");
+    let diff = TextDiff::from_lines(old_text, new_text);
+    for group in diff.grouped_ops(3) {
+        let old_start = group
+            .first()
+            .map(|op| op.old_range().start + 1)
+            .unwrap_or(1);
+        let new_start = group
+            .first()
+            .map(|op| op.new_range().start + 1)
+            .unwrap_or(1);
+        eprintln!("@@ -{old_start} +{new_start} @@");
+        for op in group {
+            for change in diff.iter_changes(&op) {
+                let prefix = match change.tag() {
+                    ChangeTag::Delete => "-",
+                    ChangeTag::Insert => "+",
+                    ChangeTag::Equal => " ",
+                };
+                let text = change.to_string();
+                if text.ends_with('\n') {
+                    eprint!("{prefix}{text}");
+                } else {
+                    eprintln!("{prefix}{text}");
+                    eprintln!("\\ No newline at end of line");
+                }
+            }
+        }
+    }
+}
+
+fn render_tool_result(name: &str, content: &str, is_error: bool) {
+    let status = if is_error { "error" } else { "ok" };
+    let line_count = content.lines().count();
+    let bytes = content.len();
+    eprintln!("[result:{name} {status}, {line_count} lines, {bytes} bytes]");
+    let preview = truncate_chars(content.trim(), TOOL_PREVIEW_MAX_CHARS);
+    if !preview.is_empty() {
+        eprintln!("{}", indent_block(&preview));
+        if content.chars().count() > TOOL_PREVIEW_MAX_CHARS {
+            eprintln!("  [result truncated for display; full result kept in context]");
+        }
+    }
+}
+
+fn json_str<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    input.get(key).and_then(|value| value.as_str())
+}
+
+fn indent_block(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("  {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &Path) {

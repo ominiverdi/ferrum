@@ -5,13 +5,13 @@ const MAX_CONTEXT_BYTES: usize = 128 * 1024;
 
 pub fn load_context(config_dir: &Path, cwd: &Path) -> Result<Option<String>> {
     let mut paths = Vec::new();
-    paths.push(config_dir.join("AGENTS.md"));
+    push_context_candidates(&mut paths, config_dir);
 
     let canonical_cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     let mut ancestors = canonical_cwd.ancestors().collect::<Vec<_>>();
     ancestors.reverse();
     for ancestor in ancestors {
-        paths.push(ancestor.join("AGENTS.md"));
+        push_context_candidates(&mut paths, ancestor);
     }
 
     let mut seen = HashSet::new();
@@ -51,6 +51,11 @@ pub fn load_context(config_dir: &Path, cwd: &Path) -> Result<Option<String>> {
     Ok(Some(context))
 }
 
+fn push_context_candidates(paths: &mut Vec<std::path::PathBuf>, dir: &Path) {
+    paths.push(dir.join("AGENTS.md"));
+    paths.push(dir.join("agents.md"));
+}
+
 fn display_path(path: &Path, cwd: &Path) -> String {
     path.strip_prefix(cwd)
         .map(|relative| relative.display().to_string())
@@ -69,7 +74,7 @@ mod tests {
         fs::create_dir_all(&config).unwrap();
         fs::create_dir_all(&repo).unwrap();
         fs::write(config.join("AGENTS.md"), "global").unwrap();
-        fs::write(repo.join("AGENTS.md"), "project").unwrap();
+        fs::write(repo.join("agents.md"), "project").unwrap();
 
         let context = load_context(&config, &repo).unwrap().unwrap();
         assert!(context.contains("global"));

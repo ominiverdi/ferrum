@@ -291,12 +291,12 @@ checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
 dependencies = [
  "cfg-if",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "ferrum"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -307,6 +307,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "similar",
  "tempfile",
  "thiserror",
  "tokio",
@@ -1288,6 +1289,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "slab"
