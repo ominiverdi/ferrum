@@ -1,6 +1,6 @@
 [package]
 name = "ferrum"
-version = "0.4.3"
+version = "0.4.4"
 edition = "2024"
 description = "A small Rust-native Linux coding agent"
 license = "MIT"
@@ -12,6 +12,8 @@ categories = ["command-line-utilities", "development-tools"]
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+globset = "0.4"
+ignore = "0.4"
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 rustyline = "16"

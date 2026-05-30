@@ -176,7 +176,7 @@ pub async fn run_interactive(
 
 fn runtime_context(config: &Config, cwd: &Path) -> String {
     format!(
-        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If a tool budget is exhausted, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer ls/find/grep for file exploration when they fit.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
+        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If a tool budget is exhausted, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
         env!("CARGO_PKG_VERSION"),
         config.provider_name,
         config.model,
@@ -654,21 +654,47 @@ fn render_tool_call(name: &str, input: &serde_json::Value) {
                 eprintln!("limit: {limit}");
             }
         }
-        "ls" => eprintln!("path: {}", json_str(input, "path").unwrap_or(".")),
+        "ls" => {
+            eprintln!("path: {}", json_str(input, "path").unwrap_or("."));
+            if let Some(limit) = input.get("limit").and_then(|value| value.as_u64()) {
+                eprintln!("limit: {limit}");
+            }
+        }
         "grep" => {
             eprintln!(
                 "pattern: {}",
                 json_str(input, "pattern").unwrap_or("<missing>")
             );
             eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            if let Some(glob) = json_str(input, "glob") {
+                eprintln!("glob: {glob}");
+            }
+            if let Some(ignore_case) = input.get("ignore_case").and_then(|value| value.as_bool()) {
+                eprintln!("ignore_case: {ignore_case}");
+            }
+            if let Some(literal) = input.get("literal").and_then(|value| value.as_bool()) {
+                eprintln!("literal: {literal}");
+            }
+            if let Some(context) = input.get("context").and_then(|value| value.as_u64()) {
+                eprintln!("context: {context}");
+            }
+            if let Some(limit) = input.get("limit").and_then(|value| value.as_u64()) {
+                eprintln!("limit: {limit}");
+            }
         }
         "find" => {
             eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            if let Some(pattern) = json_str(input, "pattern") {
+                eprintln!("pattern: {pattern}");
+            }
             if let Some(name) = json_str(input, "name") {
                 eprintln!("name: {name}");
             }
             if let Some(extension) = json_str(input, "extension") {
                 eprintln!("extension: {extension}");
+            }
+            if let Some(limit) = input.get("limit").and_then(|value| value.as_u64()) {
+                eprintln!("limit: {limit}");
             }
         }
         "write" => {

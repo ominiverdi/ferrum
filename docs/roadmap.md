@@ -34,8 +34,18 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 - Plain multiline tool rendering, bounded tool-result previews, and unified diff-style `edit` rendering.
 - Final no-tools synthesis when the per-turn tool-round budget is exhausted.
 - Lowercase `agents.md` context loading alongside `AGENTS.md`.
+- Core tool hardening for `find`, `grep`, `ls`, and `bash`:
+  - `find`: glob patterns, limits, hidden config directories, ignore files, relative paths, noisy-directory skips.
+  - `grep`: glob filters, ignore-case, literal search, context lines, limits, hidden files, noisy-directory skips.
+  - `ls`: dotfiles, case-insensitive sorting, directory suffixes, entry limits, limit notices.
+  - `bash`: bounded previews with full stdout/stderr saved to temp files when truncated.
 
 ## Next
+
+### Core tools
+- Improve `read` rendering for large files with clearer line ranges and truncation notices.
+- Improve `edit` failure diagnostics for duplicate or non-unique replacements.
+- Add more timeout-focused `bash` coverage.
 
 ### Provider improvements
 - Add Anthropic-compatible `/messages` adapter for providers/models that are not Chat Completions-compatible.

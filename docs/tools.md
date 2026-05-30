@@ -64,7 +64,7 @@ Rules:
 
 ## bash
 
-Run a bash command in cwd with timeout.
+Run a focused bash command in cwd with timeout.
 
 ```json
 {
@@ -73,24 +73,43 @@ Run a bash command in cwd with timeout.
 }
 ```
 
-Output includes status, timeout flag, stdout, and stderr. Large output is truncated to a bounded tail.
+Output includes status, timeout flag, stdout, and stderr. Large output is truncated to a bounded tail. When output is truncated, Ferrum saves the full stream to a temporary file and includes its path in the result.
+
+For broad filesystem exploration, prefer the native `find`, `grep`, and `ls` tools. If shell `find`/`grep` is necessary, prune noisy directories such as `.git`, `target`, and `node_modules`.
 
 ## grep
 
-Search file contents under a path.
+Search file contents under a path, including hidden config directories while skipping noisy dependency/build directories.
 
 ```json
 {
   "pattern": "OpenAiCodexProvider",
-  "path": "src"
+  "path": "src",
+  "glob": "**/*.rs",
+  "ignore_case": false,
+  "literal": false,
+  "context": 2,
+  "limit": 100
 }
 ```
 
-Uses `rg` if available, with a Rust fallback.
+Supports optional glob filtering, case-insensitive search, literal matching, context lines, and match limits. Uses `rg` if available, with a Rust fallback.
 
 ## find
 
-Find files by filename substring and/or extension.
+Find files by glob pattern and/or legacy filename substring/extension filters.
+
+Pi-like glob search:
+
+```json
+{
+  "path": ".",
+  "pattern": "**/*.service",
+  "limit": 1000
+}
+```
+
+Legacy filters are still supported:
 
 ```json
 {
@@ -100,15 +119,16 @@ Find files by filename substring and/or extension.
 }
 ```
 
-Skips dotdirs and `target`.
+Searches hidden config directories, respects `.gitignore`/ignore files, returns paths relative to the search root, and skips noisy dependency/build directories such as `.git`, `target`, and `node_modules`.
 
 ## ls
 
-List directory contents.
+List directory contents, including dotfiles. Directories have a `/` suffix and entries are sorted case-insensitively.
 
 ```json
 {
-  "path": "."
+  "path": ".",
+  "limit": 500
 }
 ```
 
