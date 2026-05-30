@@ -120,5 +120,5 @@ Ferrum limits tool rounds per user turn. If the budget is exhausted, Ferrum make
 
 - Tools run with local user permissions.
 - `write`, `edit`, and `bash` can mutate files.
-- Print mode does not ask for confirmation.
+- Ferrum currently has no per-tool confirmation prompts. Tool calls execute directly in both print and interactive mode.
 - Secrets must not be written, printed, logged, or committed.

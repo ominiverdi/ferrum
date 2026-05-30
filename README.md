@@ -163,7 +163,7 @@ Shell shortcuts:
 - API keys are read from environment variables or provider OAuth storage.
 - Tools run with your local user permissions.
 - `bash`, `write`, and `edit` can mutate files.
-- Print mode does not ask for mutation confirmations.
+- Ferrum currently has no per-tool confirmation prompts. Tool calls execute directly in both print and interactive mode.
 
 ## Development
 
