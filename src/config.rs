@@ -11,6 +11,7 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderDefinition>,
     pub offline: bool,
     pub max_context_tokens: usize,
+    pub max_tool_rounds: usize,
     pub thinking: ThinkingLevel,
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -99,6 +100,7 @@ struct FileConfig {
     model: Option<String>,
     provider: Option<String>,
     max_context_tokens: Option<usize>,
+    max_tool_rounds: Option<usize>,
     thinking: Option<String>,
     mcp: Option<FileMcpConfig>,
     #[serde(default)]
@@ -146,6 +148,12 @@ impl Config {
             providers,
             offline,
             max_context_tokens: file_config.max_context_tokens.unwrap_or(256_000),
+            max_tool_rounds: env::var("FERRUM_MAX_TOOL_ROUNDS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .or(file_config.max_tool_rounds)
+                .unwrap_or(0)
+                .min(256),
             thinking: file_config
                 .thinking
                 .as_deref()

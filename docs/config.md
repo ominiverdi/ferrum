@@ -18,6 +18,7 @@ export FERRUM_CONFIG_DIR=/path/to/config
 provider = "openai-codex"
 model = "gpt-5.5"
 max_context_tokens = 256000
+max_tool_rounds = 0
 thinking = "off"
 
 [providers.openai-codex]
@@ -89,6 +90,24 @@ max_context_tokens = 256000
 
 Ferrum warns at 80% and compacts automatically at the limit.
 
+### max_tool_rounds
+
+Tool-loop safety mode.
+
+Default:
+
+```toml
+max_tool_rounds = 0
+```
+
+`0` means adaptive loop guard: Ferrum does not stop normal long tasks at a low fixed round count. It nudges or stops only when behavior looks pathological, such as repeated identical tool calls or many consecutive tool errors. A hard emergency safety limit still applies internally.
+
+Set a positive value to restore an explicit fixed round cap for debugging or benchmarks:
+
+```bash
+FERRUM_MAX_TOOL_ROUNDS=16 ferrum -p "finish this larger refactor"
+```
+
 ### thinking
 
 Supported values:
@@ -143,6 +162,7 @@ Core:
 FERRUM_CONFIG_DIR
 FERRUM_OFFLINE
 FERRUM_CODEX_CLIENT_VERSION
+FERRUM_MAX_TOOL_ROUNDS
 ```
 
 OpenAI-compatible providers read API keys from the environment variable named by `api_key_env`.

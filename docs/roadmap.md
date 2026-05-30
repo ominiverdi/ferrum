@@ -42,6 +42,15 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 
 ## Next
 
+### Harness quality
+- Continue matching Pi's long-task quality while preserving Ferrum's predictability:
+  - broader parallel execution coverage beyond read-only built-in tool batches
+  - richer adaptive loop detection beyond exact repeated calls and consecutive errors
+  - progress-aware detection for long read-only investigations versus mutation tasks
+  - steering/follow-up queue behavior for interactive turns
+  - better automatic continuation after compaction/retry events
+  - JSON/RPC benchmark traces for fair cross-agent tool-event scoring
+
 ### Core tools
 - Improve `read` rendering for large files with clearer line ranges and truncation notices.
 - Improve `edit` failure diagnostics for duplicate or non-unique replacements.

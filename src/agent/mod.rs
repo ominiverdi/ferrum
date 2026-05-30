@@ -7,6 +7,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rustyline::{DefaultEditor, error::ReadlineError};
 use similar::{ChangeTag, TextDiff};
 use std::{
+    collections::HashMap,
     fmt::Write as FmtWrite,
     fs,
     io::{self, Write},
@@ -17,8 +18,12 @@ use std::{
 
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 2_000;
-const MAX_TOOL_ROUNDS: usize = 8;
 const TOOL_PREVIEW_MAX_CHARS: usize = 4_000;
+const HARD_TOOL_ROUND_LIMIT: usize = 256;
+const REPEATED_TOOL_NUDGE_LIMIT: usize = 4;
+const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
+const CONSECUTIVE_ERROR_NUDGE_LIMIT: usize = 5;
+const CONSECUTIVE_ERROR_FORCE_LIMIT: usize = 8;
 
 pub async fn run_print(prompt: String, images: Vec<String>, config: &Config) -> Result<()> {
     let mut state = AgentState::new(config)?;
@@ -176,7 +181,7 @@ pub async fn run_interactive(
 
 fn runtime_context(config: &Config, cwd: &Path) -> String {
     format!(
-        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If a tool budget is exhausted, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
+        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
         env!("CARGO_PKG_VERSION"),
         config.provider_name,
         config.model,
@@ -184,7 +189,206 @@ fn runtime_context(config: &Config, cwd: &Path) -> String {
         cwd.display(),
         config.config_dir.display(),
         config.max_context_tokens,
+        config.max_tool_rounds,
     )
+}
+
+#[derive(Debug)]
+struct ExecutedToolUse {
+    id: String,
+    name: String,
+    input: serde_json::Value,
+    content: String,
+    is_error: bool,
+}
+
+#[derive(Debug)]
+struct ToolObservation {
+    fingerprint: String,
+    is_error: bool,
+}
+
+impl ToolObservation {
+    fn new(name: &str, input: &serde_json::Value, is_error: bool) -> Self {
+        let input = serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
+        Self {
+            fingerprint: format!("{name}:{input}"),
+            is_error,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LoopGuardAction {
+    Continue,
+    Nudge(String),
+    ForceFinal(String),
+}
+
+#[derive(Debug)]
+struct LoopGuard {
+    explicit_limit: usize,
+    rounds: usize,
+    consecutive_errors: usize,
+    repeated_tool_calls: HashMap<String, usize>,
+    repeated_nudged: bool,
+    errors_nudged: bool,
+}
+
+impl LoopGuard {
+    fn new(explicit_limit: usize) -> Self {
+        Self {
+            explicit_limit,
+            rounds: 0,
+            consecutive_errors: 0,
+            repeated_tool_calls: HashMap::new(),
+            repeated_nudged: false,
+            errors_nudged: false,
+        }
+    }
+
+    fn observe_round(&mut self, observations: &[ToolObservation]) -> LoopGuardAction {
+        self.rounds += 1;
+        if self.explicit_limit > 0 && self.rounds >= self.explicit_limit {
+            return LoopGuardAction::ForceFinal(format!(
+                "explicit tool round limit ({}) reached",
+                self.explicit_limit
+            ));
+        }
+        if self.rounds >= HARD_TOOL_ROUND_LIMIT {
+            return LoopGuardAction::ForceFinal(format!(
+                "hard safety limit ({HARD_TOOL_ROUND_LIMIT}) reached"
+            ));
+        }
+
+        let mut max_repeats = 0;
+        let mut repeated_fingerprint = None;
+        for observation in observations {
+            let count = self
+                .repeated_tool_calls
+                .entry(observation.fingerprint.clone())
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
+            if *count > max_repeats {
+                max_repeats = *count;
+                repeated_fingerprint = Some(observation.fingerprint.as_str());
+            }
+
+            if observation.is_error {
+                self.consecutive_errors += 1;
+            } else {
+                self.consecutive_errors = 0;
+            }
+        }
+
+        if max_repeats >= REPEATED_TOOL_FORCE_LIMIT {
+            return LoopGuardAction::ForceFinal(format!(
+                "same tool call repeated {max_repeats} times ({})",
+                repeated_fingerprint.unwrap_or("unknown")
+            ));
+        }
+        if max_repeats >= REPEATED_TOOL_NUDGE_LIMIT && !self.repeated_nudged {
+            self.repeated_nudged = true;
+            return LoopGuardAction::Nudge(format!(
+                "same tool call repeated {max_repeats} times ({})",
+                repeated_fingerprint.unwrap_or("unknown")
+            ));
+        }
+
+        if self.consecutive_errors >= CONSECUTIVE_ERROR_FORCE_LIMIT {
+            return LoopGuardAction::ForceFinal(format!(
+                "{} consecutive tool errors",
+                self.consecutive_errors
+            ));
+        }
+        if self.consecutive_errors >= CONSECUTIVE_ERROR_NUDGE_LIMIT && !self.errors_nudged {
+            self.errors_nudged = true;
+            return LoopGuardAction::Nudge(format!(
+                "{} consecutive tool errors",
+                self.consecutive_errors
+            ));
+        }
+
+        LoopGuardAction::Continue
+    }
+}
+
+#[cfg(test)]
+mod loop_guard_tests {
+    use super::*;
+
+    fn observation(name: &str, input: serde_json::Value, is_error: bool) -> ToolObservation {
+        ToolObservation::new(name, &input, is_error)
+    }
+
+    #[test]
+    fn nudges_then_forces_repeated_tool_calls() {
+        let mut guard = LoopGuard::new(0);
+        let read = observation("read", serde_json::json!({"path": "a.txt"}), false);
+        assert_eq!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::Continue
+        );
+        assert_eq!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::Continue
+        );
+        assert_eq!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::Continue
+        );
+        assert!(matches!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::Nudge(reason) if reason.contains("same tool call repeated")
+        ));
+        assert_eq!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::Continue
+        );
+        assert_eq!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::Continue
+        );
+        assert!(matches!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::ForceFinal(reason) if reason.contains("same tool call repeated")
+        ));
+    }
+
+    #[test]
+    fn nudges_consecutive_tool_errors() {
+        let mut guard = LoopGuard::new(0);
+        for index in 0..4 {
+            let failed = observation(
+                "edit",
+                serde_json::json!({"path": format!("{index}.txt")}),
+                true,
+            );
+            assert_eq!(
+                guard.observe_round(std::slice::from_ref(&failed)),
+                LoopGuardAction::Continue
+            );
+        }
+        let failed = observation("edit", serde_json::json!({"path": "final.txt"}), true);
+        assert!(matches!(
+            guard.observe_round(std::slice::from_ref(&failed)),
+            LoopGuardAction::Nudge(reason) if reason.contains("consecutive tool errors")
+        ));
+    }
+
+    #[test]
+    fn explicit_limit_forces_final() {
+        let mut guard = LoopGuard::new(2);
+        let read = observation("read", serde_json::json!({"path": "a.txt"}), false);
+        assert_eq!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::Continue
+        );
+        assert!(matches!(
+            guard.observe_round(std::slice::from_ref(&read)),
+            LoopGuardAction::ForceFinal(reason) if reason.contains("explicit tool round limit")
+        ));
+    }
 }
 
 struct AgentState {
@@ -321,7 +525,8 @@ impl AgentState {
             tools.extend_from_slice(mcp.definitions());
         }
 
-        for _ in 0..MAX_TOOL_ROUNDS {
+        let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
+        let force_final_reason = loop {
             let response = provider
                 .complete(&config.model, &self.messages, &tools, config.thinking)
                 .await?;
@@ -345,32 +550,49 @@ impl AgentState {
                 return Ok(());
             }
 
-            for (id, name, input) in tool_uses {
-                eprintln!();
-                render_tool_call(&name, &input);
-                let (content, is_error) = match self.execute_tool(&name, &input).await {
-                    Ok(output) => (output, false),
-                    Err(error) => (error.to_string(), true),
-                };
-                render_tool_result(&name, &content, is_error);
+            let executed_tools = self.execute_tool_batch(tool_uses).await;
+            let mut observations = Vec::new();
+            for executed in executed_tools {
+                observations.push(ToolObservation::new(
+                    &executed.name,
+                    &executed.input,
+                    executed.is_error,
+                ));
                 let result = messages::Message {
                     role: messages::Role::Tool,
                     content: vec![messages::ContentBlock::ToolResult {
-                        tool_use_id: id,
-                        content,
-                        is_error,
+                        tool_use_id: executed.id,
+                        content: executed.content,
+                        is_error: executed.is_error,
                     }],
                 };
                 self.session.append_message(&result)?;
                 self.messages.push(result);
             }
-        }
 
+            match loop_guard.observe_round(&observations) {
+                LoopGuardAction::Continue => {}
+                LoopGuardAction::Nudge(reason) => {
+                    let message = messages::Message::text(
+                        messages::Role::System,
+                        format!(
+                            "Adaptive loop guard: {reason}. Do not repeat the same failed or redundant action. Use existing tool results, choose a different concrete action, or finish with a concise summary if enough evidence is available."
+                        ),
+                    );
+                    eprintln!("[loop-guard] {reason}");
+                    self.session.append_message(&message)?;
+                    self.messages.push(message);
+                }
+                LoopGuardAction::ForceFinal(reason) => break reason,
+            }
+        };
+
+        eprintln!("[loop-guard] stopped tool use: {force_final_reason}");
         let mut final_messages = self.messages.clone();
         final_messages.push(messages::Message::text(
             messages::Role::System,
             format!(
-                "The tool round budget ({MAX_TOOL_ROUNDS}) is exhausted. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
+                "Adaptive loop guard stopped tool use: {force_final_reason}. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
             ),
         ));
         let final_response = provider
@@ -415,6 +637,106 @@ impl AgentState {
             self.mcp = Some(mcp::McpManager::start(&config.mcp_servers).await?);
         }
         Ok(())
+    }
+
+    async fn execute_tool_batch(
+        &mut self,
+        tool_uses: Vec<(String, String, serde_json::Value)>,
+    ) -> Vec<ExecutedToolUse> {
+        let can_parallelize = tool_uses
+            .iter()
+            .all(|(_, name, _)| self.is_parallel_safe_builtin_tool(name));
+        if can_parallelize && tool_uses.len() > 1 {
+            return self.execute_parallel_builtin_tools(tool_uses).await;
+        }
+        self.execute_sequential_tools(tool_uses).await
+    }
+
+    fn is_parallel_safe_builtin_tool(&self, name: &str) -> bool {
+        if self.mcp.as_ref().is_some_and(|mcp| mcp.has_tool(name)) {
+            return false;
+        }
+        matches!(name, "read" | "ls" | "grep" | "find")
+    }
+
+    async fn execute_parallel_builtin_tools(
+        &self,
+        tool_uses: Vec<(String, String, serde_json::Value)>,
+    ) -> Vec<ExecutedToolUse> {
+        for (_, name, input) in &tool_uses {
+            eprintln!();
+            render_tool_call(name, input);
+        }
+
+        let cwd = self.cwd.clone();
+        let mut handles = Vec::new();
+        for (index, (id, name, input)) in tool_uses.into_iter().enumerate() {
+            let cwd = cwd.clone();
+            handles.push(tokio::spawn(async move {
+                let (content, is_error) = match builtin_tools::execute(&name, &input, &cwd).await {
+                    Ok(output) => (output, false),
+                    Err(error) => (error.to_string(), true),
+                };
+                (
+                    index,
+                    ExecutedToolUse {
+                        id,
+                        name,
+                        input,
+                        content,
+                        is_error,
+                    },
+                )
+            }));
+        }
+
+        let mut results = Vec::new();
+        for handle in handles {
+            match handle.await {
+                Ok(result) => results.push(result),
+                Err(error) => results.push((
+                    usize::MAX,
+                    ExecutedToolUse {
+                        id: String::new(),
+                        name: "internal".to_string(),
+                        input: serde_json::Value::Null,
+                        content: format!("parallel tool task failed: {error}"),
+                        is_error: true,
+                    },
+                )),
+            }
+        }
+        results.sort_by_key(|(index, _)| *index);
+        let mut executed = Vec::new();
+        for (_, result) in results {
+            render_tool_result(&result.name, &result.content, result.is_error);
+            executed.push(result);
+        }
+        executed
+    }
+
+    async fn execute_sequential_tools(
+        &mut self,
+        tool_uses: Vec<(String, String, serde_json::Value)>,
+    ) -> Vec<ExecutedToolUse> {
+        let mut results = Vec::new();
+        for (id, name, input) in tool_uses {
+            eprintln!();
+            render_tool_call(&name, &input);
+            let (content, is_error) = match self.execute_tool(&name, &input).await {
+                Ok(output) => (output, false),
+                Err(error) => (error.to_string(), true),
+            };
+            render_tool_result(&name, &content, is_error);
+            results.push(ExecutedToolUse {
+                id,
+                name,
+                input,
+                content,
+                is_error,
+            });
+        }
+        results
     }
 
     async fn execute_tool(&mut self, name: &str, input: &serde_json::Value) -> Result<String> {
@@ -1374,6 +1696,7 @@ fn handle_command(
             println!("chars: {}", stats.chars);
             println!("estimated_tokens: {}", stats.estimated_tokens);
             println!("max_context_tokens: {}", config.max_context_tokens);
+            println!("max_tool_rounds: {}", config.max_tool_rounds);
             println!("file_bytes: {}", stats.file_bytes);
             println!("pending_images: {}", state.pending_images.len());
             println!("skills: {}", state.skills.len());
