@@ -165,6 +165,14 @@ FERRUM_CODEX_CLIENT_VERSION
 FERRUM_MAX_TOOL_ROUNDS
 ```
 
+Development/testing:
+
+```text
+FERRUM_FAKE_SCRIPT
+```
+
+`FERRUM_FAKE_SCRIPT` is only used with the fake provider for deterministic local harness tests. Current scripts: `repeat_read`, `missing_read`, and `mixed_write_read`.
+
 OpenAI-compatible providers read API keys from the environment variable named by `api_key_env`.
 
 Example:

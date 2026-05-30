@@ -32,13 +32,18 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 - Current-directory session picker/switching with `/sessions`.
 - Model-generated compaction with recent-context retention.
 - Plain multiline tool rendering, bounded tool-result previews, and unified diff-style `edit` rendering.
-- Final no-tools synthesis when the per-turn tool-round budget is exhausted.
+- Final no-tools synthesis when the adaptive loop guard or an explicit tool-round cap stops tool use.
 - Lowercase `agents.md` context loading alongside `AGENTS.md`.
 - Core tool hardening for `find`, `grep`, `ls`, and `bash`:
   - `find`: glob patterns, limits, hidden config directories, ignore files, relative paths, noisy-directory skips.
   - `grep`: glob filters, ignore-case, literal search, context lines, limits, hidden files, noisy-directory skips.
   - `ls`: dotfiles, case-insensitive sorting, directory suffixes, entry limits, limit notices.
   - `bash`: bounded previews with full stdout/stderr saved to temp files when truncated.
+- Harness loop hardening:
+  - adaptive loop guard for repeated identical tool calls and consecutive tool errors.
+  - `max_tool_rounds = 0` adaptive default with positive values available as explicit caps.
+  - parallel execution for safe read-only built-in tool batches.
+  - deterministic fake-provider scripts for local harness tests.
 
 ## Next
 

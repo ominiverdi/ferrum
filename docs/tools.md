@@ -132,9 +132,33 @@ List directory contents, including dotfiles. Directories have a `/` suffix and e
 }
 ```
 
-## Tool loop budget
+## Tool loop behavior
 
-Ferrum limits tool rounds per user turn. If the budget is exhausted, Ferrum makes one final no-tools model call asking the assistant to summarize findings and next steps instead of returning a raw loop-limit error.
+Ferrum defaults to an adaptive loop guard instead of a low fixed tool-round cap. It lets normal long tasks continue while watching for pathological behavior:
+
+- repeated identical tool calls
+- many consecutive tool errors
+- an internal hard safety limit
+
+When the guard sees suspicious behavior, Ferrum first injects a corrective system nudge. If the behavior continues, Ferrum makes one final no-tools model call asking the assistant to summarize findings and next steps. Guard events are printed to stderr as `[loop-guard] ...`.
+
+Set `max_tool_rounds` to a positive value to restore an explicit fixed cap for debugging or benchmarks.
+
+## Parallel tool execution
+
+Ferrum runs safe read-only built-in tool batches in parallel when all tool calls in the model's batch are one of:
+
+- `read`
+- `ls`
+- `grep`
+- `find`
+
+Results are appended in the original model-requested order. Mixed or mutating batches stay sequential, including:
+
+- `bash`
+- `write`
+- `edit`
+- MCP tools
 
 ## Safety
 
