@@ -52,6 +52,8 @@ Exact text replacement.
 }
 ```
 
+Interactive and print output renders `edit` calls as a plain unified diff for readability.
+
 Rules:
 
 - `old_text` must not be empty.
