@@ -11,7 +11,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
@@ -25,10 +25,17 @@ pub async fn run_print(prompt: String, images: Vec<String>, config: &Config) -> 
     state.run_turn(prompt, config).await
 }
 
-pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>) -> Result<()> {
-    let mut state = match resume {
-        Some(path) => AgentState::resume(config, path.map(PathBuf::from))?,
-        None => AgentState::new(config)?,
+pub async fn run_interactive(
+    config: &mut Config,
+    resume: Option<Option<String>>,
+    continue_latest: bool,
+    session_ref: Option<String>,
+) -> Result<()> {
+    let mut state = match (session_ref, resume, continue_latest) {
+        (Some(reference), _, _) => AgentState::resume_ref(config, Some(&reference))?,
+        (None, Some(Some(reference)), _) => AgentState::resume_ref(config, Some(&reference))?,
+        (None, Some(None), _) | (None, None, true) => AgentState::resume_ref(config, None)?,
+        (None, None, false) => AgentState::new(config)?,
     };
     println!("Ferrum interactive. /help for commands.");
 
@@ -166,7 +173,7 @@ pub async fn run_interactive(config: &mut Config, resume: Option<Option<String>>
 
 fn runtime_context(config: &Config, cwd: &Path) -> String {
     format!(
-        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
+        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
         env!("CARGO_PKG_VERSION"),
         config.provider_name,
         config.model,
@@ -184,6 +191,7 @@ struct AgentState {
     cwd: std::path::PathBuf,
     mcp: Option<mcp::McpManager>,
     pending_images: Vec<messages::ContentBlock>,
+    last_session_list: Vec<session::jsonl::SessionInfo>,
 }
 
 impl AgentState {
@@ -208,22 +216,34 @@ impl AgentState {
             ));
         }
         Ok(Self {
-            session: session::JsonlSession::create(config.sessions_dir())?,
+            session: session::JsonlSession::create(
+                config.sessions_dir(),
+                Some(config.provider_name.clone()),
+                Some(config.model.clone()),
+            )?,
             messages,
             skills,
             cwd,
             mcp: None,
             pending_images: Vec::new(),
+            last_session_list: Vec::new(),
         })
     }
 
-    fn resume(config: &Config, path: Option<PathBuf>) -> Result<Self> {
+    fn resume_ref(config: &Config, reference: Option<&str>) -> Result<Self> {
         let cwd = std::env::current_dir()?;
-        let path = match path {
-            Some(path) => path,
-            None => session::jsonl::latest_session(&config.sessions_dir())?
-                .ok_or_else(|| anyhow::anyhow!("no sessions found"))?,
+        let path = match reference {
+            Some(reference) => {
+                session::jsonl::resolve_session_ref(&config.sessions_dir(), &cwd, reference)?
+            }
+            None => session::jsonl::latest_session_for_cwd(&config.sessions_dir(), &cwd)?
+                .ok_or_else(|| anyhow::anyhow!("no sessions found for {}", cwd.display()))?,
         };
+        Self::open_session(config, path)
+    }
+
+    fn open_session(config: &Config, path: PathBuf) -> Result<Self> {
+        let cwd = std::env::current_dir()?;
         let mut messages = session::jsonl::load_messages(&path)?;
         let count = messages.len();
         println!("resumed {} ({count} messages)", path.display());
@@ -231,6 +251,12 @@ impl AgentState {
             messages::Role::System,
             runtime_context(config, &cwd),
         ));
+        if let Some(system_context) = context::load_context(&config.config_dir, &cwd)? {
+            messages.push(messages::Message::text(
+                messages::Role::System,
+                system_context,
+            ));
+        }
         let skills = skills::discover(&config.config_dir, &cwd)?;
         if let Some(skill_context) = skills::render_available_skills(&skills) {
             messages.push(messages::Message::text(
@@ -245,6 +271,7 @@ impl AgentState {
             cwd,
             mcp: None,
             pending_images: Vec::new(),
+            last_session_list: Vec::new(),
         })
     }
 
@@ -397,6 +424,84 @@ impl AgentState {
         }
     }
 
+    fn list_sessions(&mut self, config: &Config) -> Result<()> {
+        let sessions = session::jsonl::list_sessions_for_cwd(&config.sessions_dir(), &self.cwd)?;
+        self.last_session_list = sessions.clone();
+        if sessions.is_empty() {
+            println!("No sessions found in {}", self.cwd.display());
+            return Ok(());
+        }
+        println!("Recent sessions in {}\n", self.cwd.display());
+        print_session_list(&sessions, self.session.path());
+        println!("\nUse /sessions 2, /sessions pick, or /sessions new");
+        Ok(())
+    }
+
+    fn open_session_reference(&mut self, config: &Config, reference: &str) -> Result<()> {
+        let path = self.resolve_session_reference(config, reference)?;
+        if path == *self.session.path() {
+            println!("Already on session {}", path.display());
+            return Ok(());
+        }
+        let next = Self::open_session(config, path)?;
+        *self = next;
+        Ok(())
+    }
+
+    fn resolve_session_reference(&self, config: &Config, reference: &str) -> Result<PathBuf> {
+        if let Ok(index) = reference.parse::<usize>() {
+            if self.last_session_list.is_empty() {
+                anyhow::bail!(
+                    "no session list is active. Run /sessions first, then use /sessions 1"
+                )
+            }
+            let Some(session) = self.last_session_list.get(index.saturating_sub(1)) else {
+                anyhow::bail!("no session [{index}] in the last /sessions list")
+            };
+            return Ok(session.path.clone());
+        }
+        session::jsonl::resolve_session_ref(&config.sessions_dir(), &self.cwd, reference)
+    }
+
+    fn new_session(&mut self, config: &Config) -> Result<()> {
+        let next = Self::new(config)?;
+        println!("started new session {}", next.session.path().display());
+        *self = next;
+        Ok(())
+    }
+
+    fn pick_session(&mut self, config: &Config) -> Result<()> {
+        let mut query = String::new();
+        loop {
+            let all = session::jsonl::list_sessions_for_cwd(&config.sessions_dir(), &self.cwd)?;
+            let filtered = filter_sessions(&all, &query);
+            self.last_session_list = filtered.clone();
+            if query.is_empty() {
+                println!("Recent sessions in {}\n", self.cwd.display());
+            } else {
+                println!("Recent sessions matching '{query}'\n");
+            }
+            if filtered.is_empty() {
+                println!("No matching sessions");
+            } else {
+                print_session_list(&filtered, self.session.path());
+            }
+            print!("\nOpen number, search text, or blank to cancel: ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+            if input.is_empty() {
+                println!("cancelled");
+                return Ok(());
+            }
+            if input.chars().all(|ch| ch.is_ascii_digit()) {
+                return self.open_session_reference(config, input);
+            }
+            query = input.to_string();
+        }
+    }
+
     fn expand_skill_prompt(&self, name: &str, args: Option<&str>) -> Result<String> {
         let skill = self
             .skills
@@ -501,6 +606,70 @@ impl AgentState {
             .complete(&config.model, &request_messages, &[], config.thinking)
             .await?;
         Ok(response.text_content())
+    }
+}
+
+fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &Path) {
+    for (index, session) in sessions.iter().enumerate() {
+        let marker = if session.path == current_path {
+            "*"
+        } else {
+            " "
+        };
+        let age = format_age(session.modified);
+        let model = session.model.as_deref().unwrap_or("unknown-model");
+        let provider = session.provider.as_deref().unwrap_or("unknown-provider");
+        let provider_model = format!("{provider}/{model}");
+        println!(
+            "[{}] {marker} {:>4} {:>4} msgs  {:<28} {}",
+            index + 1,
+            age,
+            session.message_count,
+            truncate_chars(&provider_model, 28).replace('\n', " "),
+            session.title
+        );
+    }
+}
+
+fn filter_sessions(
+    sessions: &[session::jsonl::SessionInfo],
+    query: &str,
+) -> Vec<session::jsonl::SessionInfo> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return sessions.to_vec();
+    }
+    sessions
+        .iter()
+        .filter(|session| {
+            session.title.to_lowercase().contains(&query)
+                || session.short_id.to_lowercase().contains(&query)
+                || session
+                    .model
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .contains(&query)
+        })
+        .cloned()
+        .collect()
+}
+
+fn format_age(modified: SystemTime) -> String {
+    let elapsed = SystemTime::now()
+        .duration_since(modified)
+        .unwrap_or_default();
+    let minutes = elapsed.as_secs() / 60;
+    if minutes < 1 {
+        "now".to_string()
+    } else if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 60 * 24 {
+        format!("{}h", minutes / 60)
+    } else if minutes < 60 * 24 * 7 {
+        format!("{}d", minutes / (60 * 24))
+    } else {
+        format!("{}w", minutes / (60 * 24 * 7))
     }
 }
 
@@ -983,6 +1152,10 @@ fn handle_command(
             println!("  /quit | /exit          exit");
             println!("  /version              show Ferrum version");
             println!("  /session              show session path/status/size");
+            println!("  /sessions             list recent sessions for current directory");
+            println!("  /sessions <ref>       open bracket number, id prefix, or path");
+            println!("  /sessions pick        open numbered session picker");
+            println!("  /sessions new         start a new session");
             println!("  /skills               list available skills");
             println!("  /skill <name> [args]  load a skill into context");
             println!("  /skill:<name> [args]  load a skill into context");
@@ -1017,6 +1190,21 @@ fn handle_command(
             println!("model: {}", config.model);
             println!("thinking: {:?}", config.thinking);
             println!("provider: {}", config.provider_name);
+            Ok(CommandAction::Continue)
+        }
+        "/sessions" => {
+            match parts.next() {
+                None => state.list_sessions(config)?,
+                Some("pick") => state.pick_session(config)?,
+                Some("new") => state.new_session(config)?,
+                Some("open") => {
+                    let reference = parts
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("usage: /sessions open <number|id|path>"))?;
+                    state.open_session_reference(config, reference)?;
+                }
+                Some(reference) => state.open_session_reference(config, reference)?,
+            }
             Ok(CommandAction::Continue)
         }
         "/skills" => {

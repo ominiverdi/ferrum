@@ -42,7 +42,7 @@ pub enum SessionEntry {
 }
 
 impl JsonlSession {
-    pub fn create(dir: PathBuf) -> Result<Self> {
+    pub fn create(dir: PathBuf, provider: Option<String>, model: Option<String>) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let path = dir.join(format!("{}.jsonl", now_ms()));
         let file = OpenOptions::new()
@@ -56,8 +56,8 @@ impl JsonlSession {
             parent_id: None,
             timestamp_ms: now_ms(),
             version: 1,
-            provider: None,
-            model: None,
+            provider,
+            model,
             cwd: std::env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
@@ -129,16 +129,151 @@ pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
     Ok(messages)
 }
 
-pub fn latest_session(dir: &Path) -> Result<Option<PathBuf>> {
-    if !dir.exists() {
-        return Ok(None);
-    }
-    let mut entries = fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub id: String,
+    pub short_id: String,
+    pub path: PathBuf,
+    pub cwd: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub title: String,
+    pub message_count: usize,
+    pub modified: SystemTime,
+}
+
+pub fn latest_session_for_cwd(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
+    Ok(list_sessions_for_cwd(dir, cwd)?
+        .first()
+        .map(|info| info.path.clone()))
+}
+
+pub fn list_sessions_for_cwd(dir: &Path, cwd: &Path) -> Result<Vec<SessionInfo>> {
+    let cwd = cwd.display().to_string();
+    let mut sessions = list_sessions(dir)?
+        .into_iter()
+        .filter(|session| session.cwd.as_deref() == Some(cwd.as_str()))
         .collect::<Vec<_>>();
-    entries.sort();
-    Ok(entries.pop())
+    sort_sessions_newest_first(&mut sessions);
+    Ok(sessions)
+}
+
+pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut sessions = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            continue;
+        }
+        if let Some(info) = session_info(&path)? {
+            sessions.push(info);
+        }
+    }
+    sort_sessions_newest_first(&mut sessions);
+    Ok(sessions)
+}
+
+pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(reference);
+    if reference.contains('/') || reference.ends_with(".jsonl") {
+        return Ok(path);
+    }
+    let matches = list_sessions_for_cwd(dir, cwd)?
+        .into_iter()
+        .filter(|session| {
+            session.id.starts_with(reference) || session.short_id.starts_with(reference)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [session] => Ok(session.path.clone()),
+        [] => anyhow::bail!("no session matches '{reference}' in current directory"),
+        _ => anyhow::bail!("session reference '{reference}' is ambiguous"),
+    }
+}
+
+fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let modified = fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(UNIX_EPOCH);
+    let mut id = None;
+    let mut cwd = None;
+    let mut provider = None;
+    let mut model = None;
+    let mut title = None;
+    let mut message_count = 0usize;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: SessionEntry = match serde_json::from_str(&line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        match entry {
+            SessionEntry::Header {
+                id: header_id,
+                provider: header_provider,
+                model: header_model,
+                cwd: header_cwd,
+                ..
+            } => {
+                id = Some(header_id);
+                provider = header_provider;
+                model = header_model;
+                cwd = header_cwd;
+            }
+            SessionEntry::Message { message, .. } => {
+                message_count += 1;
+                if title.is_none() && matches!(message.role, Role::User) {
+                    let text = message.text_content();
+                    if !text.trim().is_empty() {
+                        title = Some(one_line_title(&text));
+                    }
+                }
+            }
+            SessionEntry::Compaction { .. } => {}
+        }
+    }
+
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    let short_id = id.chars().take(8).collect();
+    Ok(Some(SessionInfo {
+        id,
+        short_id,
+        path: path.to_path_buf(),
+        cwd,
+        provider,
+        model,
+        title: title.unwrap_or_else(|| "(empty session)".to_string()),
+        message_count,
+        modified,
+    }))
+}
+
+fn sort_sessions_newest_first(sessions: &mut [SessionInfo]) {
+    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+}
+
+fn one_line_title(text: &str) -> String {
+    let title = text
+        .split_whitespace()
+        .take(18)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.chars().count() > 120 {
+        title.chars().take(120).collect()
+    } else {
+        title
+    }
 }
 
 fn now_ms() -> u64 {
@@ -156,7 +291,7 @@ mod tests {
     #[test]
     fn writes_header_and_message_jsonl() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session = JsonlSession::create(temp.path().to_path_buf()).unwrap();
+        let mut session = JsonlSession::create(temp.path().to_path_buf(), None, None).unwrap();
         session
             .append_message(&Message::text(Role::User, "hello"))
             .unwrap();

@@ -24,9 +24,17 @@ pub struct Args {
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
 
-    /// Resume the latest session, or a specific JSONL session path
-    #[arg(long, value_name = "PATH")]
+    /// Resume the latest session, or a specific JSONL session path/id prefix
+    #[arg(long, value_name = "REF")]
     pub resume: Option<Option<String>>,
+
+    /// Continue the latest session for the current directory
+    #[arg(long = "continue")]
+    pub r#continue: bool,
+
+    /// Open a specific session by path or id prefix
+    #[arg(long, value_name = "REF")]
+    pub session: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Command>,

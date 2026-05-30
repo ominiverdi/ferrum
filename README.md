@@ -31,17 +31,17 @@ Status: early MVP. Useful for real work, still evolving.
 Download the latest release asset from GitHub:
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.1/ferrum-v0.4.1-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.1-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.2/ferrum-v0.4.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
 Optional checksum verification:
 
 ```bash
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.1/ferrum-v0.4.1-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.1/ferrum-v0.4.1-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.4.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.2/ferrum-v0.4.2-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.2/ferrum-v0.4.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.4.2-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### From source
@@ -83,6 +83,7 @@ Resume the latest session:
 
 ```bash
 ferrum --resume
+ferrum --continue
 ```
 
 ## Minimal config
@@ -120,6 +121,10 @@ OpenAI-compatible providers use environment-backed keys. Do not put secret value
 ```text
 /help
 /session
+/sessions
+/sessions 2
+/sessions pick
+/sessions new
 /model [name]
 /models
 /provider [name]

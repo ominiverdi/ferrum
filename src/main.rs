@@ -41,5 +41,5 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    agent::run_interactive(&mut config, args.resume).await
+    agent::run_interactive(&mut config, args.resume, args.r#continue, args.session).await
 }

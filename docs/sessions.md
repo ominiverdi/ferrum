@@ -18,24 +18,37 @@ Sessions are append-oriented and human-inspectable.
 
 ## Resume
 
-Resume latest session:
+Continue the latest session for the current directory:
+
+```bash
+ferrum --continue
+```
+
+Resume the latest session for the current directory:
 
 ```bash
 ferrum --resume
 ```
 
-Resume a specific session:
+Resume a specific session by path or id prefix:
 
 ```bash
 ferrum --resume ~/.config/ferrum/sessions/<file>.jsonl
+ferrum --session <id-prefix>
 ```
 
 ## Interactive session commands
 
 ```text
 /session
+/sessions
+/sessions 2
+/sessions pick
+/sessions new
 /compact
 ```
+
+`/sessions` lists recent sessions for the current directory with bracket numbers. `/sessions 2` opens entry `[2]` from the last list. `/sessions pick` opens a lightweight numbered picker where entering a number opens that session and entering text filters the list. `/sessions new` starts a fresh session.
 
 `/session` shows:
 

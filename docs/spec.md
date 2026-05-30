@@ -64,6 +64,10 @@ Slash commands:
 - `/help`
 - `/version`
 - `/session`
+- `/sessions`
+- `/sessions <number|id-prefix|path>`
+- `/sessions pick`
+- `/sessions new`
 - `/model [name]`
 - `/models`
 - `/provider [name]`
@@ -83,8 +87,14 @@ Shell shortcuts:
 
 Session resume:
 
-- `ferrum --resume` resumes the latest JSONL session.
-- `ferrum --resume <path>` resumes a specific JSONL session.
+- `ferrum --continue` resumes the latest JSONL session for the current directory.
+- `ferrum --resume` resumes the latest JSONL session for the current directory.
+- `ferrum --resume <path|id-prefix>` resumes a specific JSONL session.
+- `ferrum --session <path|id-prefix>` opens a specific JSONL session.
+- `/sessions` lists current-directory sessions with bracket numbers.
+- `/sessions 2` opens entry `[2]` from the last list.
+- `/sessions pick` provides a lightweight numbered picker with text filtering.
+- `/sessions new` starts a fresh session.
 
 ## Configuration
 
