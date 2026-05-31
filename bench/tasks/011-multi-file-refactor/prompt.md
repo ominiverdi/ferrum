@@ -1,0 +1,1 @@
+This small Python project has duplicated discount logic and failing tests. Refactor the duplicated discount calculation into one shared helper module, update all callers, run the tests, and fix the failure. Keep the patch minimal and do not modify tests.

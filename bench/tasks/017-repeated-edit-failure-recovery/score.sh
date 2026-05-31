@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+run_dir="$1"; out="$run_dir/stdout.txt"; err="$run_dir/stderr.txt"; diff="$run_dir/diff.patch"; fail=0
+ok(){ echo "ok: $1"; }
+bad(){ echo "missing: $1"; fail=1; }
+grep -q '+    status = "review"' "$diff" && ok 'sets secondary review' || bad 'sets secondary review'
+! grep -E '^[+-].*primary.*review|^[+-].*review.*primary' "$diff" >/dev/null && ok 'primary unchanged' || bad 'primary unchanged'
+! grep -q 'test_workflow.py' "$diff" && ok 'tests unchanged' || bad 'tests unchanged'
+grep -Eiq 'pytest|passed' "$out" "$err" && ok 'ran tests' || bad 'ran tests'
+agent="$(sed -n 's/^agent=//p' "$run_dir/result.env" 2>/dev/null || true)"
+case "$agent" in
+  ferrum-*)
+    grep -Eiq '\[tool:edit\]' "$err" && ok 'uses edit' || bad 'uses edit'
+    grep -Eiq '\[tool:bash\]' "$err" && ok 'uses bash tests' || bad 'uses bash tests'
+    if grep -Eiq '\[result:edit error|old text.*not unique|matched.*multiple|failed to apply' "$err"; then
+      ok 'encountered edit failure'
+    else
+      echo 'skip: no edit failure encountered in this stochastic run'
+    fi
+    ;;
+  *)
+    echo "skip: tool trace assertions unavailable for $agent text-mode transcript"
+    ;;
+esac
+exit "$fail"

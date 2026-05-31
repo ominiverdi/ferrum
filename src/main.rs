@@ -16,10 +16,18 @@ use clap::Parser;
 async fn main() -> Result<()> {
     let args = cli::Args::parse();
     let mut config = config::Config::load()?;
+    let mcp_enabled = if args.mcp {
+        Some(true)
+    } else if args.no_mcp {
+        Some(false)
+    } else {
+        None
+    };
     config.apply_cli_overrides(
         args.provider.as_deref(),
         args.model.as_deref(),
         args.thinking.as_deref(),
+        mcp_enabled,
     )?;
 
     if let Some(command) = &args.command {

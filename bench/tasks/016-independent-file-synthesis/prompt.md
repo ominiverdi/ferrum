@@ -1,0 +1,1 @@
+Audit all service config files under services/. Identify the one service whose timeout_ms differs from the shared policy, report the expected timeout and actual timeout, and cite the exact file path. The files are independent; if your harness supports parallel tool calls, read the service files in parallel after locating them. Do not modify files.

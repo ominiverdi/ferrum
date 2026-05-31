@@ -13,6 +13,7 @@ pub struct Config {
     pub max_context_tokens: usize,
     pub max_tool_rounds: usize,
     pub thinking: ThinkingLevel,
+    pub mcp_enabled: bool,
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -102,6 +103,7 @@ struct FileConfig {
     max_context_tokens: Option<usize>,
     max_tool_rounds: Option<usize>,
     thinking: Option<String>,
+    mcp_enabled: Option<bool>,
     mcp: Option<FileMcpConfig>,
     #[serde(default)]
     providers: BTreeMap<String, ProviderDefinition>,
@@ -119,7 +121,10 @@ impl Config {
             Some(path) => PathBuf::from(path),
             None => home_dir()?.join(".config/ferrum"),
         };
+        Self::load_from_dir(config_dir)
+    }
 
+    fn load_from_dir(config_dir: PathBuf) -> Result<Self> {
         let file = config_dir.join("config.toml");
         let file_config: FileConfig = if file.exists() {
             let text = fs::read_to_string(&file)
@@ -160,6 +165,7 @@ impl Config {
                 .map(ThinkingLevel::parse)
                 .transpose()?
                 .unwrap_or(ThinkingLevel::Off),
+            mcp_enabled: file_config.mcp_enabled.unwrap_or(true),
             mcp_servers: file_config.mcp.map(|mcp| mcp.servers).unwrap_or_default(),
         })
     }
@@ -169,6 +175,7 @@ impl Config {
         provider: Option<&str>,
         model: Option<&str>,
         thinking: Option<&str>,
+        mcp_enabled: Option<bool>,
     ) -> Result<()> {
         if let Some(provider) = provider {
             self.set_provider(provider)?;
@@ -178,6 +185,9 @@ impl Config {
         }
         if let Some(thinking) = thinking {
             self.thinking = ThinkingLevel::parse(thinking)?;
+        }
+        if let Some(mcp_enabled) = mcp_enabled {
+            self.mcp_enabled = mcp_enabled;
         }
         Ok(())
     }
@@ -282,4 +292,41 @@ fn home_dir() -> Result<PathBuf> {
     env::var_os("HOME")
         .map(PathBuf::from)
         .context("HOME is not set")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn mcp_enabled_defaults_true() {
+        let dir = TempDir::new().unwrap();
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(config.mcp_enabled);
+    }
+
+    #[test]
+    fn mcp_enabled_can_be_disabled_in_config() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config.toml"), "mcp_enabled = false\n").unwrap();
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!config.mcp_enabled);
+    }
+
+    #[test]
+    fn cli_mcp_override_sets_runtime_config() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config.toml"), "mcp_enabled = false\n").unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!config.mcp_enabled);
+        config
+            .apply_cli_overrides(None, None, None, Some(true))
+            .unwrap();
+        assert!(config.mcp_enabled);
+        config
+            .apply_cli_overrides(None, None, None, Some(false))
+            .unwrap();
+        assert!(!config.mcp_enabled);
+    }
 }

@@ -31,17 +31,17 @@ Status: early MVP. Useful for real work, still evolving.
 Download the latest release asset from GitHub:
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.5/ferrum-v0.4.5-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.5-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.6/ferrum-v0.4.6-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.6-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
 Optional checksum verification:
 
 ```bash
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.5/ferrum-v0.4.5-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.5/ferrum-v0.4.5-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.4.5-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.6/ferrum-v0.4.6-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.6/ferrum-v0.4.6-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.4.6-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### From source
@@ -156,6 +156,7 @@ Shell shortcuts:
 - MCP: [`docs/mcp.md`](docs/mcp.md)
 - Skills: [`docs/skills.md`](docs/skills.md)
 - Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
+- Benchmarks: [`docs/benchmarks.md`](docs/benchmarks.md)
 - Release process: [`docs/release.md`](docs/release.md)
 
 ## Safety notes

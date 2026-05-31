@@ -1,0 +1,1 @@
+Find local references to `getwindowclassname` and explain which files matter for the paste failure. Prefer native search tools and include enough surrounding context to identify the daemon function and the journal failure. Do not report dependency/build noise from ignored directories.

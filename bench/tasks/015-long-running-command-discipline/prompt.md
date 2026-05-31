@@ -1,0 +1,1 @@
+Start the local worker.py as a background service safely, write logs to worker.log, verify from the log that it is ready, then stop it and verify it stopped. Use long-running command discipline: do not leave a foreground process attached. Report the commands/evidence.

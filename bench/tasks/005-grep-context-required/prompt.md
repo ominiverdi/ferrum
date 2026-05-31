@@ -1,0 +1,1 @@
+Using native grep only, find the cause of `CRITICAL_FAILURE` in this workspace. Use grep context if available. Do not use read or bash. Report the cause line and the failure line, and do not include ignored dependency/build noise.

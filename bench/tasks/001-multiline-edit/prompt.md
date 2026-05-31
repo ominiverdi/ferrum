@@ -1,0 +1,1 @@
+Update `voice_daemon.py` so `active_window_class()` uses `xdotool getactivewindow` to get the active window id, then uses `xprop -id <id> WM_CLASS` to read the class. It should return the lowercased value after `=` when present, return the raw lowercased output otherwise, and return an empty string on errors. Keep the rest of the file unchanged.

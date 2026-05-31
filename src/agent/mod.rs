@@ -181,7 +181,7 @@ pub async fn run_interactive(
 
 fn runtime_context(config: &Config, cwd: &Path) -> String {
     format!(
-        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
+        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n- mcp_enabled: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /mcp [on|off|status]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
         env!("CARGO_PKG_VERSION"),
         config.provider_name,
         config.model,
@@ -190,6 +190,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> String {
         config.config_dir.display(),
         config.max_context_tokens,
         config.max_tool_rounds,
+        config.mcp_enabled,
     )
 }
 
@@ -200,6 +201,7 @@ struct ExecutedToolUse {
     input: serde_json::Value,
     content: String,
     is_error: bool,
+    duration_ms: u128,
 }
 
 #[derive(Debug)]
@@ -216,6 +218,71 @@ impl ToolObservation {
             is_error,
         }
     }
+}
+
+fn metrics_enabled() -> bool {
+    matches!(
+        std::env::var("FERRUM_METRICS").ok().as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+fn emit_model_metrics_start(
+    request: usize,
+    messages: &[messages::Message],
+    tools: &[tools::ToolDefinition],
+) {
+    let text_chars = messages
+        .iter()
+        .map(|message| message.text_content().chars().count())
+        .sum::<usize>();
+    let message_bytes = serde_json::to_vec(messages)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    let tool_schema_bytes = serde_json::to_vec(tools)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    let payload_bytes = message_bytes.saturating_add(tool_schema_bytes);
+    eprintln!(
+        "[metrics:model start] request={request} messages={} text_chars={text_chars} text_estimated_tokens={} message_bytes={message_bytes} tools={} tool_schema_bytes={tool_schema_bytes} payload_bytes={payload_bytes} payload_estimated_tokens={}",
+        messages.len(),
+        text_chars.div_ceil(4),
+        tools.len(),
+        payload_bytes.div_ceil(4)
+    );
+}
+
+fn emit_model_metrics_end(request: usize, duration: Duration, response: &messages::Message) {
+    let output_chars = response.text_content().chars().count();
+    let tool_calls = response
+        .content
+        .iter()
+        .filter(|block| matches!(block, messages::ContentBlock::ToolUse { .. }))
+        .count();
+    eprintln!(
+        "[metrics:model end] request={request} latency_ms={} output_chars={output_chars} output_estimated_tokens={} tool_calls={tool_calls}",
+        duration.as_millis(),
+        output_chars.div_ceil(4)
+    );
+}
+
+fn emit_tool_metrics_if_enabled(result: &ExecutedToolUse) {
+    if !metrics_enabled() {
+        return;
+    }
+    eprintln!(
+        "[metrics:tool] name={} latency_ms={} result_bytes={} is_error={}",
+        result.name,
+        result.duration_ms,
+        result.content.len(),
+        result.is_error
+    );
+}
+
+fn tool_schema_bytes(tools: &[tools::ToolDefinition]) -> usize {
+    serde_json::to_vec(tools)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -397,6 +464,7 @@ struct AgentState {
     skills: Vec<skills::Skill>,
     cwd: std::path::PathBuf,
     mcp: Option<mcp::McpManager>,
+    mcp_enabled: bool,
     pending_images: Vec<messages::ContentBlock>,
     last_session_list: Vec<session::jsonl::SessionInfo>,
 }
@@ -432,6 +500,7 @@ impl AgentState {
             skills,
             cwd,
             mcp: None,
+            mcp_enabled: config.mcp_enabled,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
         })
@@ -477,6 +546,7 @@ impl AgentState {
             skills,
             cwd,
             mcp: None,
+            mcp_enabled: config.mcp_enabled,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
         })
@@ -518,18 +588,30 @@ impl AgentState {
         self.session.append_message(&user)?;
         self.messages.push(user);
 
-        self.ensure_mcp(config).await?;
         let provider = providers::from_config(&config.provider);
         let mut tools = builtin_tools::definitions();
-        if let Some(mcp) = &self.mcp {
-            tools.extend_from_slice(mcp.definitions());
+        if self.mcp_enabled {
+            self.ensure_mcp(config).await?;
+            if let Some(mcp) = &self.mcp {
+                tools.extend_from_slice(mcp.definitions());
+            }
         }
 
+        let metrics_enabled = metrics_enabled();
+        let mut model_request_index = 0usize;
         let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
         let force_final_reason = loop {
+            model_request_index += 1;
+            if metrics_enabled {
+                emit_model_metrics_start(model_request_index, &self.messages, &tools);
+            }
+            let started = Instant::now();
             let response = provider
                 .complete(&config.model, &self.messages, &tools, config.thinking)
                 .await?;
+            if metrics_enabled {
+                emit_model_metrics_end(model_request_index, started.elapsed(), &response);
+            }
             print!("{}", response.display_text());
             io::stdout().flush()?;
             self.session.append_message(&response)?;
@@ -595,9 +677,17 @@ impl AgentState {
                 "Adaptive loop guard stopped tool use: {force_final_reason}. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
             ),
         ));
+        model_request_index += 1;
+        if metrics_enabled {
+            emit_model_metrics_start(model_request_index, &final_messages, &[]);
+        }
+        let started = Instant::now();
         let final_response = provider
             .complete(&config.model, &final_messages, &[], config.thinking)
             .await?;
+        if metrics_enabled {
+            emit_model_metrics_end(model_request_index, started.elapsed(), &final_response);
+        }
         print!("{}", final_response.display_text());
         io::stdout().flush()?;
         self.session.append_message(&final_response)?;
@@ -633,10 +723,63 @@ impl AgentState {
     }
 
     async fn ensure_mcp(&mut self, config: &Config) -> Result<()> {
-        if self.mcp.is_none() && !config.mcp_servers.is_empty() {
+        if self.mcp_enabled && self.mcp.is_none() && !config.mcp_servers.is_empty() {
             self.mcp = Some(mcp::McpManager::start(&config.mcp_servers).await?);
         }
         Ok(())
+    }
+
+    fn set_mcp_enabled(&mut self, enabled: bool) -> Result<()> {
+        if self.mcp_enabled == enabled {
+            println!("MCP: {}", if enabled { "on" } else { "off" });
+            return Ok(());
+        }
+        self.mcp_enabled = enabled;
+        let message = messages::Message::text(
+            messages::Role::System,
+            format!(
+                "Runtime MCP availability changed. MCP tools are now {} for future turns.",
+                if enabled { "enabled" } else { "disabled" }
+            ),
+        );
+        self.session.append_message(&message)?;
+        self.messages.push(message);
+        println!("MCP: {}", if enabled { "on" } else { "off" });
+        Ok(())
+    }
+
+    fn print_mcp_status(&self, config: &Config) {
+        let native_tools = builtin_tools::definitions();
+        let mcp_tools = if self.mcp_enabled {
+            self.mcp
+                .as_ref()
+                .map(|mcp| mcp.definitions())
+                .unwrap_or(&[])
+        } else {
+            &[]
+        };
+        let mut exposed = native_tools.clone();
+        exposed.extend_from_slice(mcp_tools);
+        let configured = config.mcp_servers.len();
+        let configured_enabled = config
+            .mcp_servers
+            .iter()
+            .filter(|server| server.enabled)
+            .count();
+        println!("MCP: {}", if self.mcp_enabled { "on" } else { "off" });
+        println!("configured_servers: {configured}");
+        println!("configured_enabled_servers: {configured_enabled}");
+        println!("connected: {}", self.mcp.is_some());
+        println!("native_tools: {}", native_tools.len());
+        println!("mcp_tools_exposed: {}", mcp_tools.len());
+        println!("total_tools_exposed: {}", exposed.len());
+        println!("tool_schema_bytes: {}", tool_schema_bytes(&exposed));
+        if !config.mcp_servers.is_empty() {
+            println!("servers:");
+            for server in &config.mcp_servers {
+                println!("- {} enabled={}", server.name, server.enabled);
+            }
+        }
     }
 
     async fn execute_tool_batch(
@@ -673,6 +816,7 @@ impl AgentState {
         for (index, (id, name, input)) in tool_uses.into_iter().enumerate() {
             let cwd = cwd.clone();
             handles.push(tokio::spawn(async move {
+                let started = Instant::now();
                 let (content, is_error) = match builtin_tools::execute(&name, &input, &cwd).await {
                     Ok(output) => (output, false),
                     Err(error) => (error.to_string(), true),
@@ -685,6 +829,7 @@ impl AgentState {
                         input,
                         content,
                         is_error,
+                        duration_ms: started.elapsed().as_millis(),
                     },
                 )
             }));
@@ -702,6 +847,7 @@ impl AgentState {
                         input: serde_json::Value::Null,
                         content: format!("parallel tool task failed: {error}"),
                         is_error: true,
+                        duration_ms: 0,
                     },
                 )),
             }
@@ -710,6 +856,7 @@ impl AgentState {
         let mut executed = Vec::new();
         for (_, result) in results {
             render_tool_result(&result.name, &result.content, result.is_error);
+            emit_tool_metrics_if_enabled(&result);
             executed.push(result);
         }
         executed
@@ -723,26 +870,32 @@ impl AgentState {
         for (id, name, input) in tool_uses {
             eprintln!();
             render_tool_call(&name, &input);
+            let started = Instant::now();
             let (content, is_error) = match self.execute_tool(&name, &input).await {
                 Ok(output) => (output, false),
                 Err(error) => (error.to_string(), true),
             };
             render_tool_result(&name, &content, is_error);
-            results.push(ExecutedToolUse {
+            let result = ExecutedToolUse {
                 id,
                 name,
                 input,
                 content,
                 is_error,
-            });
+                duration_ms: started.elapsed().as_millis(),
+            };
+            emit_tool_metrics_if_enabled(&result);
+            results.push(result);
         }
         results
     }
 
     async fn execute_tool(&mut self, name: &str, input: &serde_json::Value) -> Result<String> {
-        if let Some(mcp) = &mut self.mcp {
-            if mcp.has_tool(name) {
-                return mcp.call(name, input).await;
+        if self.mcp_enabled {
+            if let Some(mcp) = &mut self.mcp {
+                if mcp.has_tool(name) {
+                    return mcp.call(name, input).await;
+                }
             }
         }
         builtin_tools::execute(name, input, &self.cwd).await
@@ -1675,6 +1828,7 @@ fn handle_command(
             println!("  /models               list known models for current provider");
             println!("  /provider [name]      show or set provider");
             println!("  /providers            list configured providers");
+            println!("  /mcp [on|off|status]  show or toggle MCP tools");
             println!(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
@@ -1700,6 +1854,8 @@ fn handle_command(
             println!("file_bytes: {}", stats.file_bytes);
             println!("pending_images: {}", state.pending_images.len());
             println!("skills: {}", state.skills.len());
+            println!("mcp_enabled: {}", state.mcp_enabled);
+            println!("mcp_connected: {}", state.mcp.is_some());
             println!("model: {}", config.model);
             println!("thinking: {:?}", config.thinking);
             println!("provider: {}", config.provider_name);
@@ -1772,6 +1928,21 @@ fn handle_command(
                         .unwrap_or_default();
                     println!("{marker} {name} type={}{}", definition.kind, default_model);
                 }
+            }
+            Ok(CommandAction::Continue)
+        }
+        "/mcp" => {
+            match parts.next() {
+                None | Some("status") | Some("list") => state.print_mcp_status(config),
+                Some("on") => {
+                    config.mcp_enabled = true;
+                    state.set_mcp_enabled(true)?;
+                }
+                Some("off") => {
+                    config.mcp_enabled = false;
+                    state.set_mcp_enabled(false)?;
+                }
+                Some(other) => anyhow::bail!("usage: /mcp [on|off|status], got: {other}"),
             }
             Ok(CommandAction::Continue)
         }

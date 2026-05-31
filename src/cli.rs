@@ -24,6 +24,14 @@ pub struct Args {
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
 
+    /// Enable configured MCP servers for this process
+    #[arg(long = "mcp", conflicts_with = "no_mcp")]
+    pub mcp: bool,
+
+    /// Disable MCP servers for this process
+    #[arg(long = "no-mcp")]
+    pub no_mcp: bool,
+
     /// Resume the latest session, or a specific JSONL session path/id prefix
     #[arg(long, value_name = "REF")]
     pub resume: Option<Option<String>>,
@@ -65,4 +73,27 @@ impl Args {
 
 fn atty_stdin() -> bool {
     std::io::IsTerminal::is_terminal(&io::stdin())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn parses_mcp_flags() {
+        let enabled = Args::try_parse_from(["ferrum", "--mcp", "-p", "hi"]).unwrap();
+        assert!(enabled.mcp);
+        assert!(!enabled.no_mcp);
+
+        let disabled = Args::try_parse_from(["ferrum", "--no-mcp", "-p", "hi"]).unwrap();
+        assert!(!disabled.mcp);
+        assert!(disabled.no_mcp);
+    }
+
+    #[test]
+    fn mcp_flags_conflict() {
+        let result = Args::try_parse_from(["ferrum", "--mcp", "--no-mcp", "-p", "hi"]);
+        assert!(result.is_err());
+    }
 }

@@ -1,0 +1,1 @@
+Investigate this fixture as if it were a Linux Mint voice dictation daemon that records and transcribes but stopped pasting. Determine why paste fails. Use only local evidence in the workspace. If you make claims about xdotool command support, cite the evidence file or log line.

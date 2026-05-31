@@ -20,6 +20,7 @@ model = "gpt-5.5"
 max_context_tokens = 256000
 max_tool_rounds = 0
 thinking = "off"
+mcp_enabled = true
 
 [providers.openai-codex]
 type = "openai-codex"
@@ -108,6 +109,39 @@ Set a positive value to restore an explicit fixed round cap for debugging or ben
 FERRUM_MAX_TOOL_ROUNDS=16 ferrum -p "finish this larger refactor"
 ```
 
+### mcp_enabled
+
+Global MCP switch.
+
+Default:
+
+```toml
+mcp_enabled = true
+```
+
+Disable MCP for a single process:
+
+```bash
+ferrum --no-mcp -p "fix this without external MCP tools"
+```
+
+Enable explicitly:
+
+```bash
+ferrum --mcp -p "debug this browser issue"
+```
+
+Interactive:
+
+```text
+/mcp
+/mcp on
+/mcp off
+/mcp status
+```
+
+When MCP is off, Ferrum does not start configured MCP servers and does not expose MCP tool schemas to the model. Native tools remain available.
+
 ### thinking
 
 Supported values:
@@ -169,9 +203,12 @@ Development/testing:
 
 ```text
 FERRUM_FAKE_SCRIPT
+FERRUM_METRICS
 ```
 
 `FERRUM_FAKE_SCRIPT` is only used with the fake provider for deterministic local harness tests. Current scripts: `repeat_read`, `missing_read`, and `mixed_write_read`.
+
+`FERRUM_METRICS=1` prints per-request model/tool metrics to stderr, including message bytes, tool schema bytes, estimated payload tokens, model latency, tool latency, and result bytes.
 
 OpenAI-compatible providers read API keys from the environment variable named by `api_key_env`.
 

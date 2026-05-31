@@ -1,0 +1,1 @@
+The current app has a failing menu label test. There are many misleading docs/generated/legacy files. Find the actual app code path, make the minimal fix, run tests, and explain which file was relevant. Do not modify tests or generated/legacy/docs files.

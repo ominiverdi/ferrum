@@ -4,6 +4,24 @@ Ferrum supports a minimal MCP stdio client.
 
 Status: early feature. It is useful for local stdio servers, but not a complete MCP implementation.
 
+MCP is enabled by default for compatibility. Disable it for coding-only turns to avoid starting MCP servers and to keep MCP tool schemas out of model requests:
+
+```bash
+ferrum --no-mcp -p "fix this"
+ferrum --mcp -p "use browser/search tools if needed"
+```
+
+Interactive:
+
+```text
+/mcp
+/mcp on
+/mcp off
+/mcp status
+```
+
+`/mcp status` shows configured servers, exposed MCP tools, total tools, and schema bytes.
+
 ## Supported
 
 - stdio servers
@@ -29,6 +47,8 @@ Status: early feature. It is useful for local stdio servers, but not a complete 
 Add servers to `~/.config/ferrum/config.toml`:
 
 ```toml
+mcp_enabled = true
+
 [[mcp.servers]]
 name = "filesystem"
 command = "npx"

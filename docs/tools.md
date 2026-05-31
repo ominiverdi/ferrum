@@ -2,7 +2,7 @@
 
 Ferrum tools are provider-neutral. Providers only translate tool definitions and tool calls to/from their API format. Execution happens in the core agent loop.
 
-Native tools are always available. MCP stdio tools can be added through config and are exposed as `mcp__<server>__<tool>`.
+Native tools are always available. MCP stdio tools can be added through config and are exposed as `mcp__<server>__<tool>` when MCP is enabled. Use `--no-mcp` or `/mcp off` to disable MCP tools for coding-only turns.
 
 Interactive mode renders tool calls in a readable multiline format and prints a bounded preview of tool results. Full tool results remain in the model/session context unless the underlying tool output itself was bounded.
 

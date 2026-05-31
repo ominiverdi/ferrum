@@ -1,0 +1,1 @@
+Investigate this fixture as if it were a Linux Mint voice dictation daemon that records and transcribes but stopped pasting. Use local files in the workspace. Report the likely root cause and the minimal fix. Do not ask me for more information unless the fixture is insufficient.
