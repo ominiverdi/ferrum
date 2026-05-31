@@ -51,6 +51,17 @@ impl ThinkingLevel {
         }
     }
 
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+        }
+    }
+
     pub fn as_openai(self) -> Option<&'static str> {
         match self {
             Self::Off => None,

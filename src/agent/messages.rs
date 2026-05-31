@@ -21,6 +21,10 @@ pub enum ContentBlock {
     Text {
         text: String,
     },
+    Thinking {
+        text: String,
+        signature: Option<String>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -72,6 +76,17 @@ impl Message {
 
     pub fn display_text(&self) -> String {
         strip_think_blocks(&self.text_content())
+    }
+
+    pub fn thinking_text(&self) -> String {
+        self.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 

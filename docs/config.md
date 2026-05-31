@@ -168,6 +168,10 @@ Interactive:
 /thinking high
 ```
 
+Ferrum stores thinking level in session metadata. Resuming or switching sessions restores that session's thinking level unless the process was started with an explicit `--thinking` override.
+
+For supported streaming providers, displayable provider-supplied thinking is shown live in interactive mode. Ferrum does not invent thinking text; no thinking block is shown when the provider sends none.
+
 ## MCP servers
 
 Ferrum supports MCP stdio servers configured in TOML:

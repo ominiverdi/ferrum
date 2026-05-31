@@ -11,10 +11,11 @@ Status: early MVP. Useful for real work, still evolving.
 ## Features
 
 - Linux-native CLI
-- Print mode and interactive mode
+- Print mode and interactive mode with live streamed responses
 - JSONL sessions with resume
 - AGENTS.md context loading
 - Configurable context budget and thinking level
+- Provider-supplied thinking display for supported models
 - Image input with optional terminal previews
 - Agent Skills-style instruction packages
 - Minimal MCP stdio tool bridge
@@ -31,17 +32,17 @@ Status: early MVP. Useful for real work, still evolving.
 Download the latest release asset from GitHub:
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.6/ferrum-v0.4.6-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.6-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.7/ferrum-v0.4.7-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.7-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
 Optional checksum verification:
 
 ```bash
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.6/ferrum-v0.4.6-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.6/ferrum-v0.4.6-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.4.6-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.7/ferrum-v0.4.7-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.7/ferrum-v0.4.7-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.4.7-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### From source
@@ -116,11 +117,14 @@ ferrum login openai
 
 OpenAI-compatible providers use environment-backed keys. Do not put secret values in `config.toml`.
 
+In active interactive turns, `Esc` aborts the current model/tool turn and returns to the prompt.
+
 ## Interactive commands
 
 ```text
 /help
 /session
+/title [text]
 /sessions
 /sessions 2
 /sessions pick

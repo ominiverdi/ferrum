@@ -11,9 +11,16 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, atomic::AtomicBool};
 use std::time::Duration;
 
 const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.135.0";
+
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    ThinkingDelta(String),
+    TextDelta(String),
+}
 
 pub trait Provider: Send + Sync {
     fn complete<'a>(
@@ -23,6 +30,18 @@ pub trait Provider: Send + Sync {
         tools: &'a [ToolDefinition],
         thinking: ThinkingLevel,
     ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>>;
+
+    fn complete_streaming<'a>(
+        &'a self,
+        model: &'a str,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+        thinking: ThinkingLevel,
+        _on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
+        _cancelled: Option<Arc<AtomicBool>>,
+    ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
+        self.complete(model, messages, tools, thinking)
+    }
 }
 
 #[derive(Debug)]

@@ -4,15 +4,23 @@ pub mod tools;
 use crate::{config::Config, context, mcp, providers, session, skills, tools as builtin_tools};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use crossterm::{
+    event::{self, Event, KeyCode},
+    terminal,
+};
 use rustyline::{DefaultEditor, error::ReadlineError};
 use similar::{ChangeTag, TextDiff};
 use std::{
     collections::HashMap,
     fmt::Write as FmtWrite,
     fs,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -30,7 +38,7 @@ pub async fn run_print(prompt: String, images: Vec<String>, config: &Config) -> 
     state.attach_images(images)?;
     let (prompt, pasted_images) = extract_pasted_images(&prompt, &state.cwd);
     state.attach_images(pasted_images)?;
-    state.run_turn(prompt, config).await
+    state.run_turn(prompt, config, false).await
 }
 
 pub async fn run_interactive(
@@ -38,11 +46,18 @@ pub async fn run_interactive(
     resume: Option<Option<String>>,
     continue_latest: bool,
     session_ref: Option<String>,
+    thinking_overridden: bool,
 ) -> Result<()> {
     let mut state = match (session_ref, resume, continue_latest) {
-        (Some(reference), _, _) => AgentState::resume_ref(config, Some(&reference))?,
-        (None, Some(Some(reference)), _) => AgentState::resume_ref(config, Some(&reference))?,
-        (None, Some(None), _) | (None, None, true) => AgentState::resume_ref(config, None)?,
+        (Some(reference), _, _) => {
+            AgentState::resume_ref(config, Some(&reference), !thinking_overridden)?
+        }
+        (None, Some(Some(reference)), _) => {
+            AgentState::resume_ref(config, Some(&reference), !thinking_overridden)?
+        }
+        (None, Some(None), _) | (None, None, true) => {
+            AgentState::resume_ref(config, None, !thinking_overridden)?
+        }
         (None, None, false) => AgentState::new(config)?,
     };
     println!("Ferrum interactive. /help for commands.");
@@ -69,6 +84,7 @@ pub async fn run_interactive(
                     match handle_bang_command(input, config, &mut state).await {
                         Ok(CommandAction::Continue) => continue,
                         Ok(CommandAction::Quit) => {
+                            state.remove_empty_session()?;
                             let _ = rl.save_history(&history);
                             return Ok(());
                         }
@@ -80,7 +96,7 @@ pub async fn run_interactive(
                 }
                 if let Some((name, args)) = parse_skill_invocation(input) {
                     match state.expand_skill_prompt(name, args.as_deref()) {
-                        Ok(prompt) => match state.run_turn(prompt, config).await {
+                        Ok(prompt) => match state.run_turn(prompt, config, true).await {
                             Ok(()) => println!(),
                             Err(error) => eprintln!("Error: {error}"),
                         },
@@ -125,6 +141,7 @@ pub async fn run_interactive(
                     match handle_command(input, config, &mut state) {
                         Ok(CommandAction::Continue) => continue,
                         Ok(CommandAction::Quit) => {
+                            state.remove_empty_session()?;
                             let _ = rl.save_history(&history);
                             return Ok(());
                         }
@@ -148,7 +165,7 @@ pub async fn run_interactive(
                         }
                     }
                 }
-                match state.run_turn(prompt, config).await {
+                match state.run_turn(prompt, config, true).await {
                     Ok(()) => println!(),
                     Err(error) => {
                         eprintln!("Error: {error}");
@@ -162,6 +179,7 @@ pub async fn run_interactive(
                     .is_some_and(|last| now.duration_since(last) <= Duration::from_millis(900))
                 {
                     println!("^C^C");
+                    state.remove_empty_session()?;
                     let _ = rl.save_history(&history);
                     return Ok(());
                 }
@@ -171,6 +189,7 @@ pub async fn run_interactive(
             }
             Err(ReadlineError::Eof) => {
                 println!();
+                state.remove_empty_session()?;
                 let _ = rl.save_history(&history);
                 return Ok(());
             }
@@ -179,13 +198,27 @@ pub async fn run_interactive(
     }
 }
 
+fn restore_session_thinking(config: &mut Config, path: &Path, enabled: bool) -> Result<()> {
+    if !enabled {
+        return Ok(());
+    }
+    let Some(info) = session::jsonl::session_info(path)? else {
+        return Ok(());
+    };
+    let Some(thinking) = info.thinking.as_deref() else {
+        return Ok(());
+    };
+    config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
+    Ok(())
+}
+
 fn runtime_context(config: &Config, cwd: &Path) -> String {
     format!(
-        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {:?}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n- mcp_enabled: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /mcp [on|off|status]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
+        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n- mcp_enabled: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /mcp [on|off|status]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
         env!("CARGO_PKG_VERSION"),
         config.provider_name,
         config.model,
-        config.thinking,
+        config.thinking.as_str(),
         cwd.display(),
         config.config_dir.display(),
         config.max_context_tokens,
@@ -264,6 +297,122 @@ fn emit_model_metrics_end(request: usize, duration: Duration, response: &message
         duration.as_millis(),
         output_chars.div_ceil(4)
     );
+}
+
+struct ActiveTurnAbort {
+    aborted: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ActiveTurnAbort {
+    fn start(enabled: bool) -> Self {
+        let aborted = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        if !enabled || !io::stdin().is_terminal() {
+            return Self {
+                aborted,
+                stop,
+                handle: None,
+            };
+        }
+        let watcher_aborted = Arc::clone(&aborted);
+        let watcher_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let _ = terminal::enable_raw_mode();
+            while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                let _ = event::read();
+            }
+            while !watcher_stop.load(Ordering::Relaxed) {
+                if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                    match event::read() {
+                        Ok(Event::Key(key)) if key.code == KeyCode::Esc => {
+                            watcher_aborted.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+            let _ = terminal::disable_raw_mode();
+        });
+        Self {
+            aborted,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.aborted)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.aborted.load(Ordering::Relaxed)
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        let _ = terminal::disable_raw_mode();
+    }
+}
+
+impl Drop for ActiveTurnAbort {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+#[derive(Default)]
+struct LiveRenderState {
+    thinking_started: bool,
+    text_started: bool,
+}
+
+impl LiveRenderState {
+    fn render_event(&mut self, event: providers::StreamEvent) -> Result<()> {
+        match event {
+            providers::StreamEvent::ThinkingDelta(delta) => {
+                if !self.thinking_started {
+                    self.thinking_started = true;
+                    print!("thinking:\r\n");
+                }
+                print_raw_mode_text(&delta);
+            }
+            providers::StreamEvent::TextDelta(delta) => {
+                if !self.text_started {
+                    self.text_started = true;
+                    if self.thinking_started {
+                        print!("\r\n\r\n------\r\n");
+                    }
+                }
+                print_raw_mode_text(&delta);
+            }
+        }
+        io::stdout().flush()?;
+        Ok(())
+    }
+}
+
+fn print_raw_mode_text(text: &str) {
+    print!("{}", text.replace('\n', "\r\n"));
+}
+
+fn render_assistant_response(response: &messages::Message, interactive: bool) -> Result<()> {
+    let summary = response.thinking_text();
+    if interactive && !summary.trim().is_empty() {
+        println!("thinking:");
+        println!("{}", summary.trim());
+        println!();
+        println!("------");
+    }
+    print!("{}", response.display_text());
+    io::stdout().flush()?;
+    Ok(())
 }
 
 fn emit_tool_metrics_if_enabled(result: &ExecutedToolUse) {
@@ -495,6 +644,7 @@ impl AgentState {
                 config.sessions_dir(),
                 Some(config.provider_name.clone()),
                 Some(config.model.clone()),
+                Some(config.thinking.as_str().to_string()),
             )?,
             messages,
             skills,
@@ -506,7 +656,11 @@ impl AgentState {
         })
     }
 
-    fn resume_ref(config: &Config, reference: Option<&str>) -> Result<Self> {
+    fn resume_ref(
+        config: &mut Config,
+        reference: Option<&str>,
+        restore_thinking: bool,
+    ) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let path = match reference {
             Some(reference) => {
@@ -515,6 +669,7 @@ impl AgentState {
             None => session::jsonl::latest_session_for_cwd(&config.sessions_dir(), &cwd)?
                 .ok_or_else(|| anyhow::anyhow!("no sessions found for {}", cwd.display()))?,
         };
+        restore_session_thinking(config, &path, restore_thinking)?;
         Self::open_session(config, path)
     }
 
@@ -552,7 +707,7 @@ impl AgentState {
         })
     }
 
-    async fn run_turn(&mut self, prompt: String, config: &Config) -> Result<()> {
+    async fn run_turn(&mut self, prompt: String, config: &Config, interactive: bool) -> Result<()> {
         let stats = self.stats();
         let warn_tokens = config.max_context_tokens.saturating_mul(4) / 5;
         if stats.estimated_tokens >= config.max_context_tokens {
@@ -588,6 +743,11 @@ impl AgentState {
         self.session.append_message(&user)?;
         self.messages.push(user);
 
+        if interactive {
+            println!("\n------");
+            io::stdout().flush()?;
+        }
+
         let provider = providers::from_config(&config.provider);
         let mut tools = builtin_tools::definitions();
         if self.mcp_enabled {
@@ -602,18 +762,50 @@ impl AgentState {
         let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
         let force_final_reason = loop {
             model_request_index += 1;
+            if interactive && model_request_index > 1 {
+                println!("\n------");
+                io::stdout().flush()?;
+            }
+            let mut abort = ActiveTurnAbort::start(interactive);
             if metrics_enabled {
                 emit_model_metrics_start(model_request_index, &self.messages, &tools);
             }
             let started = Instant::now();
-            let response = provider
-                .complete(&config.model, &self.messages, &tools, config.thinking)
-                .await?;
+            let mut live_render = LiveRenderState::default();
+            let mut on_event = |event| {
+                let _ = live_render.render_event(event);
+            };
+            let response_result = if interactive {
+                provider
+                    .complete_streaming(
+                        &config.model,
+                        &self.messages,
+                        &tools,
+                        config.thinking,
+                        &mut on_event,
+                        Some(abort.token()),
+                    )
+                    .await
+            } else {
+                provider
+                    .complete(&config.model, &self.messages, &tools, config.thinking)
+                    .await
+            };
+            abort.stop();
+            let response = match response_result {
+                Ok(response) => response,
+                Err(error) if error.to_string() == "aborted" => {
+                    println!("aborted");
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            };
             if metrics_enabled {
                 emit_model_metrics_end(model_request_index, started.elapsed(), &response);
             }
-            print!("{}", response.display_text());
-            io::stdout().flush()?;
+            if !interactive || !live_render.text_started {
+                render_assistant_response(&response, interactive)?;
+            }
             self.session.append_message(&response)?;
 
             let tool_uses: Vec<_> = response
@@ -629,6 +821,10 @@ impl AgentState {
             self.messages.push(response);
 
             if tool_uses.is_empty() {
+                return Ok(());
+            }
+            if abort.is_cancelled() {
+                println!("aborted");
                 return Ok(());
             }
 
@@ -688,8 +884,7 @@ impl AgentState {
         if metrics_enabled {
             emit_model_metrics_end(model_request_index, started.elapsed(), &final_response);
         }
-        print!("{}", final_response.display_text());
-        io::stdout().flush()?;
+        render_assistant_response(&final_response, interactive)?;
         self.session.append_message(&final_response)?;
         self.messages.push(final_response);
         Ok(())
@@ -918,8 +1113,28 @@ impl AgentState {
         }
     }
 
+    fn remove_empty_session(&mut self) -> Result<()> {
+        if self.session.remove_if_empty()? {
+            self.last_session_list.clear();
+        }
+        Ok(())
+    }
+
+    fn visible_sessions(&self, config: &Config) -> Result<Vec<session::jsonl::SessionInfo>> {
+        Ok(
+            session::jsonl::list_sessions_for_cwd(&config.sessions_dir(), &self.cwd)?
+                .into_iter()
+                .filter(|session| {
+                    session.message_count > 0
+                        || session.path == *self.session.path()
+                        || session.title != "(empty session)"
+                })
+                .collect(),
+        )
+    }
+
     fn list_sessions(&mut self, config: &Config) -> Result<()> {
-        let sessions = session::jsonl::list_sessions_for_cwd(&config.sessions_dir(), &self.cwd)?;
+        let sessions = self.visible_sessions(config)?;
         self.last_session_list = sessions.clone();
         if sessions.is_empty() {
             println!("No sessions found in {}", self.cwd.display());
@@ -931,12 +1146,14 @@ impl AgentState {
         Ok(())
     }
 
-    fn open_session_reference(&mut self, config: &Config, reference: &str) -> Result<()> {
+    fn open_session_reference(&mut self, config: &mut Config, reference: &str) -> Result<()> {
         let path = self.resolve_session_reference(config, reference)?;
         if path == *self.session.path() {
             println!("Already on session {}", path.display());
             return Ok(());
         }
+        self.remove_empty_session()?;
+        restore_session_thinking(config, &path, true)?;
         let next = Self::open_session(config, path)?;
         *self = next;
         Ok(())
@@ -954,20 +1171,32 @@ impl AgentState {
             };
             return Ok(session.path.clone());
         }
-        session::jsonl::resolve_session_ref(&config.sessions_dir(), &self.cwd, reference)
+        let matches = self
+            .visible_sessions(config)?
+            .into_iter()
+            .filter(|session| {
+                session.id.starts_with(reference) || session.short_id.starts_with(reference)
+            })
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [session] => Ok(session.path.clone()),
+            [] => anyhow::bail!("no visible session matches '{reference}' in current directory"),
+            _ => anyhow::bail!("session reference '{reference}' is ambiguous"),
+        }
     }
 
     fn new_session(&mut self, config: &Config) -> Result<()> {
+        self.remove_empty_session()?;
         let next = Self::new(config)?;
         println!("started new session {}", next.session.path().display());
         *self = next;
         Ok(())
     }
 
-    fn pick_session(&mut self, config: &Config) -> Result<()> {
+    fn pick_session(&mut self, config: &mut Config) -> Result<()> {
         let mut query = String::new();
         loop {
-            let all = session::jsonl::list_sessions_for_cwd(&config.sessions_dir(), &self.cwd)?;
+            let all = self.visible_sessions(config)?;
             let filtered = filter_sessions(&all, &query);
             self.last_session_list = filtered.clone();
             if query.is_empty() {
@@ -1284,7 +1513,12 @@ fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &P
         let age = format_age(session.modified);
         let model = session.model.as_deref().unwrap_or("unknown-model");
         let provider = session.provider.as_deref().unwrap_or("unknown-provider");
-        let provider_model = format!("{provider}/{model}");
+        let thinking = session.thinking.as_deref().unwrap_or("off");
+        let provider_model = if thinking == "off" {
+            format!("{provider}/{model}")
+        } else {
+            format!("{provider}/{model} think={thinking}")
+        };
         println!(
             "[{}] {marker} {:>4} {:>4} msgs  {:<28} {}",
             index + 1,
@@ -1454,6 +1688,9 @@ fn message_text_for_compaction(message: &messages::Message) -> String {
         match block {
             messages::ContentBlock::Text { text } if !text.trim().is_empty() => {
                 let _ = writeln!(output, "{}", text.trim());
+            }
+            messages::ContentBlock::Thinking { text, .. } if !text.trim().is_empty() => {
+                let _ = writeln!(output, "thinking: {}", text.trim());
             }
             messages::ContentBlock::ToolUse { name, input, .. } => {
                 let _ = writeln!(output, "tool_call: {name} {input}");
@@ -1784,7 +2021,7 @@ async fn handle_bang_command(
     let rendered = render_bash_output(command, &output);
 
     if send_to_model {
-        state.run_turn(rendered, config).await?;
+        state.run_turn(rendered, config, true).await?;
         println!();
     } else {
         print!("{rendered}");
@@ -1817,6 +2054,7 @@ fn handle_command(
             println!("  /quit | /exit          exit");
             println!("  /version              show Ferrum version");
             println!("  /session              show session path/status/size");
+            println!("  /title [text]         show or set session title");
             println!("  /sessions             list recent sessions for current directory");
             println!("  /sessions <ref>       open bracket number, id prefix, or path");
             println!("  /sessions pick        open numbered session picker");
@@ -1857,8 +2095,20 @@ fn handle_command(
             println!("mcp_enabled: {}", state.mcp_enabled);
             println!("mcp_connected: {}", state.mcp.is_some());
             println!("model: {}", config.model);
-            println!("thinking: {:?}", config.thinking);
+            println!("thinking: {}", config.thinking.as_str());
             println!("provider: {}", config.provider_name);
+            Ok(CommandAction::Continue)
+        }
+        "/title" => {
+            let title = parts.collect::<Vec<_>>().join(" ");
+            if title.trim().is_empty() {
+                let info = session::jsonl::session_info(state.session.path())?
+                    .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
+                println!("title: {}", info.title);
+            } else {
+                state.session.append_title(title.trim())?;
+                println!("title: {}", title.trim());
+            }
             Ok(CommandAction::Continue)
         }
         "/sessions" => {
@@ -1949,8 +2199,9 @@ fn handle_command(
         "/thinking" => {
             if let Some(thinking) = parts.next() {
                 config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
+                state.session.append_thinking(config.thinking.as_str())?;
             }
-            println!("thinking: {:?}", config.thinking);
+            println!("thinking: {}", config.thinking.as_str());
             Ok(CommandAction::Continue)
         }
         "/image" => {

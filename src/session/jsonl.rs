@@ -25,6 +25,7 @@ pub enum SessionEntry {
         version: u32,
         provider: Option<String>,
         model: Option<String>,
+        thinking: Option<String>,
         cwd: Option<String>,
     },
     Message {
@@ -39,10 +40,22 @@ pub enum SessionEntry {
         timestamp_ms: u64,
         summary: String,
     },
+    Metadata {
+        id: String,
+        parent_id: Option<String>,
+        timestamp_ms: u64,
+        title: Option<String>,
+        thinking: Option<String>,
+    },
 }
 
 impl JsonlSession {
-    pub fn create(dir: PathBuf, provider: Option<String>, model: Option<String>) -> Result<Self> {
+    pub fn create(
+        dir: PathBuf,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+    ) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let path = dir.join(format!("{}.jsonl", now_ms()));
         let file = OpenOptions::new()
@@ -58,6 +71,7 @@ impl JsonlSession {
             version: 1,
             provider,
             model,
+            thinking,
             cwd: std::env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
@@ -95,6 +109,37 @@ impl JsonlSession {
         })
     }
 
+    pub fn append_title(&mut self, title: &str) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: Some(title.to_string()),
+            thinking: None,
+        })
+    }
+
+    pub fn append_thinking(&mut self, thinking: &str) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            thinking: Some(thinking.to_string()),
+        })
+    }
+
+    pub fn remove_if_empty(&mut self) -> Result<bool> {
+        self.file.flush().context("failed to flush session")?;
+        if !session_has_entries_after_header(&self.path)? {
+            fs::remove_file(&self.path).with_context(|| {
+                format!("failed to remove empty session {}", self.path.display())
+            })?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn append(&mut self, entry: &SessionEntry) -> Result<()> {
         serde_json::to_writer(&mut self.file, entry)
             .context("failed to serialize session entry")?;
@@ -104,6 +149,25 @@ impl JsonlSession {
         self.file.flush().context("failed to flush session")?;
         Ok(())
     }
+}
+
+fn session_has_entries_after_header(path: &Path) -> Result<bool> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: SessionEntry = match serde_json::from_str(&line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if !matches!(entry, SessionEntry::Header { .. }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
@@ -123,7 +187,7 @@ pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
                 Role::System,
                 format!("Conversation summary from previous compaction:\n{summary}"),
             )),
-            SessionEntry::Header { .. } => {}
+            SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => {}
         }
     }
     Ok(messages)
@@ -137,6 +201,7 @@ pub struct SessionInfo {
     pub cwd: Option<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub thinking: Option<String>,
     pub title: String,
     pub message_count: usize,
     pub modified: SystemTime,
@@ -194,7 +259,7 @@ pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<Pa
     }
 }
 
-fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
+pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
     let modified = fs::metadata(path)
@@ -204,7 +269,9 @@ fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut cwd = None;
     let mut provider = None;
     let mut model = None;
-    let mut title = None;
+    let mut inferred_title = None;
+    let mut explicit_title = None;
+    let mut explicit_thinking = None;
     let mut message_count = 0usize;
 
     for line in reader.lines() {
@@ -221,20 +288,36 @@ fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 id: header_id,
                 provider: header_provider,
                 model: header_model,
+                thinking: header_thinking,
                 cwd: header_cwd,
                 ..
             } => {
                 id = Some(header_id);
                 provider = header_provider;
                 model = header_model;
+                explicit_thinking = header_thinking;
                 cwd = header_cwd;
             }
             SessionEntry::Message { message, .. } => {
                 message_count += 1;
-                if title.is_none() && matches!(message.role, Role::User) {
+                if inferred_title.is_none() && matches!(message.role, Role::User) {
                     let text = message.text_content();
                     if !text.trim().is_empty() {
-                        title = Some(one_line_title(&text));
+                        inferred_title = Some(one_line_title(&text));
+                    }
+                }
+            }
+            SessionEntry::Metadata {
+                title, thinking, ..
+            } => {
+                if let Some(title) = title {
+                    if !title.trim().is_empty() {
+                        explicit_title = Some(one_line_title(&title));
+                    }
+                }
+                if let Some(thinking) = thinking {
+                    if !thinking.trim().is_empty() {
+                        explicit_thinking = Some(thinking);
                     }
                 }
             }
@@ -253,7 +336,10 @@ fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
         cwd,
         provider,
         model,
-        title: title.unwrap_or_else(|| "(empty session)".to_string()),
+        thinking: explicit_thinking,
+        title: explicit_title
+            .or(inferred_title)
+            .unwrap_or_else(|| "(empty session)".to_string()),
         message_count,
         modified,
     }))
@@ -291,7 +377,8 @@ mod tests {
     #[test]
     fn writes_header_and_message_jsonl() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session = JsonlSession::create(temp.path().to_path_buf(), None, None).unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
         session
             .append_message(&Message::text(Role::User, "hello"))
             .unwrap();
@@ -302,5 +389,83 @@ mod tests {
         assert!(lines[0].contains("\"type\":\"header\""));
         assert!(lines[0].contains("\"cwd\""));
         assert!(lines[1].contains("\"type\":\"message\""));
+    }
+
+    #[test]
+    fn removes_empty_header_only_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+        let path = session.path().clone();
+        assert!(path.exists());
+        assert!(session.remove_if_empty().unwrap());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn keeps_session_with_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+        session
+            .append_message(&Message::text(Role::User, "hello"))
+            .unwrap();
+        let path = session.path().clone();
+        assert!(!session.remove_if_empty().unwrap());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn explicit_title_overrides_inferred_title() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+        session
+            .append_message(&Message::text(Role::User, "inferred title"))
+            .unwrap();
+        session.append_title("explicit title").unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.title, "explicit title");
+    }
+
+    #[test]
+    fn latest_explicit_title_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+        session.append_title("first title").unwrap();
+        session.append_title("second title").unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.title, "second title");
+    }
+
+    #[test]
+    fn stores_initial_thinking_in_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            Some("medium".to_string()),
+        )
+        .unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.thinking.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn latest_thinking_metadata_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            Some("low".to_string()),
+        )
+        .unwrap();
+        session.append_thinking("high").unwrap();
+        session.append_thinking("off").unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.thinking.as_deref(), Some("off"));
     }
 }

@@ -1,4 +1,4 @@
-use super::Provider;
+use super::{Provider, StreamEvent};
 use crate::{
     agent::{
         messages::{ContentBlock, Message, Role},
@@ -8,9 +8,19 @@ use crate::{
     config::ThinkingLevel,
 };
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{env, future::Future, path::PathBuf, pin::Pin};
+use std::{
+    env,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub struct OpenAiCompatProvider {
     api_key_env: String,
@@ -125,6 +135,7 @@ impl Provider for OpenAiCodexProvider {
                 instructions: &instructions,
                 input: codex_inputs(messages),
                 text: CodexText { verbosity: "low" },
+                include: vec!["reasoning.encrypted_content"],
                 tools: codex_tools(_tools),
                 tool_choice: if _tools.is_empty() {
                     None
@@ -165,6 +176,89 @@ impl Provider for OpenAiCodexProvider {
                     .unwrap_or_default();
                 Message::text(Role::Assistant, content)
             }))
+        })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        model: &'a str,
+        messages: &'a [Message],
+        _tools: &'a [ToolDefinition],
+        thinking: ThinkingLevel,
+        on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
+        Box::pin(async move {
+            let api_key = openai_codex::get_api_key_from_path(self.auth_path.clone())
+                .await?
+                .context("OpenAI Codex auth not found; run `ferrum login openai`")?;
+            let account_id = openai_codex::extract_account_id(&api_key)?;
+            let instructions = codex_instructions(messages);
+            let request = CodexResponsesRequest {
+                model,
+                store: false,
+                stream: true,
+                instructions: &instructions,
+                input: codex_inputs(messages),
+                text: CodexText { verbosity: "low" },
+                include: vec!["reasoning.encrypted_content"],
+                tools: codex_tools(_tools),
+                tool_choice: if _tools.is_empty() {
+                    None
+                } else {
+                    Some("auto")
+                },
+                reasoning: thinking.as_codex().map(|effort| CodexReasoning {
+                    effort,
+                    summary: "auto",
+                }),
+                parallel_tool_calls: !_tools.is_empty(),
+            };
+
+            let response = self
+                .client
+                .post(self.responses_url())
+                .bearer_auth(api_key)
+                .header("chatgpt-account-id", account_id)
+                .header("originator", "ferrum")
+                .header("OpenAI-Beta", "responses=experimental")
+                .header("content-type", "application/json")
+                .json(&request)
+                .send()
+                .await
+                .context("OpenAI Codex request failed")?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = response
+                    .text()
+                    .await
+                    .context("failed to read OpenAI Codex error response")?;
+                anyhow::bail!("OpenAI Codex returned {status}: {text}");
+            }
+
+            let mut parser = ResponsesSseParser::default();
+            let mut buffer = String::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                if cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    anyhow::bail!("aborted");
+                }
+                let chunk = chunk.context("failed to read OpenAI Codex stream")?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(index) = buffer.find('\n') {
+                    let line = buffer[..index].trim_end_matches('\r').to_string();
+                    buffer.drain(..=index);
+                    parser.process_line(&line, Some(on_event));
+                }
+            }
+            if !buffer.is_empty() {
+                let line = buffer.trim_end_matches('\r').to_string();
+                parser.process_line(&line, Some(on_event));
+            }
+            parser.finish()
         })
     }
 }
@@ -226,7 +320,9 @@ impl ChatMessage {
             .filter_map(|block| match block {
                 ContentBlock::Text { text } => Some(text.as_str()),
                 ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
-                ContentBlock::ToolUse { .. } | ContentBlock::Image { .. } => None,
+                ContentBlock::ToolUse { .. }
+                | ContentBlock::Image { .. }
+                | ContentBlock::Thinking { .. } => None,
             })
             .collect::<Vec<_>>()
             .join("");
@@ -380,6 +476,8 @@ struct CodexResponsesRequest<'a> {
     input: Vec<ResponsesInput>,
     text: CodexText<'a>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    include: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<CodexTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'a str>,
@@ -425,6 +523,7 @@ struct CodexText<'a> {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum ResponsesInput {
+    Raw(serde_json::Value),
     Message {
         role: &'static str,
         content: serde_json::Value,
@@ -499,6 +598,15 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
         let mut emitted_special = false;
         for block in &message.content {
             match block {
+                ContentBlock::Thinking {
+                    signature: Some(signature),
+                    ..
+                } => {
+                    if let Ok(value) = serde_json::from_str::<serde_json::Value>(signature) {
+                        inputs.push(ResponsesInput::Raw(value));
+                        emitted_special = true;
+                    }
+                }
                 ContentBlock::ToolResult {
                     tool_use_id,
                     content,
@@ -531,7 +639,9 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
                     });
                     emitted_special = true;
                 }
-                ContentBlock::Text { .. } | ContentBlock::Image { .. } => {}
+                ContentBlock::Text { .. }
+                | ContentBlock::Image { .. }
+                | ContentBlock::Thinking { .. } => {}
             }
         }
         if !emitted_special {
@@ -550,31 +660,69 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
     inputs
 }
 
-fn extract_sse_responses_message(text: &str) -> Option<Message> {
-    let mut output = String::new();
-    let mut tool_calls = Vec::new();
-    let mut current_call: Option<(String, String, String, String)> = None;
+#[derive(Default)]
+struct ResponsesSseParser {
+    output: String,
+    thinking: String,
+    thinking_signature: Option<String>,
+    tool_calls: Vec<(String, String, String, String)>,
+    current_call: Option<(String, String, String, String)>,
+}
 
-    for line in text.lines() {
+impl ResponsesSseParser {
+    fn process_line(
+        &mut self,
+        line: &str,
+        mut on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) {
         let Some(data) = line.strip_prefix("data: ") else {
-            continue;
+            return;
         };
         if data == "[DONE]" {
-            break;
+            return;
         }
         let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
-            continue;
+            return;
         };
-        match event.get("type").and_then(|value| value.as_str()) {
+        let event_type = event.get("type").and_then(|value| value.as_str());
+        if let Some(event_type) = event_type {
+            if event_type.contains("reasoning") && event_type.contains("summary") {
+                if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
+                    self.thinking.push_str(delta);
+                    if let Some(on_event) = on_event.as_deref_mut() {
+                        on_event(StreamEvent::ThinkingDelta(delta.to_string()));
+                    }
+                }
+                if let Some(text) = event.get("text").and_then(|value| value.as_str()) {
+                    if !self.thinking.ends_with(text) {
+                        self.thinking.push_str(text);
+                        if let Some(on_event) = on_event.as_deref_mut() {
+                            on_event(StreamEvent::ThinkingDelta(text.to_string()));
+                        }
+                    }
+                }
+            } else if event_type == "response.reasoning_text.delta" {
+                if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
+                    self.thinking.push_str(delta);
+                    if let Some(on_event) = on_event.as_deref_mut() {
+                        on_event(StreamEvent::ThinkingDelta(delta.to_string()));
+                    }
+                }
+            }
+        }
+        match event_type {
             Some("response.output_text.delta") => {
                 if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                    output.push_str(delta);
+                    self.output.push_str(delta);
+                    if let Some(on_event) = on_event.as_deref_mut() {
+                        on_event(StreamEvent::TextDelta(delta.to_string()));
+                    }
                 }
             }
             Some("response.output_item.added") => {
                 if let Some(item) = event.get("item") {
                     if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
-                        current_call = Some((
+                        self.current_call = Some((
                             item.get("call_id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("call")
@@ -596,14 +744,14 @@ fn extract_sse_responses_message(text: &str) -> Option<Message> {
                 }
             }
             Some("response.function_call_arguments.delta") => {
-                if let Some((_, _, _, args)) = &mut current_call {
+                if let Some((_, _, _, args)) = &mut self.current_call {
                     if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
                         args.push_str(delta);
                     }
                 }
             }
             Some("response.function_call_arguments.done") => {
-                if let Some((_, _, _, args)) = &mut current_call {
+                if let Some((_, _, _, args)) = &mut self.current_call {
                     if let Some(done) = event.get("arguments").and_then(|value| value.as_str()) {
                         *args = done.to_string();
                     }
@@ -611,6 +759,13 @@ fn extract_sse_responses_message(text: &str) -> Option<Message> {
             }
             Some("response.output_item.done") => {
                 if let Some(item) = event.get("item") {
+                    if item.get("type").and_then(|value| value.as_str()) == Some("reasoning") {
+                        let final_thinking = thinking_text_from_item(item);
+                        if !final_thinking.trim().is_empty() {
+                            self.thinking = final_thinking;
+                        }
+                        self.thinking_signature = Some(item.to_string());
+                    }
                     if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
                         let call_id = item
                             .get("call_id")
@@ -632,8 +787,8 @@ fn extract_sse_responses_message(text: &str) -> Option<Message> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("{}")
                             .to_string();
-                        tool_calls.push((call_id, item_id, name, args));
-                        current_call = None;
+                        self.tool_calls.push((call_id, item_id, name, args));
+                        self.current_call = None;
                     }
                 }
             }
@@ -641,26 +796,78 @@ fn extract_sse_responses_message(text: &str) -> Option<Message> {
         }
     }
 
-    if let Some(call) = current_call {
-        tool_calls.push(call);
+    fn finish(mut self) -> Result<Message> {
+        if let Some(call) = self.current_call.take() {
+            self.tool_calls.push(call);
+        }
+
+        let mut content = Vec::new();
+        if !self.thinking.trim().is_empty() {
+            content.push(ContentBlock::Thinking {
+                text: self.thinking.trim().to_string(),
+                signature: self.thinking_signature,
+            });
+        }
+        if !self.output.is_empty() {
+            content.push(ContentBlock::Text { text: self.output });
+        }
+        for (call_id, item_id, name, args) in self.tool_calls {
+            let input = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+            content.push(ContentBlock::ToolUse {
+                id: format!("{call_id}|{item_id}"),
+                name,
+                input,
+            });
+        }
+        if content.is_empty() {
+            anyhow::bail!("OpenAI Codex stream produced no message content");
+        }
+        Ok(Message {
+            role: Role::Assistant,
+            content,
+        })
+    }
+}
+
+fn extract_sse_responses_message(text: &str) -> Option<Message> {
+    let mut parser = ResponsesSseParser::default();
+    for line in text.lines() {
+        parser.process_line(line, None);
+    }
+    parser.finish().ok()
+}
+
+fn thinking_text_from_item(item: &serde_json::Value) -> String {
+    let summary = item
+        .get("summary")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !summary.trim().is_empty() {
+        return summary;
     }
 
-    let mut content = Vec::new();
-    if !output.is_empty() {
-        content.push(ContentBlock::Text { text: output });
+    let content = item
+        .get("content")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !content.trim().is_empty() {
+        return content;
     }
-    for (call_id, item_id, name, args) in tool_calls {
-        let input = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
-        content.push(ContentBlock::ToolUse {
-            id: format!("{call_id}|{item_id}"),
-            name,
-            input,
-        });
-    }
-    (!content.is_empty()).then_some(Message {
-        role: Role::Assistant,
-        content,
-    })
+
+    item.get("text")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn extract_responses_text(body: &serde_json::Value) -> Option<String> {
@@ -693,5 +900,47 @@ mod tests {
         let chat = ChatMessage::from_message(&message);
         assert_eq!(chat.role, "user");
         assert_eq!(chat.content, "hello");
+    }
+
+    #[test]
+    fn extracts_thinking_from_sse() {
+        let sse = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Checked context.\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let message = extract_sse_responses_message(sse).unwrap();
+        assert_eq!(message.thinking_text(), "Checked context.");
+        assert_eq!(message.display_text(), "hello");
+    }
+
+    #[test]
+    fn extracts_thinking_signature_from_reasoning_item() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"text\":\"Plan first.\"}]}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let message = extract_sse_responses_message(sse).unwrap();
+        let Some(ContentBlock::Thinking { text, signature }) = message.content.first() else {
+            panic!("missing thinking block");
+        };
+        assert_eq!(text, "Plan first.");
+        assert!(signature.as_deref().unwrap_or_default().contains("rs_1"));
+    }
+
+    #[test]
+    fn replays_thinking_signature_for_codex() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::Thinking {
+                text: "Plan first.".to_string(),
+                signature: Some(r#"{"type":"reasoning","id":"rs_1"}"#.to_string()),
+            }],
+        };
+        let inputs = codex_inputs(&[message]);
+        let json = serde_json::to_value(&inputs).unwrap();
+        assert_eq!(json[0]["type"], "reasoning");
+        assert_eq!(json[0]["id"], "rs_1");
     }
 }
