@@ -134,7 +134,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /provider [name]
 /providers
 /thinking [level]
-/diff [mode]
+/diff [unified|compact|full|words|side_by_side]
 /image <path>
 /paste-image
 /skills
