@@ -26,6 +26,7 @@ pub enum SessionEntry {
         provider: Option<String>,
         model: Option<String>,
         thinking: Option<String>,
+        diff_mode: Option<String>,
         cwd: Option<String>,
     },
     Message {
@@ -46,6 +47,7 @@ pub enum SessionEntry {
         timestamp_ms: u64,
         title: Option<String>,
         thinking: Option<String>,
+        diff_mode: Option<String>,
     },
 }
 
@@ -55,6 +57,7 @@ impl JsonlSession {
         provider: Option<String>,
         model: Option<String>,
         thinking: Option<String>,
+        diff_mode: Option<String>,
     ) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         let path = dir.join(format!("{}.jsonl", now_ms()));
@@ -72,6 +75,7 @@ impl JsonlSession {
             provider,
             model,
             thinking,
+            diff_mode,
             cwd: std::env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string()),
@@ -116,6 +120,7 @@ impl JsonlSession {
             timestamp_ms: now_ms(),
             title: Some(title.to_string()),
             thinking: None,
+            diff_mode: None,
         })
     }
 
@@ -126,6 +131,18 @@ impl JsonlSession {
             timestamp_ms: now_ms(),
             title: None,
             thinking: Some(thinking.to_string()),
+            diff_mode: None,
+        })
+    }
+
+    pub fn append_diff_mode(&mut self, diff_mode: &str) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            thinking: None,
+            diff_mode: Some(diff_mode.to_string()),
         })
     }
 
@@ -163,7 +180,10 @@ fn session_has_entries_after_header(path: &Path) -> Result<bool> {
             Ok(entry) => entry,
             Err(_) => continue,
         };
-        if !matches!(entry, SessionEntry::Header { .. }) {
+        if matches!(
+            entry,
+            SessionEntry::Message { .. } | SessionEntry::Compaction { .. }
+        ) {
             return Ok(true);
         }
     }
@@ -202,6 +222,7 @@ pub struct SessionInfo {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
+    pub diff_mode: Option<String>,
     pub title: String,
     pub message_count: usize,
     pub modified: SystemTime,
@@ -272,6 +293,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut inferred_title = None;
     let mut explicit_title = None;
     let mut explicit_thinking = None;
+    let mut explicit_diff_mode = None;
     let mut message_count = 0usize;
 
     for line in reader.lines() {
@@ -289,6 +311,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 provider: header_provider,
                 model: header_model,
                 thinking: header_thinking,
+                diff_mode: header_diff_mode,
                 cwd: header_cwd,
                 ..
             } => {
@@ -296,6 +319,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 provider = header_provider;
                 model = header_model;
                 explicit_thinking = header_thinking;
+                explicit_diff_mode = header_diff_mode;
                 cwd = header_cwd;
             }
             SessionEntry::Message { message, .. } => {
@@ -308,7 +332,10 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 }
             }
             SessionEntry::Metadata {
-                title, thinking, ..
+                title,
+                thinking,
+                diff_mode,
+                ..
             } => {
                 if let Some(title) = title {
                     if !title.trim().is_empty() {
@@ -318,6 +345,11 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 if let Some(thinking) = thinking {
                     if !thinking.trim().is_empty() {
                         explicit_thinking = Some(thinking);
+                    }
+                }
+                if let Some(diff_mode) = diff_mode {
+                    if !diff_mode.trim().is_empty() {
+                        explicit_diff_mode = Some(diff_mode);
                     }
                 }
             }
@@ -337,6 +369,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
         provider,
         model,
         thinking: explicit_thinking,
+        diff_mode: explicit_diff_mode,
         title: explicit_title
             .or(inferred_title)
             .unwrap_or_else(|| "(empty session)".to_string()),
@@ -378,7 +411,7 @@ mod tests {
     fn writes_header_and_message_jsonl() {
         let temp = tempfile::tempdir().unwrap();
         let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None).unwrap();
         session
             .append_message(&Message::text(Role::User, "hello"))
             .unwrap();
@@ -395,7 +428,7 @@ mod tests {
     fn removes_empty_header_only_session() {
         let temp = tempfile::tempdir().unwrap();
         let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None).unwrap();
         let path = session.path().clone();
         assert!(path.exists());
         assert!(session.remove_if_empty().unwrap());
@@ -406,7 +439,7 @@ mod tests {
     fn keeps_session_with_message() {
         let temp = tempfile::tempdir().unwrap();
         let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None).unwrap();
         session
             .append_message(&Message::text(Role::User, "hello"))
             .unwrap();
@@ -419,7 +452,7 @@ mod tests {
     fn explicit_title_overrides_inferred_title() {
         let temp = tempfile::tempdir().unwrap();
         let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None).unwrap();
         session
             .append_message(&Message::text(Role::User, "inferred title"))
             .unwrap();
@@ -432,7 +465,7 @@ mod tests {
     fn latest_explicit_title_wins() {
         let temp = tempfile::tempdir().unwrap();
         let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None).unwrap();
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None).unwrap();
         session.append_title("first title").unwrap();
         session.append_title("second title").unwrap();
         let info = session_info(session.path()).unwrap().unwrap();
@@ -447,6 +480,7 @@ mod tests {
             None,
             None,
             Some("medium".to_string()),
+            None,
         )
         .unwrap();
         let info = session_info(session.path()).unwrap().unwrap();
@@ -461,11 +495,44 @@ mod tests {
             None,
             None,
             Some("low".to_string()),
+            None,
         )
         .unwrap();
         session.append_thinking("high").unwrap();
         session.append_thinking("off").unwrap();
         let info = session_info(session.path()).unwrap().unwrap();
         assert_eq!(info.thinking.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn stores_initial_diff_mode_in_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            Some("words".to_string()),
+        )
+        .unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.diff_mode.as_deref(), Some("words"));
+    }
+
+    #[test]
+    fn latest_diff_mode_metadata_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            Some("unified".to_string()),
+        )
+        .unwrap();
+        session.append_diff_mode("full").unwrap();
+        session.append_diff_mode("side_by_side").unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.diff_mode.as_deref(), Some("side_by_side"));
     }
 }

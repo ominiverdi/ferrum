@@ -14,6 +14,7 @@ pub struct Config {
     pub max_tool_rounds: usize,
     pub thinking: ThinkingLevel,
     pub mcp_enabled: bool,
+    pub diff_mode: DiffMode,
     pub mcp_servers: Vec<McpServerConfig>,
 }
 
@@ -36,6 +37,39 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffMode {
+    Unified,
+    Compact,
+    Full,
+    Words,
+    SideBySide,
+}
+
+impl DiffMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "unified" => Ok(Self::Unified),
+            "compact" => Ok(Self::Compact),
+            "full" => Ok(Self::Full),
+            "words" | "word" => Ok(Self::Words),
+            "side_by_side" | "side-by-side" | "side" | "split" => Ok(Self::SideBySide),
+            other => anyhow::bail!("unsupported diff mode: {other}"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unified => "unified",
+            Self::Compact => "compact",
+            Self::Full => "full",
+            Self::Words => "words",
+            Self::SideBySide => "side_by_side",
+        }
+    }
 }
 
 impl ThinkingLevel {
@@ -115,6 +149,7 @@ struct FileConfig {
     max_tool_rounds: Option<usize>,
     thinking: Option<String>,
     mcp_enabled: Option<bool>,
+    diff_mode: Option<String>,
     mcp: Option<FileMcpConfig>,
     #[serde(default)]
     providers: BTreeMap<String, ProviderDefinition>,
@@ -177,6 +212,12 @@ impl Config {
                 .transpose()?
                 .unwrap_or(ThinkingLevel::Off),
             mcp_enabled: file_config.mcp_enabled.unwrap_or(true),
+            diff_mode: file_config
+                .diff_mode
+                .as_deref()
+                .map(DiffMode::parse)
+                .transpose()?
+                .unwrap_or(DiffMode::Unified),
             mcp_servers: file_config.mcp.map(|mcp| mcp.servers).unwrap_or_default(),
         })
     }

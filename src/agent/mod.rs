@@ -1,7 +1,10 @@
 pub mod messages;
 pub mod tools;
 
-use crate::{config::Config, context, mcp, providers, session, skills, tools as builtin_tools};
+use crate::{
+    config::{Config, DiffMode},
+    context, mcp, providers, session, skills, tools as builtin_tools,
+};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
@@ -198,23 +201,28 @@ pub async fn run_interactive(
     }
 }
 
-fn restore_session_thinking(config: &mut Config, path: &Path, enabled: bool) -> Result<()> {
-    if !enabled {
-        return Ok(());
-    }
+fn restore_session_preferences(
+    config: &mut Config,
+    path: &Path,
+    restore_thinking: bool,
+) -> Result<()> {
     let Some(info) = session::jsonl::session_info(path)? else {
         return Ok(());
     };
-    let Some(thinking) = info.thinking.as_deref() else {
-        return Ok(());
-    };
-    config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
+    if restore_thinking {
+        if let Some(thinking) = info.thinking.as_deref() {
+            config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
+        }
+    }
+    if let Some(diff_mode) = info.diff_mode.as_deref() {
+        config.diff_mode = DiffMode::parse(diff_mode)?;
+    }
     Ok(())
 }
 
 fn runtime_context(config: &Config, cwd: &Path) -> String {
     format!(
-        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n- mcp_enabled: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /mcp [on|off|status]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
+        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n- mcp_enabled: {}\n- diff_mode: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /mcp [on|off|status]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
         env!("CARGO_PKG_VERSION"),
         config.provider_name,
         config.model,
@@ -224,6 +232,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> String {
         config.max_context_tokens,
         config.max_tool_rounds,
         config.mcp_enabled,
+        config.diff_mode.as_str(),
     )
 }
 
@@ -614,6 +623,7 @@ struct AgentState {
     cwd: std::path::PathBuf,
     mcp: Option<mcp::McpManager>,
     mcp_enabled: bool,
+    diff_mode: DiffMode,
     pending_images: Vec<messages::ContentBlock>,
     last_session_list: Vec<session::jsonl::SessionInfo>,
 }
@@ -645,12 +655,14 @@ impl AgentState {
                 Some(config.provider_name.clone()),
                 Some(config.model.clone()),
                 Some(config.thinking.as_str().to_string()),
+                Some(config.diff_mode.as_str().to_string()),
             )?,
             messages,
             skills,
             cwd,
             mcp: None,
             mcp_enabled: config.mcp_enabled,
+            diff_mode: config.diff_mode,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
         })
@@ -669,7 +681,7 @@ impl AgentState {
             None => session::jsonl::latest_session_for_cwd(&config.sessions_dir(), &cwd)?
                 .ok_or_else(|| anyhow::anyhow!("no sessions found for {}", cwd.display()))?,
         };
-        restore_session_thinking(config, &path, restore_thinking)?;
+        restore_session_preferences(config, &path, restore_thinking)?;
         Self::open_session(config, path)
     }
 
@@ -702,6 +714,7 @@ impl AgentState {
             cwd,
             mcp: None,
             mcp_enabled: config.mcp_enabled,
+            diff_mode: config.diff_mode,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
         })
@@ -1003,7 +1016,7 @@ impl AgentState {
     ) -> Vec<ExecutedToolUse> {
         for (_, name, input) in &tool_uses {
             eprintln!();
-            render_tool_call(name, input);
+            render_tool_call(name, input, self.diff_mode);
         }
 
         let cwd = self.cwd.clone();
@@ -1064,7 +1077,7 @@ impl AgentState {
         let mut results = Vec::new();
         for (id, name, input) in tool_uses {
             eprintln!();
-            render_tool_call(&name, &input);
+            render_tool_call(&name, &input, self.diff_mode);
             let started = Instant::now();
             let (content, is_error) = match self.execute_tool(&name, &input).await {
                 Ok(output) => (output, false),
@@ -1153,7 +1166,7 @@ impl AgentState {
             return Ok(());
         }
         self.remove_empty_session()?;
-        restore_session_thinking(config, &path, true)?;
+        restore_session_preferences(config, &path, true)?;
         let next = Self::open_session(config, path)?;
         *self = next;
         Ok(())
@@ -1332,7 +1345,7 @@ impl AgentState {
     }
 }
 
-fn render_tool_call(name: &str, input: &serde_json::Value) {
+fn render_tool_call(name: &str, input: &serde_json::Value, diff_mode: DiffMode) {
     eprintln!("[tool:{name}]");
     match name {
         "bash" => {
@@ -1418,7 +1431,7 @@ fn render_tool_call(name: &str, input: &serde_json::Value) {
                 }
             }
         }
-        "edit" => render_edit_call(input),
+        "edit" => render_edit_call(input, diff_mode),
         _ => {
             let rendered =
                 serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
@@ -1427,8 +1440,9 @@ fn render_tool_call(name: &str, input: &serde_json::Value) {
     }
 }
 
-fn render_edit_call(input: &serde_json::Value) {
+fn render_edit_call(input: &serde_json::Value, diff_mode: DiffMode) {
     eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+    eprintln!("diff: {}", diff_mode.as_str());
     let Some(edits) = input.get("edits").and_then(|value| value.as_array()) else {
         let rendered = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
         eprintln!("args:\n{}", indent_block(&rendered));
@@ -1441,15 +1455,21 @@ fn render_edit_call(input: &serde_json::Value) {
         let new_text = json_str(edit, "new_text").unwrap_or("");
         eprintln!();
         eprintln!("edit {}:", index + 1);
-        render_text_diff(old_text, new_text);
+        match diff_mode {
+            DiffMode::Unified => render_unified_diff(old_text, new_text, 3),
+            DiffMode::Compact => render_unified_diff(old_text, new_text, 1),
+            DiffMode::Full => render_full_diff(old_text, new_text),
+            DiffMode::Words => render_word_diff(old_text, new_text),
+            DiffMode::SideBySide => render_side_by_side_diff(old_text, new_text),
+        }
     }
 }
 
-fn render_text_diff(old_text: &str, new_text: &str) {
+fn render_unified_diff(old_text: &str, new_text: &str, context: usize) {
     eprintln!("--- old");
     eprintln!("+++ new");
     let diff = TextDiff::from_lines(old_text, new_text);
-    for group in diff.grouped_ops(3) {
+    for group in diff.grouped_ops(context) {
         let old_start = group
             .first()
             .map(|op| op.old_range().start + 1)
@@ -1476,6 +1496,153 @@ fn render_text_diff(old_text: &str, new_text: &str) {
             }
         }
     }
+}
+
+fn render_full_diff(old_text: &str, new_text: &str) {
+    eprintln!("--- old");
+    if old_text.is_empty() {
+        eprintln!("  [empty]");
+    } else {
+        eprintln!("{}", indent_block(old_text.trim_end_matches('\n')));
+    }
+    eprintln!("+++ new");
+    if new_text.is_empty() {
+        eprintln!("  [empty]");
+    } else {
+        eprintln!("{}", indent_block(new_text.trim_end_matches('\n')));
+    }
+}
+
+fn render_word_diff(old_text: &str, new_text: &str) {
+    eprintln!("words:");
+    let old_lines = old_text.lines().collect::<Vec<_>>();
+    let new_lines = new_text.lines().collect::<Vec<_>>();
+    let max_len = old_lines.len().max(new_lines.len());
+    for index in 0..max_len {
+        let old_line = old_lines.get(index).copied().unwrap_or("");
+        let new_line = new_lines.get(index).copied().unwrap_or("");
+        if old_line == new_line {
+            eprintln!("  {old_line}");
+            continue;
+        }
+        let diff = TextDiff::from_words(old_line, new_line);
+        let mut rendered = String::new();
+        for change in diff.iter_all_changes() {
+            let token = change.to_string().replace(['\r', '\n'], "");
+            match change.tag() {
+                ChangeTag::Delete => {
+                    let _ = write!(rendered, "[-{token}-]");
+                }
+                ChangeTag::Insert => {
+                    let _ = write!(rendered, "{{+{token}+}}");
+                }
+                ChangeTag::Equal => rendered.push_str(&token),
+            }
+        }
+        eprintln!("  {rendered}");
+    }
+}
+
+fn render_side_by_side_diff(old_text: &str, new_text: &str) {
+    let terminal_width = std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100)
+        .clamp(60, 200);
+    let column_width = (terminal_width.saturating_sub(9) / 2).max(20);
+    eprintln!(
+        "{:<width$} | {:<width$}",
+        "old",
+        "new",
+        width = column_width
+    );
+    eprintln!(
+        "{}-+-{}",
+        "-".repeat(column_width),
+        "-".repeat(column_width)
+    );
+
+    for row in side_by_side_rows(old_text, new_text) {
+        eprintln!(
+            "{}{:<width$} | {}{:<width$}",
+            row.left_marker,
+            truncate_display(&row.left, column_width),
+            row.right_marker,
+            truncate_display(&row.right, column_width),
+            width = column_width
+        );
+    }
+}
+
+struct SideBySideRow {
+    left_marker: &'static str,
+    left: String,
+    right_marker: &'static str,
+    right: String,
+}
+
+fn side_by_side_rows(old_text: &str, new_text: &str) -> Vec<SideBySideRow> {
+    let diff = TextDiff::from_lines(old_text, new_text);
+    let mut rows = Vec::new();
+    let mut pending_deletes = Vec::new();
+    let mut pending_inserts = Vec::new();
+
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                flush_side_by_side_changes(&mut rows, &mut pending_deletes, &mut pending_inserts);
+                let line = trim_diff_line(change.to_string());
+                rows.push(SideBySideRow {
+                    left_marker: " ",
+                    left: line.clone(),
+                    right_marker: " ",
+                    right: line,
+                });
+            }
+            ChangeTag::Delete => pending_deletes.push(trim_diff_line(change.to_string())),
+            ChangeTag::Insert => pending_inserts.push(trim_diff_line(change.to_string())),
+        }
+    }
+    flush_side_by_side_changes(&mut rows, &mut pending_deletes, &mut pending_inserts);
+    rows
+}
+
+fn flush_side_by_side_changes(
+    rows: &mut Vec<SideBySideRow>,
+    deletes: &mut Vec<String>,
+    inserts: &mut Vec<String>,
+) {
+    let max_len = deletes.len().max(inserts.len());
+    for index in 0..max_len {
+        rows.push(SideBySideRow {
+            left_marker: if index < deletes.len() { "-" } else { " " },
+            left: deletes.get(index).cloned().unwrap_or_default(),
+            right_marker: if index < inserts.len() { "+" } else { " " },
+            right: inserts.get(index).cloned().unwrap_or_default(),
+        });
+    }
+    deletes.clear();
+    inserts.clear();
+}
+
+fn trim_diff_line(mut line: String) -> String {
+    if line.ends_with('\n') {
+        line.pop();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+    }
+    line
+}
+
+fn truncate_display(value: &str, width: usize) -> String {
+    let max = width.saturating_sub(1);
+    let mut chars = value.chars();
+    let mut output = chars.by_ref().take(max).collect::<String>();
+    if chars.next().is_some() {
+        output.push('…');
+    }
+    output
 }
 
 fn render_tool_result(name: &str, content: &str, is_error: bool) {
@@ -1514,11 +1681,15 @@ fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &P
         let model = session.model.as_deref().unwrap_or("unknown-model");
         let provider = session.provider.as_deref().unwrap_or("unknown-provider");
         let thinking = session.thinking.as_deref().unwrap_or("off");
-        let provider_model = if thinking == "off" {
+        let diff_mode = session.diff_mode.as_deref().unwrap_or("unified");
+        let mut provider_model = if thinking == "off" {
             format!("{provider}/{model}")
         } else {
             format!("{provider}/{model} think={thinking}")
         };
+        if diff_mode != "unified" {
+            provider_model.push_str(&format!(" diff={diff_mode}"));
+        }
         println!(
             "[{}] {marker} {:>4} {:>4} msgs  {:<28} {}",
             index + 1,
@@ -2070,6 +2241,9 @@ fn handle_command(
             println!(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
+            println!(
+                "  /diff [mode]          show or set edit diff: unified|compact|full|words|side_by_side"
+            );
             println!("  /image <path>         attach image to next message");
             println!("  /paste-image          attach image from clipboard");
             println!("  !<cmd>                run shell command and send output to model");
@@ -2094,6 +2268,7 @@ fn handle_command(
             println!("skills: {}", state.skills.len());
             println!("mcp_enabled: {}", state.mcp_enabled);
             println!("mcp_connected: {}", state.mcp.is_some());
+            println!("diff_mode: {}", state.diff_mode.as_str());
             println!("model: {}", config.model);
             println!("thinking: {}", config.thinking.as_str());
             println!("provider: {}", config.provider_name);
@@ -2202,6 +2377,16 @@ fn handle_command(
                 state.session.append_thinking(config.thinking.as_str())?;
             }
             println!("thinking: {}", config.thinking.as_str());
+            Ok(CommandAction::Continue)
+        }
+        "/diff" => {
+            if let Some(mode) = parts.next() {
+                let parsed = DiffMode::parse(mode)?;
+                config.diff_mode = parsed;
+                state.diff_mode = parsed;
+                state.session.append_diff_mode(parsed.as_str())?;
+            }
+            println!("diff: {}", state.diff_mode.as_str());
             Ok(CommandAction::Continue)
         }
         "/image" => {

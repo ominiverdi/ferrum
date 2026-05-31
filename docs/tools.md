@@ -56,7 +56,7 @@ Exact text replacement.
 }
 ```
 
-Interactive and print output renders `edit` calls as a plain unified diff for readability.
+Interactive output renders `edit` calls with the configured diff mode. Use `/diff` to view the current mode and `/diff unified|compact|full|words|side_by_side` to switch modes locally. This is display-only; edit matching and application semantics are unchanged.
 
 Rules:
 

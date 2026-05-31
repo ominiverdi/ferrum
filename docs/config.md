@@ -21,6 +21,7 @@ max_context_tokens = 256000
 max_tool_rounds = 0
 thinking = "off"
 mcp_enabled = true
+diff_mode = "unified"
 
 [providers.openai-codex]
 type = "openai-codex"
@@ -141,6 +142,30 @@ Interactive:
 ```
 
 When MCP is off, Ferrum does not start configured MCP servers and does not expose MCP tool schemas to the model. Native tools remain available.
+
+### diff_mode
+
+Controls how `edit` tool calls are rendered in interactive output. This is display-only and does not change edit semantics.
+
+Supported values:
+
+```text
+unified|compact|full|words|side_by_side
+```
+
+Default:
+
+```toml
+diff_mode = "unified"
+```
+
+Interactive:
+
+```text
+/diff
+/diff compact
+/diff side_by_side
+```
 
 ### thinking
 

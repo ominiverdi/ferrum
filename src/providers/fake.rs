@@ -42,7 +42,33 @@ fn scripted_response(script: &str, messages: &[Message]) -> Message {
         "repeat_read" => repeat_read_response(messages),
         "missing_read" => missing_read_response(messages),
         "mixed_write_read" => mixed_write_read_response(messages),
+        "edit_preview" => edit_preview_response(messages),
         _ => Message::text(Role::Assistant, format!("unknown fake script: {script}\n")),
+    }
+}
+
+fn edit_preview_response(messages: &[Message]) -> Message {
+    let saw_edit = messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "fake-edit-preview")
+        })
+    });
+    if saw_edit {
+        return Message::text(Role::Assistant, "edit preview complete\n");
+    }
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "fake-edit-preview".to_string(),
+            name: "edit".to_string(),
+            input: serde_json::json!({
+                "path": "sample.txt",
+                "edits": [{
+                    "old_text": "alpha beta gamma\nkeep this line\nremove this sentence\n",
+                    "new_text": "alpha beta delta\nkeep this line\nadd this better sentence\n"
+                }]
+            }),
+        }],
     }
 }
 
