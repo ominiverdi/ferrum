@@ -62,6 +62,8 @@ Use `type = "openai-compatible"` for providers that expose an OpenAI Chat Comple
 Config shape:
 
 ```toml
+provider = "example"
+
 [providers.example]
 type = "openai-compatible"
 base_url = "https://example.com/v1"
@@ -69,14 +71,36 @@ api_key_env = "EXAMPLE_API_KEY"
 default_model = "example-model"
 ```
 
+If top-level `model` is omitted, Ferrum uses the selected provider's `default_model`. A top-level `model` still takes precedence.
+
 Run:
 
 ```bash
 export EXAMPLE_API_KEY=...
-ferrum --provider example --model example-model -p "hello"
+ferrum -p "hello"
 ```
 
-Examples include OpenCode Go, MiniMax, OpenAI-compatible proxies, LM Studio, vLLM, and Ollama-compatible `/v1` servers.
+Examples include OpenCode Go, MiniMax, OpenAI-compatible proxies, LM Studio, vLLM, llama.cpp, and Ollama-compatible `/v1` servers.
+
+### Local llama.cpp example
+
+```toml
+provider = "llama-local"
+
+[providers.llama-local]
+type = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+api_key_env = "LLAMA_API_KEY"
+default_model = "gemma-4-E4B-it-Q8_0"
+```
+
+```bash
+export LLAMA_API_KEY=dummy
+ferrum -p "hello"
+```
+
+The exact model id must match the model exposed by your local server.
+
 
 ### OpenCode Go example
 

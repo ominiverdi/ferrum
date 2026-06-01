@@ -62,7 +62,7 @@ Fields:
 - `type`: `openai-codex`, `openai-compatible`, or `fake`
 - `base_url`: provider endpoint
 - `api_key_env`: environment variable for `openai-compatible` providers
-- `default_model`: model selected when `/provider <name>` switches to this provider
+- `default_model`: model selected when `/provider <name>` switches to this provider, and used at startup when top-level `model` is omitted
 
 ### model
 

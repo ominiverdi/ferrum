@@ -190,10 +190,18 @@ impl Config {
         };
 
         let provider = resolve_provider(&provider_name, &providers, &config_dir)?;
+        let model = file_config
+            .model
+            .or_else(|| {
+                providers
+                    .get(&provider_name)
+                    .and_then(|definition| definition.default_model.clone())
+            })
+            .unwrap_or_else(|| "fake".to_string());
 
         Ok(Self {
             config_dir,
-            model: file_config.model.unwrap_or_else(|| "fake".to_string()),
+            model,
             provider_name,
             provider,
             providers,
@@ -380,5 +388,47 @@ mod tests {
             .apply_cli_overrides(None, None, None, Some(false))
             .unwrap();
         assert!(!config.mcp_enabled);
+    }
+
+    #[test]
+    fn uses_provider_default_model_when_model_is_missing() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "llama-local"
+
+[providers.llama-local]
+type = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+api_key_env = "LLAMA_API_KEY"
+default_model = "gemma-4-E4B-it-Q8_0"
+"#,
+        )
+        .unwrap();
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(config.provider_name, "llama-local");
+        assert_eq!(config.model, "gemma-4-E4B-it-Q8_0");
+    }
+
+    #[test]
+    fn top_level_model_overrides_provider_default_model() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "llama-local"
+model = "explicit-model"
+
+[providers.llama-local]
+type = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+api_key_env = "LLAMA_API_KEY"
+default_model = "default-model"
+"#,
+        )
+        .unwrap();
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(config.model, "explicit-model");
     }
 }
