@@ -1,5 +1,7 @@
 # Release Checklist
 
+Codeberg is the primary source repository. GitHub is currently kept as a mirror and binary release host because the existing release workflow uploads GitHub release assets.
+
 Before public release:
 
 ```bash
@@ -37,13 +39,15 @@ version = "0.4.9"
 git tag -a v0.4.9 -m "Ferrum v0.4.9"
 git push origin main
 git push origin v0.4.9
+git push github main
+git push github v0.4.9
 ```
 
-Pushing a `v*` tag triggers `.github/workflows/release.yml`.
+In the primary local clone, `origin` should point to Codeberg and `github` should point to the GitHub mirror. Pushing a `v*` tag to GitHub triggers `.github/workflows/release.yml` and uploads binary assets to the GitHub release.
 
 ## Release assets
 
-The release workflow builds Linux x86_64 and uploads:
+The GitHub release workflow builds Linux x86_64 and uploads:
 
 ```text
 ferrum-v0.4.9-x86_64-unknown-linux-gnu.tar.gz

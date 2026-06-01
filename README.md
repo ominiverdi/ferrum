@@ -8,6 +8,10 @@ Ferrum is inspired by Pi's agent-harness ideas, but it is a separate Rust projec
 
 Status: early MVP. Useful for real work, still evolving.
 
+Primary repository: https://codeberg.org/ominiverdi/ferrum
+
+GitHub mirror and binary releases: https://github.com/ominiverdi/ferrum
+
 ## Features
 
 - Linux-native CLI
@@ -29,7 +33,7 @@ Status: early MVP. Useful for real work, still evolving.
 
 ### Linux binary
 
-Download the latest release asset from GitHub:
+Download the latest release asset from the GitHub mirror. Codeberg is the primary source repository; GitHub currently hosts binary release assets.
 
 ```bash
 curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.9/ferrum-v0.4.9-x86_64-unknown-linux-gnu.tar.gz | tar xz
@@ -48,7 +52,7 @@ sha256sum -c ferrum-v0.4.9-x86_64-unknown-linux-gnu.tar.gz.sha256
 ### From source
 
 ```bash
-git clone https://github.com/ominiverdi/ferrum.git
+git clone https://codeberg.org/ominiverdi/ferrum.git
 cd ferrum
 cargo install --path .
 ferrum --help
