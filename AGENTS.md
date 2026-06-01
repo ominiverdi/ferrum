@@ -8,14 +8,12 @@ Ferrum is a new project, not a compatibility port.
 ## Repository / Forge Situation
 - Codeberg is the primary source repository:
   `https://codeberg.org/ominiverdi/ferrum`
-- Primary local working copy:
-  `/home/ominiverdi/codeberg/ferrum`
 - In the primary local clone:
   - `origin` must point to Codeberg: `ssh://git@codeberg.org/ominiverdi/ferrum.git`
   - `github` must point to the GitHub mirror: `git@github.com:ominiverdi/ferrum.git`
 - GitHub remains a mirror and current binary release host until Codeberg release automation is proven:
   `https://github.com/ominiverdi/ferrum`
-- The older `/home/ominiverdi/github/ferrum` clone is no longer the primary development checkout. Do not use it for new work unless explicitly asked.
+- Do not use stale GitHub-only working copies for new work unless explicitly asked.
 
 ## Publishing / Release Rules
 - Implement changes locally first.
@@ -95,8 +93,8 @@ Ferrum is a new project, not a compatibility port.
 - Add dependencies only when they clearly simplify correctness or maintenance.
 
 ## Codeberg Tooling
-- `tea` is installed at `~/.local/bin/tea` and configured for Codeberg as user `ominiverdi`.
-- SSH auth to Codeberg is configured with key title `minto`.
+- `tea` can be used for Codeberg operations when configured locally.
+- SSH auth to Codeberg should be configured locally before pushing.
 - Use `git` for normal push/fetch/tag operations.
 - Use `tea` for Codeberg repo, issue, PR, and release operations when needed.
 
