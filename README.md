@@ -92,10 +92,16 @@ ferrum --continue
 Ferrum reads config from `~/.config/ferrum/config.toml`.
 
 ```toml
-provider = "openai-codex"
-model = "gpt-5.5"
+provider = "llama-local"
+model = "gemma-4-E4B-it-Q8_0"
 thinking = "off"
 max_context_tokens = 256000
+
+[providers.llama-local]
+type = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+api_key_env = "LLAMA_API_KEY"
+default_model = "gemma-4-E4B-it-Q8_0"
 
 [providers.openai-codex]
 type = "openai-codex"
