@@ -1,69 +1,107 @@
 # Ferrum Agent Instructions
 
 ## Project
-Ferrum is a Linux-only, Rust-native, barebone, fast coding agent inspired by Pi.
+Ferrum is a Linux-only, Rust-native, small, fast coding agent inspired by Pi.
 
-This is a new project, not a compatibility port.
+Ferrum is a new project, not a compatibility port.
+
+## Repository / Forge Situation
+- Codeberg is the primary source repository:
+  `https://codeberg.org/ominiverdi/ferrum`
+- Primary local working copy:
+  `/home/ominiverdi/codeberg/ferrum`
+- In the primary local clone:
+  - `origin` must point to Codeberg: `ssh://git@codeberg.org/ominiverdi/ferrum.git`
+  - `github` must point to the GitHub mirror: `git@github.com:ominiverdi/ferrum.git`
+- GitHub remains a mirror and current binary release host until Codeberg release automation is proven:
+  `https://github.com/ominiverdi/ferrum`
+- The older `/home/ominiverdi/github/ferrum` clone is no longer the primary development checkout. Do not use it for new work unless explicitly asked.
+
+## Publishing / Release Rules
+- Implement changes locally first.
+- Run local validation before publishing:
+  ```bash
+  cargo fmt --check
+  cargo test
+  cargo build --release
+  ```
+- Wait for explicit user approval before pushing, tagging, creating releases, uploading assets, or otherwise publishing.
+- Never publish untested or user-unapproved code.
+- Normal source push after approval:
+  ```bash
+  git push origin main
+  git push github main
+  ```
+- Normal tagged release while GitHub is still release host:
+  ```bash
+  git tag -a vX.Y.Z -F /tmp/ferrum-vX.Y.Z-notes.md
+  git push origin main vX.Y.Z
+  git push github main vX.Y.Z
+  ```
+  Pushing the tag to GitHub triggers the existing GitHub release workflow.
+- For future Codeberg-hosted releases, use `tea release create` with locally built assets until Woodpecker or another Codeberg CI release path is implemented and tested.
+- Existing GitHub release assets should remain valid. Do not break published install URLs without a tested replacement.
 
 ## Goals
 - Native Linux CLI/TUI coding agent.
 - Small, fast, predictable.
 - Minimal dependencies where practical.
-- No TypeScript runtime.
-- No extension system in v1.
-- No npm/package ecosystem compatibility.
-- Preserve useful Pi concepts only: agent loop, tools, sessions, context files.
+- Rust-native runtime, no TypeScript runtime.
+- Provider-neutral core loop and tools.
+- Useful Pi concepts only: agent loop, tools, sessions, context files, skills-like instructions.
+
+## Current Scope
+- Rust stable.
+- Interactive and print modes.
+- JSONL sessions with resume/switching/metadata.
+- OpenAI Codex / ChatGPT OAuth provider.
+- OpenAI-compatible providers for remote APIs and local servers.
+- MCP stdio bridge.
+- Image input.
+- Agent Skills-style instruction packages.
+- Native tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`.
 
 ## Non-goals for v1
 - Cross-platform support beyond Linux.
 - TypeScript extensions.
 - SDK compatibility with Pi.
-- Package manager.
-- OAuth login flows.
+- Pi package manager compatibility.
 - Themes.
 - Rich plugin UI.
-- Image support.
 - Auto-update checks.
 
 ## Engineering Rules
-- Implement changes locally first, run local tests, then wait for explicit user approval before pushing, tagging, creating releases, or otherwise publishing.
-- Never publish untested or user-unapproved code.
 - Prefer simple Rust modules over abstractions until duplication hurts.
 - Keep provider adapters thin and explicit.
+- Keep tools provider-neutral; providers only translate requests/responses.
 - Avoid speculative generalization.
 - Preserve session data with stable JSONL schemas.
 - Treat tool execution and file mutation as critical correctness paths.
 - Favor deterministic behavior and clear errors over magic.
 - Do not hardcode secrets.
-- Read API keys from environment/config only.
+- Read API keys from environment/config/OAuth storage only.
+- Never commit secrets, tokens, OAuth credentials, Vault material, local sessions, or generated artifacts.
+- Keep README concise; put details in `docs/`.
 
-## Initial Stack
-- Rust stable.
+## Initial Stack / Dependency Bias
 - `tokio` for async runtime.
 - `clap` for CLI.
 - `serde` / `serde_json` for data.
 - `reqwest` for HTTP.
-- `crossterm` initially for terminal control.
-- Add `ratatui` only if/when the interactive UI needs it.
+- `crossterm` for terminal control.
 - `ignore`, `walkdir`, `globset` for filesystem traversal.
-- `similar` for diffs if needed.
+- `similar` for diffs.
 - `anyhow` and `thiserror` for errors.
+- Add dependencies only when they clearly simplify correctness or maintenance.
 
-## v1 Provider Scope
-- Anthropic API.
-- OpenAI-compatible Chat Completions or Responses API.
-- Add more providers only after the core loop is stable.
-
-## v1 Tool Scope
-- `read`
-- `write`
-- `edit`
-- `bash`
-- `grep`
-- `find`
-- `ls`
+## Codeberg Tooling
+- `tea` is installed at `~/.local/bin/tea` and configured for Codeberg as user `ominiverdi`.
+- SSH auth to Codeberg is configured with key title `minto`.
+- Use `git` for normal push/fetch/tag operations.
+- Use `tea` for Codeberg repo, issue, PR, and release operations when needed.
 
 ## Style
 - Keep code readable and boring.
 - Small files, clear module boundaries.
-- No icons or emoticons in logs, comments, or UI strings.
+- No icons or emoticons in logs, comments, docs, or UI strings.
+- Plain terminal output; no color dependency for core rendering.
