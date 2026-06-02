@@ -2,7 +2,7 @@ pub mod messages;
 pub mod tools;
 
 use crate::{
-    config::{Config, DiffMode},
+    config::{Config, DiffMode, ToolSelection},
     context, mcp, providers, session, skills, tools as builtin_tools,
 };
 use anyhow::{Context, Result};
@@ -14,7 +14,7 @@ use crossterm::{
 use rustyline::{DefaultEditor, error::ReadlineError};
 use similar::{ChangeTag, TextDiff};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Write as FmtWrite,
     fs,
     io::{self, IsTerminal, Write},
@@ -50,16 +50,23 @@ pub async fn run_interactive(
     continue_latest: bool,
     session_ref: Option<String>,
     thinking_overridden: bool,
+    tools_overridden: bool,
 ) -> Result<()> {
     let mut state = match (session_ref, resume, continue_latest) {
-        (Some(reference), _, _) => {
-            AgentState::resume_ref(config, Some(&reference), !thinking_overridden)?
-        }
-        (None, Some(Some(reference)), _) => {
-            AgentState::resume_ref(config, Some(&reference), !thinking_overridden)?
-        }
+        (Some(reference), _, _) => AgentState::resume_ref(
+            config,
+            Some(&reference),
+            !thinking_overridden,
+            !tools_overridden,
+        )?,
+        (None, Some(Some(reference)), _) => AgentState::resume_ref(
+            config,
+            Some(&reference),
+            !thinking_overridden,
+            !tools_overridden,
+        )?,
         (None, Some(None), _) | (None, None, true) => {
-            AgentState::resume_ref(config, None, !thinking_overridden)?
+            AgentState::resume_ref(config, None, !thinking_overridden, !tools_overridden)?
         }
         (None, None, false) => AgentState::new(config)?,
     };
@@ -205,6 +212,7 @@ fn restore_session_preferences(
     config: &mut Config,
     path: &Path,
     restore_thinking: bool,
+    restore_tools: bool,
 ) -> Result<()> {
     let Some(info) = session::jsonl::session_info(path)? else {
         return Ok(());
@@ -216,6 +224,11 @@ fn restore_session_preferences(
     }
     if let Some(diff_mode) = info.diff_mode.as_deref() {
         config.diff_mode = DiffMode::parse(diff_mode)?;
+    }
+    if restore_tools {
+        if let Some(tools) = info.tools {
+            config.set_tool_selection_from_session(tools)?;
+        }
     }
     Ok(())
 }
@@ -443,6 +456,87 @@ fn tool_schema_bytes(tools: &[tools::ToolDefinition]) -> usize {
         .unwrap_or(0)
 }
 
+fn resolve_available_tools(
+    tools: Vec<tools::ToolDefinition>,
+    config: &Config,
+) -> Result<Vec<tools::ToolDefinition>> {
+    let known = tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<HashSet<_>>();
+    if known.contains("none") {
+        anyhow::bail!("tool name 'none' is reserved");
+    }
+
+    validate_known_tools(config.tools_allow.as_deref(), &known, "config tools.allow")?;
+    validate_known_tools(
+        Some(config.tools_deny.as_slice()),
+        &known,
+        "config tools.deny",
+    )?;
+
+    let mut requested = match &config.tool_selection {
+        None => None,
+        Some(ToolSelection::None) => Some(HashSet::new()),
+        Some(ToolSelection::List(names)) => {
+            validate_known_tools(Some(names.as_slice()), &known, "--tools")?;
+            Some(names.iter().map(String::as_str).collect::<HashSet<_>>())
+        }
+    };
+
+    if let Some(allow) = &config.tools_allow {
+        let allow = allow.iter().map(String::as_str).collect::<HashSet<_>>();
+        if let Some(ToolSelection::List(names)) = &config.tool_selection {
+            for name in names {
+                if !allow.contains(name.as_str()) {
+                    anyhow::bail!("tool '{name}' requested by --tools but not allowed by config");
+                }
+            }
+        }
+        match &mut requested {
+            Some(requested) => requested.retain(|name| allow.contains(name)),
+            None => requested = Some(allow),
+        }
+    }
+
+    let deny = config
+        .tools_deny
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    if let Some(ToolSelection::List(names)) = &config.tool_selection {
+        for name in names {
+            if deny.contains(name.as_str()) {
+                anyhow::bail!("tool '{name}' requested by --tools but denied by config");
+            }
+        }
+    }
+
+    Ok(tools
+        .into_iter()
+        .filter(|tool| {
+            let name = tool.name.as_str();
+            requested.as_ref().is_none_or(|set| set.contains(name)) && !deny.contains(name)
+        })
+        .collect())
+}
+
+fn validate_known_tools(
+    names: Option<&[String]>,
+    known: &HashSet<&str>,
+    source: &str,
+) -> Result<()> {
+    let Some(names) = names else {
+        return Ok(());
+    };
+    for name in names {
+        if !known.contains(name.as_str()) {
+            anyhow::bail!("unknown tool '{name}' in {source}");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum LoopGuardAction {
     Continue,
@@ -626,6 +720,8 @@ struct AgentState {
     diff_mode: DiffMode,
     pending_images: Vec<messages::ContentBlock>,
     last_session_list: Vec<session::jsonl::SessionInfo>,
+    active_tool_names: HashSet<String>,
+    saved_tool_names: Option<Vec<String>>,
 }
 
 impl AgentState {
@@ -656,6 +752,7 @@ impl AgentState {
                 Some(config.model.clone()),
                 Some(config.thinking.as_str().to_string()),
                 Some(config.diff_mode.as_str().to_string()),
+                None,
             )?,
             messages,
             skills,
@@ -665,6 +762,8 @@ impl AgentState {
             diff_mode: config.diff_mode,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
+            active_tool_names: HashSet::new(),
+            saved_tool_names: None,
         })
     }
 
@@ -672,6 +771,7 @@ impl AgentState {
         config: &mut Config,
         reference: Option<&str>,
         restore_thinking: bool,
+        restore_tools: bool,
     ) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let path = match reference {
@@ -681,12 +781,13 @@ impl AgentState {
             None => session::jsonl::latest_session_for_cwd(&config.sessions_dir(), &cwd)?
                 .ok_or_else(|| anyhow::anyhow!("no sessions found for {}", cwd.display()))?,
         };
-        restore_session_preferences(config, &path, restore_thinking)?;
+        restore_session_preferences(config, &path, restore_thinking, restore_tools)?;
         Self::open_session(config, path)
     }
 
     fn open_session(config: &Config, path: PathBuf) -> Result<Self> {
         let cwd = std::env::current_dir()?;
+        let saved_tool_names = session::jsonl::session_info(&path)?.and_then(|info| info.tools);
         let mut messages = session::jsonl::load_messages(&path)?;
         let count = messages.len();
         println!("resumed {} ({count} messages)", path.display());
@@ -717,6 +818,8 @@ impl AgentState {
             diff_mode: config.diff_mode,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
+            active_tool_names: HashSet::new(),
+            saved_tool_names,
         })
     }
 
@@ -768,6 +871,16 @@ impl AgentState {
             if let Some(mcp) = &self.mcp {
                 tools.extend_from_slice(mcp.definitions());
             }
+        }
+        tools = resolve_available_tools(tools, config)?;
+        let tool_names = tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect::<Vec<_>>();
+        self.active_tool_names = tool_names.iter().cloned().collect();
+        if self.saved_tool_names.as_ref() != Some(&tool_names) {
+            self.session.append_tools(&tool_names)?;
+            self.saved_tool_names = Some(tool_names);
         }
 
         let metrics_enabled = metrics_enabled();
@@ -1020,14 +1133,20 @@ impl AgentState {
         }
 
         let cwd = self.cwd.clone();
+        let active_tool_names = self.active_tool_names.clone();
         let mut handles = Vec::new();
         for (index, (id, name, input)) in tool_uses.into_iter().enumerate() {
             let cwd = cwd.clone();
+            let active_tool_names = active_tool_names.clone();
             handles.push(tokio::spawn(async move {
                 let started = Instant::now();
-                let (content, is_error) = match builtin_tools::execute(&name, &input, &cwd).await {
-                    Ok(output) => (output, false),
-                    Err(error) => (error.to_string(), true),
+                let (content, is_error) = if !active_tool_names.contains(&name) {
+                    (format!("Tool '{name}' is not available"), true)
+                } else {
+                    match builtin_tools::execute(&name, &input, &cwd).await {
+                        Ok(output) => (output, false),
+                        Err(error) => (error.to_string(), true),
+                    }
                 };
                 (
                     index,
@@ -1099,6 +1218,9 @@ impl AgentState {
     }
 
     async fn execute_tool(&mut self, name: &str, input: &serde_json::Value) -> Result<String> {
+        if !self.active_tool_names.contains(name) {
+            anyhow::bail!("Tool '{name}' is not available");
+        }
         if self.mcp_enabled {
             if let Some(mcp) = &mut self.mcp {
                 if mcp.has_tool(name) {
@@ -1166,7 +1288,7 @@ impl AgentState {
             return Ok(());
         }
         self.remove_empty_session()?;
-        restore_session_preferences(config, &path, true)?;
+        restore_session_preferences(config, &path, true, true)?;
         let next = Self::open_session(config, path)?;
         *self = next;
         Ok(())

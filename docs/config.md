@@ -23,6 +23,10 @@ thinking = "off"
 mcp_enabled = true
 diff_mode = "unified"
 
+[tools]
+allow = ["read", "grep", "find", "bash"]
+deny = ["write", "edit"]
+
 [providers.openai-codex]
 type = "openai-codex"
 base_url = "https://chatgpt.com/backend-api"
@@ -142,6 +146,35 @@ Interactive:
 ```
 
 When MCP is off, Ferrum does not start configured MCP servers and does not expose MCP tool schemas to the model. Native tools remain available.
+
+### tools
+
+Tool exposure can be narrowed per process:
+
+```bash
+ferrum --tools read,grep,find -p "inspect this repo"
+ferrum --tools none -p "answer without tools"
+```
+
+Semantics:
+
+```text
+--tools omitted        => default available tools
+--tools none           => no tools
+--tools read,grep,find => exactly those tools, subject to config policy
+```
+
+Config policy:
+
+```toml
+[tools]
+allow = ["read", "grep", "find", "bash"]
+deny = ["write", "edit"]
+```
+
+`allow` is optional. When present, it is the maximum allowed tool set. `deny` removes tools from the default or requested set. If `--tools` requests an unknown, denied, or not-allowed tool, Ferrum fails before the model request.
+
+Ferrum stores the resolved tool list in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
 
 ### diff_mode
 

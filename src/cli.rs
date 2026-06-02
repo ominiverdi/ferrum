@@ -32,6 +32,10 @@ pub struct Args {
     #[arg(long = "no-mcp")]
     pub no_mcp: bool,
 
+    /// Expose only these tools to the model, comma-separated. Use "none" to expose no tools.
+    #[arg(long = "tools", value_name = "LIST")]
+    pub tools: Option<String>,
+
     /// Resume the latest session, or a specific JSONL session path/id prefix
     #[arg(long, value_name = "REF")]
     pub resume: Option<Option<String>>,
@@ -95,5 +99,14 @@ mod tests {
     fn mcp_flags_conflict() {
         let result = Args::try_parse_from(["ferrum", "--mcp", "--no-mcp", "-p", "hi"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_tools_flag() {
+        let args = Args::try_parse_from(["ferrum", "--tools", "read,grep", "-p", "hi"]).unwrap();
+        assert_eq!(args.tools.as_deref(), Some("read,grep"));
+
+        let none = Args::try_parse_from(["ferrum", "--tools", "none", "-p", "hi"]).unwrap();
+        assert_eq!(none.tools.as_deref(), Some("none"));
     }
 }

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, env, fs, path::PathBuf};
+use std::{collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -15,7 +15,16 @@ pub struct Config {
     pub thinking: ThinkingLevel,
     pub mcp_enabled: bool,
     pub diff_mode: DiffMode,
+    pub tools_allow: Option<Vec<String>>,
+    pub tools_deny: Vec<String>,
+    pub tool_selection: Option<ToolSelection>,
     pub mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolSelection {
+    None,
+    List(Vec<String>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,9 +159,17 @@ struct FileConfig {
     thinking: Option<String>,
     mcp_enabled: Option<bool>,
     diff_mode: Option<String>,
+    tools: Option<FileToolsConfig>,
     mcp: Option<FileMcpConfig>,
     #[serde(default)]
     providers: BTreeMap<String, ProviderDefinition>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FileToolsConfig {
+    allow: Option<Vec<String>>,
+    #[serde(default)]
+    deny: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -190,6 +207,12 @@ impl Config {
         };
 
         let provider = resolve_provider(&provider_name, &providers, &config_dir)?;
+        let tools_config = file_config.tools.unwrap_or_default();
+        let tools_allow = tools_config
+            .allow
+            .map(validate_tool_name_list)
+            .transpose()?;
+        let tools_deny = validate_tool_name_list(tools_config.deny)?;
         let model = file_config
             .model
             .or_else(|| {
@@ -226,6 +249,9 @@ impl Config {
                 .map(DiffMode::parse)
                 .transpose()?
                 .unwrap_or(DiffMode::Unified),
+            tools_allow,
+            tools_deny,
+            tool_selection: None,
             mcp_servers: file_config.mcp.map(|mcp| mcp.servers).unwrap_or_default(),
         })
     }
@@ -236,6 +262,7 @@ impl Config {
         model: Option<&str>,
         thinking: Option<&str>,
         mcp_enabled: Option<bool>,
+        tools: Option<&str>,
     ) -> Result<()> {
         if let Some(provider) = provider {
             self.set_provider(provider)?;
@@ -248,6 +275,9 @@ impl Config {
         }
         if let Some(mcp_enabled) = mcp_enabled {
             self.mcp_enabled = mcp_enabled;
+        }
+        if let Some(tools) = tools {
+            self.tool_selection = Some(parse_tool_selection(tools)?);
         }
         Ok(())
     }
@@ -275,6 +305,43 @@ impl Config {
     pub fn auth_path(&self) -> PathBuf {
         self.config_dir.join("auth.json")
     }
+
+    pub fn set_tool_selection_from_session(&mut self, tools: Vec<String>) -> Result<()> {
+        self.tool_selection = Some(ToolSelection::List(validate_tool_name_list(tools)?));
+        Ok(())
+    }
+}
+
+fn parse_tool_selection(value: &str) -> Result<ToolSelection> {
+    let value = value.trim();
+    if value == "none" {
+        return Ok(ToolSelection::None);
+    }
+    if value.is_empty() {
+        anyhow::bail!("--tools requires a comma-separated list or 'none'");
+    }
+    Ok(ToolSelection::List(validate_tool_name_list(
+        value.split(',').map(str::to_string).collect(),
+    )?))
+}
+
+fn validate_tool_name_list(values: Vec<String>) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for raw in values {
+        let name = raw.trim();
+        if name.is_empty() {
+            anyhow::bail!("tool lists must not contain empty entries");
+        }
+        if name == "none" {
+            anyhow::bail!("'none' is reserved and cannot be used as a tool name");
+        }
+        if !seen.insert(name.to_string()) {
+            anyhow::bail!("duplicate tool name in tool list: {name}");
+        }
+        normalized.push(name.to_string());
+    }
+    Ok(normalized)
 }
 
 fn default_true() -> bool {
@@ -381,13 +448,54 @@ mod tests {
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         assert!(!config.mcp_enabled);
         config
-            .apply_cli_overrides(None, None, None, Some(true))
+            .apply_cli_overrides(None, None, None, Some(true), None)
             .unwrap();
         assert!(config.mcp_enabled);
         config
-            .apply_cli_overrides(None, None, None, Some(false))
+            .apply_cli_overrides(None, None, None, Some(false), None)
             .unwrap();
         assert!(!config.mcp_enabled);
+    }
+
+    #[test]
+    fn parses_tools_config_and_cli_selection() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[tools]
+allow = ["read", "grep"]
+deny = ["bash"]
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(
+            config.tools_allow,
+            Some(vec!["read".to_string(), "grep".to_string()])
+        );
+        assert_eq!(config.tools_deny, vec!["bash".to_string()]);
+
+        config
+            .apply_cli_overrides(None, None, None, None, Some("read,grep"))
+            .unwrap();
+        assert_eq!(
+            config.tool_selection,
+            Some(ToolSelection::List(vec![
+                "read".to_string(),
+                "grep".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn parses_tools_none_cli_selection() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        config
+            .apply_cli_overrides(None, None, None, None, Some("none"))
+            .unwrap();
+        assert_eq!(config.tool_selection, Some(ToolSelection::None));
     }
 
     #[test]

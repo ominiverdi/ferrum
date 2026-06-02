@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
         args.model.as_deref(),
         args.thinking.as_deref(),
         mcp_enabled,
+        args.tools.as_deref(),
     )?;
 
     if let Some(command) = &args.command {
@@ -55,6 +56,7 @@ async fn main() -> Result<()> {
         args.r#continue,
         args.session,
         args.thinking.is_some(),
+        args.tools.is_some(),
     )
     .await
 }

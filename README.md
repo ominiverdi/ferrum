@@ -28,6 +28,7 @@ GitHub mirror and binary releases: https://github.com/ominiverdi/ferrum
 - Config-backed provider registry
 - Live model listing for supported providers
 - Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
+- Tool exposure control with `--tools` and config allow/deny lists
 
 ## Install
 
@@ -78,6 +79,13 @@ Attach an image:
 ferrum --image ./screenshot.png -p "describe this image"
 ```
 
+Limit exposed tools:
+
+```bash
+ferrum --tools read,grep,find -p "inspect this repo"
+ferrum --tools none -p "answer without tools"
+```
+
 Start an interactive session:
 
 ```bash
@@ -100,6 +108,10 @@ provider = "openai-codex"
 model = "gpt-5.5"
 thinking = "off"
 max_context_tokens = 256000
+
+[tools]
+allow = ["read", "grep", "find", "bash"]
+deny = ["write", "edit"]
 
 [providers.openai-codex]
 type = "openai-codex"
