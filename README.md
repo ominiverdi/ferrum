@@ -37,17 +37,17 @@ GitHub mirror and binary releases: https://github.com/ominiverdi/ferrum
 Download the latest release asset from the GitHub mirror. Codeberg is the primary source repository; GitHub currently hosts binary release assets.
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.11/ferrum-v0.4.11-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.11-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.12-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
 Optional checksum verification:
 
 ```bash
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.11/ferrum-v0.4.11-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.11/ferrum-v0.4.11-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.4.11-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### From source

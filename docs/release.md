@@ -33,7 +33,7 @@ Set the next version in `Cargo.toml`, `Cargo.lock`, and install docs.
 Example:
 
 ```toml
-version = "0.4.11"
+version = "0.4.12"
 ```
 
 ## Tag release
@@ -41,7 +41,7 @@ version = "0.4.11"
 Use annotated tags and push Codeberg first, then the GitHub mirror:
 
 ```bash
-version=v0.4.11
+version=v0.4.12
 notes=/tmp/ferrum-${version}-notes.md
 
 git tag -a "$version" -F "$notes"
@@ -71,7 +71,7 @@ LICENSE
 Manual packaging equivalent:
 
 ```bash
-version=v0.4.11
+version=v0.4.12
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 mkdir -p "$package"
@@ -98,8 +98,8 @@ sha256sum -c ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256
 Release notes should include:
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.11/ferrum-v0.4.11-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.11-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.12-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 

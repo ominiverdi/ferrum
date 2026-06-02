@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "ferrum"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "anyhow",
  "base64",
