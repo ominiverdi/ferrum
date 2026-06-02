@@ -20,6 +20,9 @@ jobs:
           git fetch --depth=1 origin "$GITHUB_SHA"
           git checkout --detach "$GITHUB_SHA"
 
+      - name: Install Rust components
+        run: rustup component add rustfmt
+
       - name: Check formatting
         run: cargo fmt --check
 
