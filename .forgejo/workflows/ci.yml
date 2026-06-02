@@ -9,7 +9,7 @@ on:
 
 jobs:
   rust:
-    runs-on: codeberg-small
+    runs-on: codeberg-medium
     container:
       image: rust:1.90
     steps:
@@ -26,8 +26,5 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Test
-        run: cargo test
-
-      - name: Build release
-        run: cargo build --release
+      - name: Test release build
+        run: cargo test --release
