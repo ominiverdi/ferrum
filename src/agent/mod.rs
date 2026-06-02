@@ -237,20 +237,43 @@ fn restore_session_preferences(
     Ok(())
 }
 
-fn runtime_context(config: &Config, cwd: &Path) -> String {
-    format!(
-        "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n- mcp_enabled: {}\n- diff_mode: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /mcp [on|off|status]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
-        env!("CARGO_PKG_VERSION"),
-        config.provider_name,
-        config.provider_model,
-        config.thinking.as_str(),
-        cwd.display(),
-        config.config_dir.display(),
-        config.max_context_tokens,
-        config.max_tool_rounds,
-        config.mcp_enabled,
-        config.diff_mode.as_str(),
-    )
+fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
+    let system_prompt_path = config.config_dir.join("system.md");
+    let template = if system_prompt_path.exists() {
+        fs::read_to_string(&system_prompt_path)
+            .with_context(|| format!("failed to read {}", system_prompt_path.display()))?
+    } else {
+        default_system_prompt_template().to_string()
+    };
+    Ok(render_system_prompt_template(&template, config, cwd))
+}
+
+fn default_system_prompt_template() -> &'static str {
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /mcp [on|off|status]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+}
+
+fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
+    let replacements = [
+        ("{{ferrum_version}}", env!("CARGO_PKG_VERSION").to_string()),
+        ("{{provider}}", config.provider_name.clone()),
+        ("{{model}}", config.model.clone()),
+        ("{{provider_model}}", config.provider_model.clone()),
+        ("{{thinking}}", config.thinking.as_str().to_string()),
+        ("{{cwd}}", cwd.display().to_string()),
+        ("{{config_dir}}", config.config_dir.display().to_string()),
+        (
+            "{{max_context_tokens}}",
+            config.max_context_tokens.to_string(),
+        ),
+        ("{{max_tool_rounds}}", config.max_tool_rounds.to_string()),
+        ("{{mcp_enabled}}", config.mcp_enabled.to_string()),
+        ("{{diff_mode}}", config.diff_mode.as_str().to_string()),
+    ];
+    let mut rendered = template.to_string();
+    for (placeholder, value) in replacements {
+        rendered = rendered.replace(placeholder, &value);
+    }
+    rendered
 }
 
 #[derive(Debug)]
@@ -735,7 +758,7 @@ impl AgentState {
         let mut messages = Vec::new();
         messages.push(messages::Message::text(
             messages::Role::System,
-            runtime_context(config, &cwd),
+            runtime_context(config, &cwd)?,
         ));
         if let Some(system_context) = context::load_context(&config.config_dir, &cwd)? {
             messages.push(messages::Message::text(
@@ -799,7 +822,7 @@ impl AgentState {
         println!("resumed {} ({count} messages)", path.display());
         messages.push(messages::Message::text(
             messages::Role::System,
-            runtime_context(config, &cwd),
+            runtime_context(config, &cwd)?,
         ));
         if let Some(system_context) = context::load_context(&config.config_dir, &cwd)? {
             messages.push(messages::Message::text(
@@ -2036,6 +2059,59 @@ mod context_pressure_tests {
 
         assert_eq!(avoid_orphan_tool_results(&messages, 2), 3);
         assert_eq!(avoid_orphan_tool_results(&messages, 3), 3);
+    }
+
+    #[test]
+    fn renders_external_system_prompt_template() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let cwd = std::path::Path::new("/tmp/work");
+        let rendered = render_system_prompt_template(
+            "model={{model}} provider_model={{provider_model}} cwd={{cwd}} max={{max_context_tokens}}",
+            &config,
+            cwd,
+        );
+
+        assert_eq!(
+            rendered,
+            "model=alias provider_model=actual-model cwd=/tmp/work max=1234"
+        );
+    }
+
+    #[test]
+    fn runtime_context_uses_config_system_md_when_present() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("system.md"),
+            "custom prompt for {{model}} using {{provider_model}}",
+        )
+        .unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let rendered = runtime_context(&config, std::path::Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(rendered, "custom prompt for alias using actual-model");
+    }
+
+    fn test_config(config_dir: std::path::PathBuf) -> Config {
+        Config {
+            config_dir,
+            model: "alias".to_string(),
+            provider_model: "actual-model".to_string(),
+            provider_name: "fake".to_string(),
+            provider: crate::config::ProviderConfig::Fake,
+            providers: std::collections::BTreeMap::new(),
+            models: std::collections::BTreeMap::new(),
+            offline: false,
+            max_context_tokens: 1234,
+            max_tool_rounds: 0,
+            thinking: crate::config::ThinkingLevel::Off,
+            mcp_enabled: true,
+            diff_mode: crate::config::DiffMode::Unified,
+            tools_allow: None,
+            tools_deny: Vec::new(),
+            tool_selection: None,
+            mcp_servers: Vec::new(),
+        }
     }
 }
 

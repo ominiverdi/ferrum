@@ -185,7 +185,7 @@ Ferrum loads context from `AGENTS.md` and `agents.md` files:
 
 Files are deduplicated, bounded, and included in the system prompt. More specific later files override earlier instructions when conflicts exist.
 
-Ferrum also injects runtime context describing current version, provider, provider model, thinking level, cwd, config dir, and supported interactive commands.
+Ferrum also injects runtime context describing current version, provider, provider model, thinking level, cwd, config dir, and supported interactive commands. The embedded default runtime system prompt can be fully overridden with `~/.config/ferrum/system.md`; Ferrum renders known `{{placeholder}}` values from current runtime config and leaves unknown placeholders unchanged.
 
 ## Sessions
 

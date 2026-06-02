@@ -6,6 +6,12 @@ Ferrum reads config from:
 ~/.config/ferrum/config.toml
 ```
 
+Optional system prompt override:
+
+```text
+~/.config/ferrum/system.md
+```
+
 Override config directory:
 
 ```bash
@@ -59,6 +65,36 @@ command = "example-mcp-server"
 args = []
 enabled = true
 ```
+
+### system.md
+
+Ferrum has an embedded default system prompt. If `system.md` exists in the config directory, Ferrum uses it instead. This is a full override, not an appended instruction block.
+
+```text
+~/.config/ferrum/system.md
+```
+
+Ferrum reads the file when starting a new session or resuming/switching sessions, so the latest saved version is used for future runtime context.
+
+Supported placeholders:
+
+```text
+{{ferrum_version}}
+{{provider}}
+{{model}}
+{{provider_model}}
+{{thinking}}
+{{cwd}}
+{{config_dir}}
+{{max_context_tokens}}
+{{max_tool_rounds}}
+{{mcp_enabled}}
+{{diff_mode}}
+```
+
+Unknown placeholders are left unchanged. If the file exists but cannot be read, Ferrum fails clearly.
+
+Do not put secrets in `system.md`. A custom system prompt controls Ferrum's behavior; omitting runtime metadata or tool guidance can degrade agent behavior.
 
 ### provider
 

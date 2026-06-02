@@ -103,6 +103,8 @@ ferrum --continue
 
 Ferrum reads config from `~/.config/ferrum/config.toml`.
 
+An optional system prompt override can live at `~/.config/ferrum/system.md`.
+
 ```toml
 provider = "openai-codex"
 model = "gpt-5.5"
@@ -136,6 +138,34 @@ ferrum login openai
 ```
 
 OpenAI-compatible providers use environment-backed keys. Do not put secret values in `config.toml`.
+
+## System prompt override
+
+Ferrum has an embedded default system prompt. To fully override it, create:
+
+```text
+~/.config/ferrum/system.md
+```
+
+Ferrum reads this file when starting or resuming a session. If the file is absent, the embedded default is used.
+
+Supported placeholders:
+
+```text
+{{ferrum_version}}
+{{provider}}
+{{model}}
+{{provider_model}}
+{{thinking}}
+{{cwd}}
+{{config_dir}}
+{{max_context_tokens}}
+{{max_tool_rounds}}
+{{mcp_enabled}}
+{{diff_mode}}
+```
+
+Do not put secrets in `system.md`. If you override the prompt, keep any runtime metadata and tool guidance you want Ferrum to preserve.
 
 In active interactive turns, `Esc` aborts the current model/tool turn and returns to the prompt.
 
