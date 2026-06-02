@@ -39,6 +39,8 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
   - `grep`: glob filters, ignore-case, literal search, context lines, limits, hidden files, noisy-directory skips.
   - `ls`: dotfiles, case-insensitive sorting, directory suffixes, entry limits, limit notices.
   - `bash`: bounded previews with full stdout/stderr saved to temp files when truncated.
+- Tool exposure policy with `--tools`, `[tools] allow`/`deny`, no-tools mode, and session-persistent resolved tool lists.
+- Model aliases with per-model context budgets, provider model mapping, context-pressure warnings, and 95% automatic compaction.
 - Harness loop hardening:
   - adaptive loop guard for repeated identical tool calls and consecutive tool errors.
   - `max_tool_rounds = 0` adaptive default with positive values available as explicit caps.

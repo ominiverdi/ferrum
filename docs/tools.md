@@ -2,13 +2,46 @@
 
 Ferrum tools are provider-neutral. Providers only translate tool definitions and tool calls to/from their API format. Execution happens in the core agent loop.
 
-Native tools are always available. MCP stdio tools can be added through config and are exposed as `mcp__<server>__<tool>` when MCP is enabled. Use `--no-mcp` or `/mcp off` to disable MCP tools for coding-only turns.
+Native tools are available by default, then narrowed by `--tools` and `[tools]` config policy. MCP stdio tools can be added through config and are exposed as `mcp__<server>__<tool>` when MCP is enabled and permitted by the active tool policy. Use `--no-mcp` or `/mcp off` to disable MCP tools for coding-only turns.
 
 Interactive mode renders tool calls in a readable multiline format and prints a bounded preview of tool results. Full tool results remain in the model/session context unless the underlying tool output itself was bounded.
 
 For providers that support streaming, Ferrum streams provider events live. If thinking is enabled and the provider returns displayable reasoning text, Ferrum streams that provider-supplied thinking before the assistant answer; it does not synthesize thinking or expose hidden chain-of-thought. Press `Esc` during an active interactive turn to abort the current model/tool turn and return to the prompt.
 
 When a turn continues after tool execution, Ferrum prints a simple separator before the post-tool assistant response.
+
+## Tool exposure policy
+
+CLI:
+
+```bash
+ferrum --tools read,grep,find
+ferrum --tools none
+```
+
+Semantics:
+
+```text
+--tools omitted        => default available tools
+--tools none           => no tools exposed to the model
+--tools read,grep,find => exactly those tools, subject to config policy
+```
+
+Config:
+
+```toml
+[tools]
+allow = ["read", "grep", "find", "bash"]
+deny = ["write", "edit"]
+```
+
+`allow` is optional. When present, it is the maximum allowed tool set. `deny` removes tools from the default or requested set. Ferrum fails before the model request if `--tools` requests an unknown, denied, or not-allowed tool.
+
+Ferrum stores the resolved tool list in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
+
+If a provider emits a call for a non-exposed tool, Ferrum returns a tool error such as `Tool 'write' is not available` instead of executing it.
+
+Interactive shell shortcuts are separate from model tools: `!cmd` and `!!cmd` are user-invoked commands handled by Ferrum, not tools exposed to the model.
 
 ## read
 
@@ -190,5 +223,6 @@ Results are appended in the original model-requested order. Mixed or mutating ba
 
 - Tools run with local user permissions.
 - `write`, `edit`, and `bash` can mutate files.
-- Ferrum currently has no per-tool confirmation prompts. Tool calls execute directly in both print and interactive mode.
+- Ferrum has no per-tool confirmation prompts. Exposed tool calls execute directly in both print and interactive mode.
+- Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 - Secrets must not be written, printed, logged, or committed.

@@ -12,23 +12,26 @@ Entry types:
 
 - `header`
 - `message`
+- `metadata`
 - `compaction`
 
 Sessions are append-oriented and human-inspectable.
 
 ## Resume
 
-Continue the latest session for the current directory:
+Continue the latest session for the current directory in interactive mode:
 
 ```bash
 ferrum --continue
 ```
 
-Resume the latest session for the current directory:
+Resume the latest session for the current directory in interactive mode:
 
 ```bash
 ferrum --resume
 ```
+
+Print mode currently starts a fresh session even if resume flags are present.
 
 Resume a specific session by path or id prefix:
 
@@ -59,6 +62,8 @@ Thinking level is stored in session metadata. New sessions record the current th
 
 Diff mode is also stored in session metadata. New sessions record the current `diff_mode`, and `/diff <mode>` appends an updated mode. Resuming or switching sessions restores that session's edit diff rendering mode.
 
+The resolved tool list is stored in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
+
 `/session` shows:
 
 - path
@@ -66,8 +71,10 @@ Diff mode is also stored in session metadata. New sessions record the current `d
 - character count
 - estimated tokens
 - max context tokens
+- context usage percent
 - file size
 - model
+- provider model, when different from model
 - provider
 - thinking
 
@@ -81,16 +88,24 @@ text characters / 4
 
 This is approximate but useful enough for compaction thresholds.
 
-Default max context:
+Default fallback max context:
 
 ```toml
 max_context_tokens = 256000
 ```
 
-Ferrum warns at 80% and compacts automatically at the configured limit.
+Model aliases can override the fallback budget:
+
+```toml
+[models."gpt-5.5-small-context"]
+actual_model = "gpt-5.5"
+max_context_tokens = 6000
+```
+
+Ferrum warns as context usage rises: 75-84% every 5%, 85-91% every 3%, and 92-94% every 1%. It compacts automatically at 95% so the compaction request has headroom.
 
 ## Compaction
 
-`/compact` summarizes older conversation with the current provider/model, keeps recent context, and stores a `compaction` entry. The summary is loaded back as system context when the session is resumed.
+`/compact` summarizes older conversation with the current provider model, keeps recent context, and stores a `compaction` entry. The summary is loaded back as system context when the session is resumed.
 
-Manual compaction is skipped when there is nothing old enough to summarize or when the resulting context would not be smaller. Automatic compaction can force a fallback local summary if model-generated compaction fails while the session is over budget.
+Manual compaction is skipped when there is nothing old enough to summarize or when the resulting context would not be smaller. Automatic compaction can force a fallback local summary if model-generated compaction fails while the session is over budget. Ferrum avoids retaining orphan tool results whose matching tool calls were summarized away.

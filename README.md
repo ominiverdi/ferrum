@@ -92,7 +92,7 @@ Start an interactive session:
 ferrum
 ```
 
-Resume the latest session:
+Resume the latest interactive session:
 
 ```bash
 ferrum --resume
@@ -123,6 +123,10 @@ type = "openai-compatible"
 base_url = "https://example.com/v1"
 api_key_env = "EXAMPLE_API_KEY"
 default_model = "example-model"
+
+[models."gpt-5.5-small-context"]
+actual_model = "gpt-5.5"
+max_context_tokens = 6000
 ```
 
 Login for ChatGPT/Codex OAuth:
@@ -185,7 +189,8 @@ Shell shortcuts:
 - API keys are read from environment variables or provider OAuth storage.
 - Tools run with your local user permissions.
 - `bash`, `write`, and `edit` can mutate files.
-- Ferrum currently has no per-tool confirmation prompts. Tool calls execute directly in both print and interactive mode.
+- Ferrum has no per-tool confirmation prompts. Exposed tool calls execute directly in both print and interactive mode.
+- Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 
 ## Development
 

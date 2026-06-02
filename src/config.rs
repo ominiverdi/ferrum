@@ -6,9 +6,11 @@ use std::{collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf};
 pub struct Config {
     pub config_dir: PathBuf,
     pub model: String,
+    pub provider_model: String,
     pub provider_name: String,
     pub provider: ProviderConfig,
     pub providers: BTreeMap<String, ProviderDefinition>,
+    pub models: BTreeMap<String, ModelDefinition>,
     pub offline: bool,
     pub max_context_tokens: usize,
     pub max_tool_rounds: usize,
@@ -150,6 +152,13 @@ pub struct ProviderDefinition {
     pub default_model: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDefinition {
+    pub provider: Option<String>,
+    pub actual_model: Option<String>,
+    pub max_context_tokens: Option<usize>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct FileConfig {
     model: Option<String>,
@@ -163,6 +172,8 @@ struct FileConfig {
     mcp: Option<FileMcpConfig>,
     #[serde(default)]
     providers: BTreeMap<String, ProviderDefinition>,
+    #[serde(default)]
+    models: BTreeMap<String, ModelDefinition>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -200,20 +211,14 @@ impl Config {
         let offline = env::var("FERRUM_OFFLINE")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
         let providers = file_config.providers;
-        let provider_name = if offline {
+        let models = file_config.models;
+        let mut provider_name = if offline {
             "fake".to_string()
         } else {
             file_config.provider.unwrap_or_else(|| "fake".to_string())
         };
 
-        let provider = resolve_provider(&provider_name, &providers, &config_dir)?;
-        let tools_config = file_config.tools.unwrap_or_default();
-        let tools_allow = tools_config
-            .allow
-            .map(validate_tool_name_list)
-            .transpose()?;
-        let tools_deny = validate_tool_name_list(tools_config.deny)?;
-        let model = file_config
+        let selected_model = file_config
             .model
             .or_else(|| {
                 providers
@@ -221,15 +226,41 @@ impl Config {
                     .and_then(|definition| definition.default_model.clone())
             })
             .unwrap_or_else(|| "fake".to_string());
+        if let Some(model_provider) = models
+            .get(&selected_model)
+            .and_then(|definition| definition.provider.as_ref())
+        {
+            if offline && model_provider != "fake" {
+                anyhow::bail!(
+                    "model {selected_model} requires provider {model_provider}, but FERRUM_OFFLINE is set"
+                );
+            }
+            provider_name = model_provider.clone();
+        }
+        let provider = resolve_provider(&provider_name, &providers, &config_dir)?;
+        let provider_model = provider_model_for(&selected_model, &models);
+        let max_context_tokens = models
+            .get(&selected_model)
+            .and_then(|definition| definition.max_context_tokens)
+            .or(file_config.max_context_tokens)
+            .unwrap_or(256_000);
+        let tools_config = file_config.tools.unwrap_or_default();
+        let tools_allow = tools_config
+            .allow
+            .map(validate_tool_name_list)
+            .transpose()?;
+        let tools_deny = validate_tool_name_list(tools_config.deny)?;
 
         Ok(Self {
             config_dir,
-            model,
+            model: selected_model,
+            provider_model,
             provider_name,
             provider,
             providers,
+            models,
             offline,
-            max_context_tokens: file_config.max_context_tokens.unwrap_or(256_000),
+            max_context_tokens,
             max_tool_rounds: env::var("FERRUM_MAX_TOOL_ROUNDS")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
@@ -268,7 +299,7 @@ impl Config {
             self.set_provider(provider)?;
         }
         if let Some(model) = model {
-            self.model = model.to_string();
+            self.set_model(model)?;
         }
         if let Some(thinking) = thinking {
             self.thinking = ThinkingLevel::parse(thinking)?;
@@ -291,10 +322,34 @@ impl Config {
         if let Some(default_model) = self
             .providers
             .get(provider)
-            .and_then(|definition| definition.default_model.as_ref())
+            .and_then(|definition| definition.default_model.clone())
         {
-            self.model = default_model.clone();
+            self.apply_model_name(default_model)?;
         }
+        Ok(())
+    }
+
+    pub fn set_model(&mut self, model: &str) -> Result<()> {
+        self.apply_model_name(model.to_string())
+    }
+
+    fn apply_model_name(&mut self, model: String) -> Result<()> {
+        if let Some(model_provider) = self
+            .models
+            .get(&model)
+            .and_then(|definition| definition.provider.clone())
+        {
+            self.set_provider(&model_provider)?;
+        }
+        self.provider_model = provider_model_for(&model, &self.models);
+        if let Some(max_context_tokens) = self
+            .models
+            .get(&model)
+            .and_then(|definition| definition.max_context_tokens)
+        {
+            self.max_context_tokens = max_context_tokens;
+        }
+        self.model = model;
         Ok(())
     }
 
@@ -310,6 +365,13 @@ impl Config {
         self.tool_selection = Some(ToolSelection::List(validate_tool_name_list(tools)?));
         Ok(())
     }
+}
+
+fn provider_model_for(model: &str, models: &BTreeMap<String, ModelDefinition>) -> String {
+    models
+        .get(model)
+        .and_then(|definition| definition.actual_model.clone())
+        .unwrap_or_else(|| model.to_string())
 }
 
 fn parse_tool_selection(value: &str) -> Result<ToolSelection> {
@@ -517,6 +579,7 @@ default_model = "gemma-4-E4B-it-Q8_0"
         let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         assert_eq!(config.provider_name, "llama-local");
         assert_eq!(config.model, "gemma-4-E4B-it-Q8_0");
+        assert_eq!(config.provider_model, "gemma-4-E4B-it-Q8_0");
     }
 
     #[test]
@@ -538,5 +601,87 @@ default_model = "default-model"
         .unwrap();
         let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         assert_eq!(config.model, "explicit-model");
+        assert_eq!(config.provider_model, "explicit-model");
+    }
+
+    #[test]
+    fn model_definition_overrides_context_and_actual_model() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "openai-codex"
+model = "gpt-test-small"
+max_context_tokens = 256000
+
+[providers.openai-codex]
+type = "openai-codex"
+default_model = "gpt-5.5"
+
+[models.gpt-test-small]
+actual_model = "gpt-5.5"
+max_context_tokens = 400
+"#,
+        )
+        .unwrap();
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(config.provider_name, "openai-codex");
+        assert_eq!(config.model, "gpt-test-small");
+        assert_eq!(config.provider_model, "gpt-5.5");
+        assert_eq!(config.max_context_tokens, 400);
+    }
+
+    #[test]
+    fn model_definition_can_select_provider() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "fake"
+model = "mini"
+
+[providers.minimax]
+type = "openai-compatible"
+base_url = "https://api.minimax.io/v1"
+api_key_env = "MINIMAX_API_KEY"
+default_model = "MiniMax-M2"
+
+[models.mini]
+provider = "minimax"
+actual_model = "MiniMax-M2"
+max_context_tokens = 100000
+"#,
+        )
+        .unwrap();
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(config.provider_name, "minimax");
+        assert_eq!(config.model, "mini");
+        assert_eq!(config.provider_model, "MiniMax-M2");
+        assert_eq!(config.max_context_tokens, 100000);
+    }
+
+    #[test]
+    fn quoted_model_names_can_contain_dots_and_hyphens() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "openai-codex"
+model = "gpt-5.5-small-context"
+
+[providers.openai-codex]
+type = "openai-codex"
+default_model = "gpt-5.5"
+
+[models."gpt-5.5-small-context"]
+actual_model = "gpt-5.5"
+max_context_tokens = 400
+"#,
+        )
+        .unwrap();
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(config.model, "gpt-5.5-small-context");
+        assert_eq!(config.provider_model, "gpt-5.5");
+        assert_eq!(config.max_context_tokens, 400);
     }
 }

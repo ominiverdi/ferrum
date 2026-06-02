@@ -13,6 +13,7 @@ cargo build --release
 Check for accidental files:
 
 ```bash
+git status --short
 find . -maxdepth 2 -type f | sort
 ```
 
@@ -27,20 +28,25 @@ Do not commit generated or local files:
 
 ## Versioning
 
-Update `Cargo.toml`:
+Set the next version in `Cargo.toml`, `Cargo.lock`, and install docs.
+
+Example:
 
 ```toml
-version = "0.4.9"
+version = "0.4.10"
 ```
 
 ## Tag release
 
+Use annotated tags and push Codeberg first, then the GitHub mirror:
+
 ```bash
-git tag -a v0.4.9 -m "Ferrum v0.4.9"
-git push origin main
-git push origin v0.4.9
-git push github main
-git push github v0.4.9
+version=v0.4.10
+notes=/tmp/ferrum-${version}-notes.md
+
+git tag -a "$version" -F "$notes"
+git push origin main "$version"
+git push github main "$version"
 ```
 
 In the primary local clone, `origin` should point to Codeberg and `github` should point to the GitHub mirror. Pushing a `v*` tag to GitHub triggers `.github/workflows/release.yml` and uploads binary assets to the GitHub release.
@@ -50,8 +56,8 @@ In the primary local clone, `origin` should point to Codeberg and `github` shoul
 The GitHub release workflow builds Linux x86_64 and uploads:
 
 ```text
-ferrum-v0.4.9-x86_64-unknown-linux-gnu.tar.gz
-ferrum-v0.4.9-x86_64-unknown-linux-gnu.tar.gz.sha256
+ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz
+ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 The tarball includes:
@@ -65,7 +71,7 @@ LICENSE
 Manual packaging equivalent:
 
 ```bash
-version=v0.4.9
+version=v0.4.10
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 mkdir -p "$package"
@@ -75,15 +81,33 @@ tar -czf "${package}.tar.gz" "$package"
 sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
 ```
 
+## Verify GitHub release
+
+After the GitHub workflow completes:
+
+```bash
+gh release view "$version" --repo ominiverdi/ferrum --json tagName,isDraft,assets,url
+mkdir -p /tmp/ferrum-release-check
+cd /tmp/ferrum-release-check
+gh release download "$version" --repo ominiverdi/ferrum --pattern '*.tar.gz' --pattern '*.sha256'
+sha256sum -c ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256
+```
+
 ## Install docs
 
 Release notes should include:
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.9/ferrum-v0.4.9-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.9-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.10/ferrum-v0.4.10-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.10-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
+
+## Codeberg releases
+
+Source tags are pushed to Codeberg. Binary assets are still hosted on GitHub until Codeberg release automation is proven.
+
+If creating Codeberg assets manually, use `tea release create` with locally built assets and verify download/checksum before linking users to them.
 
 ## License
 

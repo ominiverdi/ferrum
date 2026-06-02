@@ -20,7 +20,7 @@ Interactive:
 /mcp status
 ```
 
-`/mcp status` shows configured servers, exposed MCP tools, total tools, and schema bytes.
+`/mcp status` shows configured servers, exposed MCP tools, total tools, and schema bytes before any `--tools` or `[tools]` narrowing for a model turn.
 
 ## Supported
 
@@ -39,7 +39,7 @@ Interactive:
 - resource subscriptions
 - prompts
 - sampling
-- per-tool confirmation policy
+- per-tool confirmation prompts
 - dynamic rediscovery while a session is running
 
 ## Configuration
@@ -72,7 +72,7 @@ args = ["--flag"]
 
 ## Tool names
 
-Ferrum exposes MCP tools with a namespace:
+Ferrum exposes MCP tools with a namespace when MCP is enabled and the active tool policy permits them:
 
 ```text
 mcp__<server>__<tool>

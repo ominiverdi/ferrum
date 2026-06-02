@@ -30,6 +30,10 @@ use std::{
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 2_000;
 const TOOL_PREVIEW_MAX_CHARS: usize = 4_000;
+const CONTEXT_ADVISORY_PERCENT: usize = 75;
+const CONTEXT_WARNING_PERCENT: usize = 85;
+const CONTEXT_CRITICAL_PERCENT: usize = 92;
+const CONTEXT_AUTO_COMPACT_PERCENT: usize = 95;
 const HARD_TOOL_ROUND_LIMIT: usize = 256;
 const REPEATED_TOOL_NUDGE_LIMIT: usize = 4;
 const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
@@ -238,7 +242,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> String {
         "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {}\n- provider: {}\n- model: {}\n- thinking: {}\n- cwd: {}\n- config_dir: {}\n- max_context_tokens: {}\n- max_tool_rounds: {}\n- mcp_enabled: {}\n- diff_mode: {}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions <number|id-prefix|path>\n- /sessions pick\n- /sessions new\n- /model [name]\n- /models\n- /provider [name]\n- /providers\n- /mcp [on|off|status]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send its output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed.",
         env!("CARGO_PKG_VERSION"),
         config.provider_name,
-        config.model,
+        config.provider_model,
         config.thinking.as_str(),
         cwd.display(),
         config.config_dir.display(),
@@ -722,6 +726,7 @@ struct AgentState {
     last_session_list: Vec<session::jsonl::SessionInfo>,
     active_tool_names: HashSet<String>,
     saved_tool_names: Option<Vec<String>>,
+    last_context_warning_bucket: Option<usize>,
 }
 
 impl AgentState {
@@ -764,6 +769,7 @@ impl AgentState {
             last_session_list: Vec::new(),
             active_tool_names: HashSet::new(),
             saved_tool_names: None,
+            last_context_warning_bucket: None,
         })
     }
 
@@ -820,34 +826,55 @@ impl AgentState {
             last_session_list: Vec::new(),
             active_tool_names: HashSet::new(),
             saved_tool_names,
+            last_context_warning_bucket: None,
         })
     }
 
     async fn run_turn(&mut self, prompt: String, config: &Config, interactive: bool) -> Result<()> {
         let stats = self.stats();
-        let warn_tokens = config.max_context_tokens.saturating_mul(4) / 5;
-        if stats.estimated_tokens >= config.max_context_tokens {
+        if should_auto_compact(stats.estimated_tokens, config.max_context_tokens) {
+            let percent = context_usage_percent(stats.estimated_tokens, config.max_context_tokens);
             eprintln!(
-                "[session] estimated context {} tokens exceeds limit {}; compacting",
+                "[session] context {percent}% used ({}/{} estimated tokens); compacting before limit",
                 stats.estimated_tokens, config.max_context_tokens
             );
             let outcome = self.compact(config, None, true).await?;
+            self.last_context_warning_bucket = None;
             match outcome {
                 CompactionOutcome::Compacted {
                     before_tokens,
                     after_tokens,
-                } => eprintln!(
-                    "[session] compacted context: {before_tokens} -> {after_tokens} estimated tokens"
-                ),
-                CompactionOutcome::Skipped { reason, .. } => {
-                    eprintln!("[session] compaction skipped: {reason}")
+                } => {
+                    eprintln!(
+                        "[session] compacted context: {before_tokens} -> {after_tokens} estimated tokens"
+                    );
+                    if should_auto_compact(after_tokens, config.max_context_tokens) {
+                        let percent =
+                            context_usage_percent(after_tokens, config.max_context_tokens);
+                        eprintln!(
+                            "[session] context remains above budget after compaction ({percent}% used, {after_tokens}/{} estimated tokens); continuing, but provider context errors are possible",
+                            config.max_context_tokens
+                        );
+                    }
+                }
+                CompactionOutcome::Skipped {
+                    reason,
+                    before_tokens,
+                    ..
+                } => {
+                    eprintln!("[session] compaction skipped: {reason}");
+                    if should_auto_compact(before_tokens, config.max_context_tokens) {
+                        let percent =
+                            context_usage_percent(before_tokens, config.max_context_tokens);
+                        eprintln!(
+                            "[session] context remains above budget without compaction ({percent}% used, {before_tokens}/{} estimated tokens); continuing, but provider context errors are possible",
+                            config.max_context_tokens
+                        );
+                    }
                 }
             }
-        } else if stats.estimated_tokens >= warn_tokens {
-            eprintln!(
-                "[session] estimated context {} tokens is near limit {}",
-                stats.estimated_tokens, config.max_context_tokens
-            );
+        } else {
+            self.maybe_warn_context_pressure(stats.estimated_tokens, config.max_context_tokens);
         }
 
         let images = std::mem::take(&mut self.pending_images);
@@ -904,7 +931,7 @@ impl AgentState {
             let response_result = if interactive {
                 provider
                     .complete_streaming(
-                        &config.model,
+                        &config.provider_model,
                         &self.messages,
                         &tools,
                         config.thinking,
@@ -914,7 +941,12 @@ impl AgentState {
                     .await
             } else {
                 provider
-                    .complete(&config.model, &self.messages, &tools, config.thinking)
+                    .complete(
+                        &config.provider_model,
+                        &self.messages,
+                        &tools,
+                        config.thinking,
+                    )
                     .await
             };
             abort.stop();
@@ -947,6 +979,10 @@ impl AgentState {
             self.messages.push(response);
 
             if tool_uses.is_empty() {
+                self.maybe_warn_context_pressure(
+                    self.stats().estimated_tokens,
+                    config.max_context_tokens,
+                );
                 return Ok(());
             }
             if abort.is_cancelled() {
@@ -1005,7 +1041,12 @@ impl AgentState {
         }
         let started = Instant::now();
         let final_response = provider
-            .complete(&config.model, &final_messages, &[], config.thinking)
+            .complete(
+                &config.provider_model,
+                &final_messages,
+                &[],
+                config.thinking,
+            )
             .await?;
         if metrics_enabled {
             emit_model_metrics_end(model_request_index, started.elapsed(), &final_response);
@@ -1013,6 +1054,7 @@ impl AgentState {
         render_assistant_response(&final_response, interactive)?;
         self.session.append_message(&final_response)?;
         self.messages.push(final_response);
+        self.maybe_warn_context_pressure(self.stats().estimated_tokens, config.max_context_tokens);
         Ok(())
     }
 
@@ -1248,6 +1290,26 @@ impl AgentState {
         }
     }
 
+    fn maybe_warn_context_pressure(&mut self, estimated_tokens: usize, max_context_tokens: usize) {
+        let percent = context_usage_percent(estimated_tokens, max_context_tokens);
+        let Some(bucket) = context_warning_bucket(percent) else {
+            self.last_context_warning_bucket = None;
+            return;
+        };
+        if self
+            .last_context_warning_bucket
+            .is_some_and(|last_bucket| bucket <= last_bucket)
+        {
+            return;
+        }
+
+        eprintln!(
+            "{}",
+            context_pressure_message(percent, estimated_tokens, max_context_tokens)
+        );
+        self.last_context_warning_bucket = Some(bucket);
+    }
+
     fn remove_empty_session(&mut self) -> Result<()> {
         if self.session.remove_if_empty()? {
             self.last_session_list.clear();
@@ -1392,6 +1454,7 @@ impl AgentState {
 
         let keep_recent_tokens = COMPACTION_KEEP_RECENT_TOKENS.min(config.max_context_tokens / 2);
         let split_index = split_for_compaction(&conversation, keep_recent_tokens.max(1));
+        let split_index = avoid_orphan_tool_results(&conversation, split_index);
         let (to_summarize, recent) = conversation.split_at(split_index);
         if to_summarize.is_empty() {
             return Ok(CompactionOutcome::Skipped {
@@ -1461,7 +1524,12 @@ impl AgentState {
             messages::Message::text(messages::Role::User, prompt),
         ];
         let response = provider
-            .complete(&config.model, &request_messages, &[], config.thinking)
+            .complete(
+                &config.provider_model,
+                &request_messages,
+                &[],
+                config.thinking,
+            )
             .await?;
         Ok(response.text_content())
     }
@@ -1865,6 +1933,112 @@ fn format_age(modified: SystemTime) -> String {
     }
 }
 
+fn should_auto_compact(estimated_tokens: usize, max_context_tokens: usize) -> bool {
+    if max_context_tokens == 0 {
+        return false;
+    }
+    estimated_tokens.saturating_mul(100)
+        >= max_context_tokens.saturating_mul(CONTEXT_AUTO_COMPACT_PERCENT)
+}
+
+fn context_usage_percent(estimated_tokens: usize, max_context_tokens: usize) -> usize {
+    if max_context_tokens == 0 {
+        return 0;
+    }
+    estimated_tokens.saturating_mul(100) / max_context_tokens
+}
+
+fn context_warning_bucket(percent: usize) -> Option<usize> {
+    match percent {
+        0..=74 => None,
+        75..=84 => Some(((percent - CONTEXT_ADVISORY_PERCENT) / 5) * 5 + CONTEXT_ADVISORY_PERCENT),
+        85..=91 => Some(((percent - CONTEXT_WARNING_PERCENT) / 3) * 3 + CONTEXT_WARNING_PERCENT),
+        92..=94 => Some(percent),
+        _ => Some(CONTEXT_AUTO_COMPACT_PERCENT),
+    }
+}
+
+fn context_pressure_message(
+    percent: usize,
+    estimated_tokens: usize,
+    max_context_tokens: usize,
+) -> String {
+    if percent >= CONTEXT_CRITICAL_PERCENT {
+        format!(
+            "[session] context {percent}% used ({estimated_tokens}/{max_context_tokens} estimated tokens); auto-compact will run at {CONTEXT_AUTO_COMPACT_PERCENT}%"
+        )
+    } else if percent >= CONTEXT_WARNING_PERCENT {
+        format!(
+            "[session] context {percent}% used ({estimated_tokens}/{max_context_tokens} estimated tokens); auto-compact is getting close"
+        )
+    } else {
+        format!(
+            "[session] context {percent}% used ({estimated_tokens}/{max_context_tokens} estimated tokens); consider /compact to control the summary point"
+        )
+    }
+}
+
+#[cfg(test)]
+mod context_pressure_tests {
+    use super::*;
+
+    #[test]
+    fn buckets_context_pressure_by_cadence() {
+        assert_eq!(context_warning_bucket(74), None);
+        assert_eq!(context_warning_bucket(75), Some(75));
+        assert_eq!(context_warning_bucket(79), Some(75));
+        assert_eq!(context_warning_bucket(80), Some(80));
+        assert_eq!(context_warning_bucket(84), Some(80));
+        assert_eq!(context_warning_bucket(85), Some(85));
+        assert_eq!(context_warning_bucket(87), Some(85));
+        assert_eq!(context_warning_bucket(88), Some(88));
+        assert_eq!(context_warning_bucket(91), Some(91));
+        assert_eq!(context_warning_bucket(92), Some(92));
+        assert_eq!(context_warning_bucket(94), Some(94));
+        assert_eq!(context_warning_bucket(95), Some(95));
+    }
+
+    #[test]
+    fn auto_compacts_before_full_context() {
+        assert!(!should_auto_compact(94, 100));
+        assert!(should_auto_compact(95, 100));
+        assert!(should_auto_compact(190_000, 200_000));
+    }
+
+    #[test]
+    fn usage_percent_is_floor_percent() {
+        assert_eq!(context_usage_percent(149, 200), 74);
+        assert_eq!(context_usage_percent(150, 200), 75);
+    }
+
+    #[test]
+    fn compaction_split_drops_orphan_tool_results_from_recent_context() {
+        let messages = vec![
+            messages::Message::text(messages::Role::User, "old question"),
+            messages::Message {
+                role: messages::Role::Assistant,
+                content: vec![messages::ContentBlock::ToolUse {
+                    id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                }],
+            },
+            messages::Message {
+                role: messages::Role::Tool,
+                content: vec![messages::ContentBlock::ToolResult {
+                    tool_use_id: "call_1".to_string(),
+                    content: "result".to_string(),
+                    is_error: false,
+                }],
+            },
+            messages::Message::text(messages::Role::User, "new question"),
+        ];
+
+        assert_eq!(avoid_orphan_tool_results(&messages, 2), 3);
+        assert_eq!(avoid_orphan_tool_results(&messages, 3), 3);
+    }
+}
+
 #[derive(Debug)]
 enum CompactionOutcome {
     Compacted {
@@ -1887,6 +2061,21 @@ fn split_for_compaction(messages: &[messages::Message], keep_recent_tokens: usiz
         }
     }
     0
+}
+
+fn avoid_orphan_tool_results(messages: &[messages::Message], split_index: usize) -> usize {
+    let mut adjusted = split_index;
+    while adjusted < messages.len() && message_has_tool_result(&messages[adjusted]) {
+        adjusted += 1;
+    }
+    adjusted
+}
+
+fn message_has_tool_result(message: &messages::Message) -> bool {
+    message
+        .content
+        .iter()
+        .any(|block| matches!(block, messages::ContentBlock::ToolResult { .. }))
 }
 
 fn estimated_tokens_for_messages(messages: &[messages::Message]) -> usize {
@@ -2384,6 +2573,10 @@ fn handle_command(
             println!("chars: {}", stats.chars);
             println!("estimated_tokens: {}", stats.estimated_tokens);
             println!("max_context_tokens: {}", config.max_context_tokens);
+            println!(
+                "context_usage_percent: {}",
+                context_usage_percent(stats.estimated_tokens, config.max_context_tokens)
+            );
             println!("max_tool_rounds: {}", config.max_tool_rounds);
             println!("file_bytes: {}", stats.file_bytes);
             println!("pending_images: {}", state.pending_images.len());
@@ -2392,6 +2585,9 @@ fn handle_command(
             println!("mcp_connected: {}", state.mcp.is_some());
             println!("diff_mode: {}", state.diff_mode.as_str());
             println!("model: {}", config.model);
+            if config.provider_model != config.model {
+                println!("provider_model: {}", config.provider_model);
+            }
             println!("thinking: {}", config.thinking.as_str());
             println!("provider: {}", config.provider_name);
             Ok(CommandAction::Continue)
@@ -2442,9 +2638,12 @@ fn handle_command(
         }
         "/model" => {
             if let Some(model) = parts.next() {
-                config.model = model.to_string();
+                config.set_model(model)?;
             }
             println!("model: {}", config.model);
+            if config.provider_model != config.model {
+                println!("provider_model: {}", config.provider_model);
+            }
             Ok(CommandAction::Continue)
         }
         "/models" => {
@@ -2456,6 +2655,9 @@ fn handle_command(
             }
             println!("provider: {}", config.provider_name);
             println!("model: {}", config.model);
+            if config.provider_model != config.model {
+                println!("provider_model: {}", config.provider_model);
+            }
             Ok(CommandAction::Continue)
         }
         "/providers" => {

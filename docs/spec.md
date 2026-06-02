@@ -35,7 +35,7 @@ Behavior:
 
 - Accept prompt args.
 - Accept stdin.
-- Accept provider/model/thinking overrides from CLI.
+- Accept provider/model/thinking/tool overrides from CLI.
 - Accept repeated `--image` attachments.
 - Print assistant output to stdout.
 - Return non-zero on unrecoverable errors.
@@ -87,6 +87,7 @@ Shell shortcuts:
 
 Session resume:
 
+- Resume flags apply to interactive mode. Print mode currently starts a fresh session.
 - `ferrum --continue` resumes the latest JSONL session for the current directory.
 - `ferrum --resume` resumes the latest JSONL session for the current directory.
 - `ferrum --resume <path|id-prefix>` resumes a specific JSONL session.
@@ -122,6 +123,10 @@ model = "gpt-5.5"
 max_context_tokens = 256000
 thinking = "off"
 
+[tools]
+allow = ["read", "grep", "find", "bash"]
+deny = ["write", "edit"]
+
 [providers.openai-codex]
 type = "openai-codex"
 base_url = "https://chatgpt.com/backend-api"
@@ -138,6 +143,10 @@ type = "openai-compatible"
 base_url = "https://api.minimax.io/v1"
 api_key_env = "MINIMAX_API_KEY"
 default_model = "MiniMax-M2"
+
+[models."gpt-5.5-small-context"]
+actual_model = "gpt-5.5"
+max_context_tokens = 6000
 
 [[mcp.servers]]
 name = "time"
@@ -176,7 +185,7 @@ Ferrum loads context from `AGENTS.md` and `agents.md` files:
 
 Files are deduplicated, bounded, and included in the system prompt. More specific later files override earlier instructions when conflicts exist.
 
-Ferrum also injects runtime context describing current version, provider, model, thinking level, cwd, config dir, and supported interactive commands.
+Ferrum also injects runtime context describing current version, provider, provider model, thinking level, cwd, config dir, and supported interactive commands.
 
 ## Sessions
 
@@ -190,9 +199,10 @@ Current persisted entry types:
 
 - `header`
 - `message`
+- `metadata`
 - `compaction`
 
-Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Timestamps are `u64` milliseconds.
+Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, thinking level, diff mode, and resolved tool lists. Timestamps are `u64` milliseconds.
 
 Sessions should remain human-inspectable and append-oriented. Future branching/forking must preserve backward compatibility.
 
@@ -200,7 +210,7 @@ Sessions should remain human-inspectable and append-oriented. Future branching/f
 
 Core loop:
 
-1. Build context from runtime system prompt, context files, skills summary, session history, current user message, and tool definitions.
+1. Build context from runtime system prompt, context files, skills summary, session history, current user message, and the active tool definitions.
 2. Send request to selected provider.
 3. Receive final assistant message.
 4. Display assistant text with `<think>...</think>` blocks hidden from terminal output while preserving raw session content.
@@ -222,10 +232,13 @@ Ferrum compaction is Pi-inspired but simpler:
 
 1. Preserve system messages.
 2. Keep recent non-system conversation, up to a recent-context token budget.
-3. Summarize older non-system messages with the current provider/model using a structured summary prompt.
-4. Store the summary as a `compaction` session entry and insert it as system context.
-5. For manual `/compact`, skip if there is nothing old enough to summarize or if the resulting context is not smaller.
-6. For automatic over-budget compaction, fall back to a local heuristic summary if model-generated compaction fails.
+3. Avoid retaining orphan tool results whose corresponding tool calls were summarized away.
+4. Summarize older non-system messages with the current provider model using a structured summary prompt.
+5. Store the summary as a `compaction` session entry and insert it as system context.
+6. For manual `/compact`, skip if there is nothing old enough to summarize or if the resulting context is not smaller.
+7. For automatic over-budget compaction, fall back to a local heuristic summary if model-generated compaction fails.
+
+Automatic compaction starts at 95% of the active context budget. Ferrum emits context-pressure warnings before that point and reports when compaction still leaves the session above budget.
 
 The summary format tracks goal, constraints, progress, blockers, key decisions, next steps, and critical context.
 
@@ -292,6 +305,24 @@ struct Message {
 - Richer streaming and usage reporting.
 
 ## Built-in tools
+
+Tool exposure is controlled before provider requests:
+
+```text
+--tools omitted        => default available tools
+--tools none           => no tools
+--tools read,grep,find => exactly those tools, subject to config policy
+```
+
+Config policy:
+
+```toml
+[tools]
+allow = ["read", "grep", "find", "bash"]
+deny = ["write", "edit"]
+```
+
+`allow` is optional and caps the available tool set. `deny` removes tools. Invalid requested tools fail before the model request. Resolved tool lists are stored in session metadata and restored on resume unless `--tools` is explicitly provided.
 
 ### `read`
 

@@ -44,6 +44,15 @@ base_url = "https://api.minimax.io/v1"
 api_key_env = "MINIMAX_API_KEY"
 default_model = "MiniMax-M2"
 
+[models."gpt-5.5-small-context"]
+actual_model = "gpt-5.5"
+max_context_tokens = 6000
+
+[models.minimax-tuned]
+provider = "minimax"
+actual_model = "MiniMax-M2"
+max_context_tokens = 100000
+
 [[mcp.servers]]
 name = "example"
 command = "example-mcp-server"
@@ -70,7 +79,7 @@ Fields:
 
 ### model
 
-Provider-specific model id.
+Selected Ferrum model name. This can be either a provider-specific model id or a configured model alias under `[models]`.
 
 Examples:
 
@@ -78,11 +87,37 @@ Examples:
 model = "gpt-5.5"
 model = "kimi-k2.6"
 model = "gpt-4.1"
+model = "gpt-5.5-small-context"
 ```
+
+### models
+
+Optional model aliases live under `[models.<name>]`. Quote names that contain dots or hyphens:
+
+```toml
+[models."gpt-5.5-small-context"]
+actual_model = "gpt-5.5"
+max_context_tokens = 6000
+
+[models.minimax-tuned]
+provider = "minimax"
+actual_model = "MiniMax-M2"
+max_context_tokens = 100000
+```
+
+Fields:
+
+- `provider`: optional provider switch when this alias is selected
+- `actual_model`: model id sent to the provider; defaults to the alias name
+- `max_context_tokens`: model-specific operating context budget
+
+This lets each model or alias use a tuned context budget while preserving friendly names for interactive `/model` selection.
 
 ### max_context_tokens
 
-Approximate context budget. Ferrum estimates tokens as:
+`max_context_tokens` is the fallback operating context budget. A model alias can override it with `[models.<name>].max_context_tokens`.
+
+Ferrum estimates tokens as:
 
 ```text
 text characters / 4
@@ -94,7 +129,7 @@ Default:
 max_context_tokens = 256000
 ```
 
-Ferrum warns at 80% and compacts automatically at the limit.
+Ferrum warns as context usage rises: 75-84% every 5%, 85-91% every 3%, and 92-94% every 1%. It compacts automatically at 95%, before the configured budget is fully exhausted. `/session` shows estimated tokens, max context tokens, and context usage percent.
 
 ### max_tool_rounds
 
