@@ -8,6 +8,8 @@ Ferrum is inspired by Pi's agent-harness ideas, but it is a separate Rust projec
 
 Status: early MVP. Useful for real work, still evolving.
 
+![Ferrum demo](docs/assets/ferrum-demo.gif)
+
 Primary repository and binary releases: https://codeberg.org/ominiverdi/ferrum
 
 GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
