@@ -8,9 +8,9 @@ Ferrum is inspired by Pi's agent-harness ideas, but it is a separate Rust projec
 
 Status: early MVP. Useful for real work, still evolving.
 
-Primary repository: https://codeberg.org/ominiverdi/ferrum
+Primary repository and binary releases: https://codeberg.org/ominiverdi/ferrum
 
-GitHub mirror and binary releases: https://github.com/ominiverdi/ferrum
+GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 
 ## Features
 
@@ -34,10 +34,10 @@ GitHub mirror and binary releases: https://github.com/ominiverdi/ferrum
 
 ### Linux binary
 
-Download the latest release asset from the GitHub mirror. Codeberg is the primary source repository; GitHub currently hosts binary release assets.
+Download the latest release asset from Codeberg.
 
 ```bash
-curl -L https://github.com/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv ferrum-v0.4.12-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
@@ -45,8 +45,8 @@ ferrum --help
 Optional checksum verification:
 
 ```bash
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.12/ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz.sha256
 sha256sum -c ferrum-v0.4.12-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
