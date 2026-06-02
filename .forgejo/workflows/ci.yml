@@ -1,3 +1,4 @@
+# Codeberg Forgejo Actions validation
 name: CI
 
 on:
