@@ -1,6 +1,6 @@
 [package]
 name = "ferrum"
-version = "0.4.12"
+version = "0.4.13"
 edition = "2024"
 description = "A small Rust-native Linux coding agent"
 license = "MIT"
