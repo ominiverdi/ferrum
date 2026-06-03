@@ -1,6 +1,6 @@
 # Release Checklist
 
-Codeberg is the primary source repository and release host. GitHub is kept as a mirror and backup binary release host.
+Codeberg is the primary source repository and release host. Releases should be created locally with `tea` and locally built assets. GitHub is kept as a mirror and backup binary release host.
 
 Before public release:
 
@@ -156,7 +156,7 @@ sha256sum -c ferrum-v0.4.14-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 Codeberg Forgejo Actions validates pushes with `.forgejo/workflows/ci.yml` on the hosted `codeberg-medium` runner. The workflow checks formatting and runs `cargo test --release` in `rust:1.90`.
 
-GitHub Actions remains configured for mirror CI and backup release asset builds.
+GitHub Actions may remain configured for mirror CI and optional backup release asset builds. Codeberg releases created locally with `tea` are the primary release path.
 
 ## License
 

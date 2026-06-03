@@ -11,7 +11,7 @@ Ferrum is a new project, not a compatibility port.
 - In the primary local clone:
   - `origin` must point to Codeberg: `ssh://git@codeberg.org/ominiverdi/ferrum.git`
   - `github` must point to the GitHub mirror: `git@github.com:ominiverdi/ferrum.git`
-- GitHub remains a mirror and current binary release host until Codeberg release automation is proven:
+- GitHub remains a mirror repository:
   `https://github.com/ominiverdi/ferrum`
 - Do not use stale GitHub-only working copies for new work unless explicitly asked.
 
@@ -30,15 +30,14 @@ Ferrum is a new project, not a compatibility port.
   git push origin main
   git push github main
   ```
-- Normal tagged release while GitHub is still release host:
+- Normal tagged release:
   ```bash
   git tag -a vX.Y.Z -F /tmp/ferrum-vX.Y.Z-notes.md
   git push origin main vX.Y.Z
   git push github main vX.Y.Z
   ```
-  Pushing the tag to GitHub triggers the existing GitHub release workflow.
-- For future Codeberg-hosted releases, use `tea release create` with locally built assets until Woodpecker or another Codeberg CI release path is implemented and tested.
-- Existing GitHub release assets should remain valid. Do not break published install URLs without a tested replacement.
+- Create the Codeberg release locally with `tea` and upload locally built assets. This is the primary and preferred release path.
+- GitHub tag push may still trigger mirror release automation if configured, but Codeberg is the primary release host.
 
 ## Goals
 - Native Linux CLI/TUI coding agent.
