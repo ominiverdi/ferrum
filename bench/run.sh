@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [ "$#" -ne 2 ]; then
   echo "usage: bench/run.sh <agent-profile> <task>" >&2
-  echo "profiles: ferrum-codex, pi-codex, opencode" >&2
+  echo "profiles: ferrum-codex, ferrum-codex-bash, pi-codex, opencode" >&2
   exit 2
 fi
 
@@ -38,6 +38,10 @@ case "$agent" in
     model="${FERRUM_MODEL:-gpt-5.5}"
     printf 'ferrum --no-mcp --provider openai-codex --model %q -p <prompt>\n' "$model" > "$cmd_file"
     ;;
+  ferrum-codex-bash)
+    model="${FERRUM_MODEL:-gpt-5.5}"
+    printf 'ferrum --no-mcp --tools bash --provider openai-codex --model %q -p <prompt>\n' "$model" > "$cmd_file"
+    ;;
   pi-codex)
     model="${PI_MODEL:-gpt-5.5}"
     pi_tools="${PI_TOOLS:-read,bash,edit,write,grep,find,ls}"
@@ -63,6 +67,15 @@ exit_code=0
           > "$run_dir/stdout.txt" 2> "$run_dir/stderr.txt"
       else
         /usr/bin/time -v -o "$run_dir/time.txt" ferrum --no-mcp --provider openai-codex --model "$model" -p "$prompt" \
+          > "$run_dir/stdout.txt" 2> "$run_dir/stderr.txt"
+      fi
+      ;;
+    ferrum-codex-bash)
+      if [ "${FERRUM_OFFLINE:-}" = "1" ] || [ "${FERRUM_OFFLINE:-}" = "true" ]; then
+        /usr/bin/time -v -o "$run_dir/time.txt" ferrum --no-mcp --tools bash --model fake -p "$prompt" \
+          > "$run_dir/stdout.txt" 2> "$run_dir/stderr.txt"
+      else
+        /usr/bin/time -v -o "$run_dir/time.txt" ferrum --no-mcp --tools bash --provider openai-codex --model "$model" -p "$prompt" \
           > "$run_dir/stdout.txt" 2> "$run_dir/stderr.txt"
       fi
       ;;

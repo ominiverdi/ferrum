@@ -28,6 +28,13 @@ pub struct OpenAiCompatProvider {
     client: Client,
 }
 
+fn metrics_enabled() -> bool {
+    matches!(
+        std::env::var("FERRUM_METRICS").ok().as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 impl OpenAiCompatProvider {
     pub fn new(api_key_env: String, base_url: String) -> Self {
         Self {
@@ -686,6 +693,7 @@ impl ResponsesSseParser {
         };
         let event_type = event.get("type").and_then(|value| value.as_str());
         if let Some(event_type) = event_type {
+            emit_codex_usage_metrics_if_enabled(event_type, &event);
             if event_type.contains("reasoning") && event_type.contains("summary") {
                 if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
                     self.thinking.push_str(delta);
@@ -827,6 +835,54 @@ impl ResponsesSseParser {
             content,
         })
     }
+}
+
+fn emit_codex_usage_metrics_if_enabled(event_type: &str, event: &serde_json::Value) {
+    if !metrics_enabled() || !event_type.starts_with("response.") {
+        return;
+    }
+    let Some(usage) = event
+        .get("response")
+        .and_then(|response| response.get("usage"))
+    else {
+        return;
+    };
+    let input = usage
+        .get("input_tokens")
+        .or_else(|| usage.get("input"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let output = usage
+        .get("output_tokens")
+        .or_else(|| usage.get("output"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let total = usage
+        .get("total_tokens")
+        .or_else(|| usage.get("totalTokens"))
+        .or_else(|| usage.get("total"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or_else(|| input.saturating_add(output));
+    let cache_read = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .or_else(|| usage.get("cache_read_input_tokens"))
+        .or_else(|| usage.get("cacheRead"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let cache_write = usage
+        .get("cache_write_input_tokens")
+        .or_else(|| usage.get("cacheWrite"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0);
+    let response_id = event
+        .get("response")
+        .and_then(|response| response.get("id"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    eprintln!(
+        "[metrics:codex usage] event={event_type} response_id={response_id} input_tokens={input} output_tokens={output} cached_input_tokens={cache_read} cache_write_input_tokens={cache_write} total_tokens={total}"
+    );
 }
 
 fn extract_sse_responses_message(text: &str) -> Option<Message> {

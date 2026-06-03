@@ -36,6 +36,12 @@ Ferrum, same ChatGPT/Codex access:
 bench/run.sh ferrum-codex 014-large-context-navigation
 ```
 
+Ferrum with only the `bash` tool and no MCP:
+
+```bash
+bench/run.sh ferrum-codex-bash 014-large-context-navigation
+```
+
 Pi, same ChatGPT/Codex access and equivalent core tools:
 
 ```bash
@@ -51,6 +57,7 @@ OPENCODE_MODEL=openai/gpt-5.5 bench/run.sh opencode 014-large-context-navigation
 Defaults:
 
 - Ferrum: `openai-codex/gpt-5.5`, `--no-mcp`
+- Ferrum bash-only: `openai-codex/gpt-5.5`, `--no-mcp --tools bash`
 - Pi: `openai-codex/gpt-5.5`, `--tools read,bash,edit,write,grep,find,ls`
 - OpenCode: explicit `OPENCODE_MODEL`
 
@@ -58,6 +65,7 @@ Model overrides:
 
 ```bash
 FERRUM_MODEL=gpt-5.5 bench/run.sh ferrum-codex 011-multi-file-refactor
+FERRUM_MODEL=gpt-5.5 bench/run.sh ferrum-codex-bash 011-multi-file-refactor
 PI_MODEL=gpt-5.5 bench/run.sh pi-codex 011-multi-file-refactor
 OPENCODE_MODEL=openai/gpt-5.5 bench/run.sh opencode 011-multi-file-refactor
 ```
@@ -66,6 +74,7 @@ Offline deterministic Ferrum runs:
 
 ```bash
 FERRUM_OFFLINE=1 FERRUM_FAKE_SCRIPT=repeat_read bench/run.sh ferrum-codex 018-synthetic-loop-guard
+FERRUM_OFFLINE=1 FERRUM_FAKE_SCRIPT=repeat_read bench/run.sh ferrum-codex-bash 018-synthetic-loop-guard
 FERRUM_OFFLINE=1 FERRUM_FAKE_SCRIPT=missing_read bench/run.sh ferrum-codex 019-synthetic-error-loop-guard
 FERRUM_OFFLINE=1 FERRUM_FAKE_SCRIPT=mixed_write_read bench/run.sh ferrum-codex 021-mixed-batch-ordering
 ```
@@ -110,6 +119,7 @@ BENCH_RUN_ROOT=/tmp/ferrum-bench-runs bench/report.sh
 ## Fairness controls
 
 - Ferrum uses `--no-mcp` so configured MCP tools do not inflate tool schemas.
+- Ferrum bash-only uses `--no-mcp --tools bash` to test model behavior with a single shell tool surface.
 - Pi is invoked with the same core tool names enabled.
 - Run workspaces default outside the Ferrum repository to avoid parent context contamination.
 - Scoring separates fixture validation from transcript/diff assertions.

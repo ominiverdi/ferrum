@@ -10,6 +10,9 @@ grep -q 'TINYDEPLOY_RETRIES' "$diff" && ok 'patch handles retries env' || bad 'p
 grep -Eiq 'pytest|passed' "$out" "$err" && ok 'ran tests' || bad 'ran tests'
 agent="$(sed -n 's/^agent=//p' "$run_dir/result.env" 2>/dev/null || true)"
 case "$agent" in
+  ferrum-codex-bash)
+    grep -Eiq '\[tool:bash\]' "$err" && ok 'uses bash for inspection/tests' || bad 'uses bash for inspection/tests'
+    ;;
   ferrum-*)
     grep -Eiq '\[tool:read\]|\[tool:grep\]|\[tool:find\]' "$err" && ok 'uses inspection tools' || bad 'uses inspection tools'
     grep -Eiq '\[tool:bash\]' "$err" && ok 'uses bash for tests' || bad 'uses bash for tests'
