@@ -2,7 +2,7 @@ use crate::{agent::tools::ToolDefinition, config::McpServerConfig};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, process::Stdio, time::Duration};
+use std::{collections::HashMap, io, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -216,10 +216,30 @@ impl McpServer {
 
     async fn write_message(&mut self, message: &Value) -> Result<()> {
         let body = serde_json::to_vec(message)?;
-        self.stdin.write_all(&body).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        if let Err(error) = self.stdin.write_all(&body).await {
+            return Err(self.write_error_context(error).await);
+        }
+        if let Err(error) = self.stdin.write_all(b"\n").await {
+            return Err(self.write_error_context(error).await);
+        }
+        if let Err(error) = self.stdin.flush().await {
+            return Err(self.write_error_context(error).await);
+        }
         Ok(())
+    }
+
+    async fn write_error_context(&mut self, error: io::Error) -> anyhow::Error {
+        match self._child.try_wait() {
+            Ok(Some(status)) => {
+                anyhow::anyhow!(
+                    "MCP server exited before request could be written: {status}: {error}"
+                )
+            }
+            Ok(None) => anyhow::anyhow!("failed to write MCP request to server stdin: {error}"),
+            Err(wait_error) => anyhow::anyhow!(
+                "failed to write MCP request to server stdin: {error}; failed to inspect MCP server status: {wait_error}"
+            ),
+        }
     }
 
     async fn read_message(&mut self) -> Result<Value> {

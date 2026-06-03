@@ -121,14 +121,17 @@ pub async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
             api_key_env,
             base_url,
         } => {
-            let api_key = std::env::var(api_key_env)
-                .with_context(|| format!("{} is not set", api_key_env))?;
             let url = format!("{}/models", base_url.trim_end_matches('/'));
-            let response = Client::builder()
+            let mut request = Client::builder()
                 .timeout(Duration::from_secs(20))
                 .build()?
-                .get(&url)
-                .bearer_auth(api_key)
+                .get(&url);
+            if let Some(api_key_env) = api_key_env {
+                let api_key = std::env::var(api_key_env)
+                    .with_context(|| format!("{} is not set", api_key_env))?;
+                request = request.bearer_auth(api_key);
+            }
+            let response = request
                 .send()
                 .await
                 .with_context(|| format!("failed to GET {url}"))?;

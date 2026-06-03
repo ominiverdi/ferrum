@@ -5,7 +5,7 @@ Ferrum supports two provider families today:
 - OpenAI Codex / ChatGPT through OAuth and the Codex Responses backend.
 - OpenAI-compatible Chat Completions providers for remote APIs and local servers.
 
-Provider entries are configured in `~/.config/ferrum/config.toml` under `[providers.<name>]`. API-key providers should reference an environment variable with `api_key_env`; do not put secret values in config.
+Provider entries are configured in `~/.config/ferrum/config.toml` under `[providers.<name>]`. Provider names are arbitrary config keys; Ferrum does not hardcode vendor-specific aliases. API-key providers should reference an environment variable with `api_key_env`; do not put secret values in config.
 
 ## OpenAI Codex / ChatGPT subscription
 
@@ -80,7 +80,7 @@ export EXAMPLE_API_KEY=...
 ferrum -p "hello"
 ```
 
-Examples include OpenCode Go, MiniMax, OpenAI-compatible proxies, LM Studio, vLLM, llama.cpp, and Ollama-compatible `/v1` servers.
+Examples include user-defined presets for OpenCode Go, MiniMax, OpenAI-compatible proxies, LM Studio, vLLM, llama.cpp, and Ollama-compatible `/v1` servers.
 
 ### Local llama.cpp example
 
@@ -102,24 +102,37 @@ ferrum -p "hello"
 The exact model id must match the model exposed by your local server.
 
 
-### OpenCode Go example
+### Authless local inference example
 
 ```toml
-[providers.opencode-go]
+[providers.local-infer]
 type = "openai-compatible"
-base_url = "https://opencode.ai/zen/go/v1"
-api_key_env = "OPENCODE_API_KEY"
-default_model = "kimi-k2.6"
+base_url = "http://localhost:8192"
+default_model = "qwen3.6-27b"
 ```
 
 ```bash
-export OPENCODE_API_KEY=...
-ferrum --provider opencode-go --model kimi-k2.6 -p "hello"
+ferrum --provider local-infer --model qwen3.6-27b -p "hello"
 ```
 
-Some OpenCode Go models use Anthropic `/messages`; Ferrum does not support that adapter yet.
+This is useful for local OpenAI-compatible servers that do not require authentication.
 
-### MiniMax example
+### Generic OpenAI-compatible example
+
+```toml
+[providers.openai-compat-example]
+type = "openai-compatible"
+base_url = "https://example.com/v1"
+api_key_env = "EXAMPLE_API_KEY"
+default_model = "example-model"
+```
+
+```bash
+export EXAMPLE_API_KEY=...
+ferrum --provider openai-compat-example --model example-model -p "hello"
+```
+
+### Config-defined vendor preset example
 
 ```toml
 [providers.minimax]
@@ -133,6 +146,8 @@ default_model = "MiniMax-M2"
 export MINIMAX_API_KEY=...
 ferrum --provider minimax --model MiniMax-M2 -p "hello"
 ```
+
+For authless local servers, omit `api_key_env`.
 
 ## Live model listing
 

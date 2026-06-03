@@ -38,25 +38,24 @@ type = "openai-codex"
 base_url = "https://chatgpt.com/backend-api"
 default_model = "gpt-5.5"
 
-[providers.opencode-go]
+[providers.local-infer]
 type = "openai-compatible"
-base_url = "https://opencode.ai/zen/go/v1"
-api_key_env = "OPENCODE_API_KEY"
-default_model = "kimi-k2.6"
+base_url = "http://localhost:8192"
+default_model = "qwen3.6-27b"
 
-[providers.minimax]
+[providers.example-compat]
 type = "openai-compatible"
-base_url = "https://api.minimax.io/v1"
-api_key_env = "MINIMAX_API_KEY"
-default_model = "MiniMax-M2"
+base_url = "https://example.com/v1"
+api_key_env = "EXAMPLE_API_KEY"
+default_model = "example-model"
 
 [models."gpt-5.5-small-context"]
 actual_model = "gpt-5.5"
 max_context_tokens = 6000
 
-[models.minimax-tuned]
-provider = "minimax"
-actual_model = "MiniMax-M2"
+[models.example-tuned]
+provider = "example-compat"
+actual_model = "example-model"
 max_context_tokens = 100000
 
 [[mcp.servers]]
@@ -100,17 +99,19 @@ Do not put secrets in `system.md`. A custom system prompt controls Ferrum's beha
 
 The active provider name. In normal use this should match a key under `[providers]`.
 
-Ferrum still accepts legacy built-in names for compatibility, but `/providers` lists only providers configured in `config.toml`.
+Provider names like `local`, `minimax`, or `opencode-go` are just config keys. Ferrum does not hardcode vendor-specific provider aliases; define any provider preset you want in `config.toml`.
 
 ### providers
 
 Configured providers live under `[providers.<name>]`.
 
+The `<name>` is arbitrary user config. It can be a generic label like `local` or a vendor preset name like `minimax` if you define it in config.
+
 Fields:
 
 - `type`: `openai-codex`, `openai-compatible`, or `fake`
 - `base_url`: provider endpoint
-- `api_key_env`: environment variable for `openai-compatible` providers
+- `api_key_env`: optional environment variable for `openai-compatible` providers; when omitted, Ferrum sends no `Authorization` header
 - `default_model`: model selected when `/provider <name>` switches to this provider, and used at startup when top-level `model` is omitted
 
 ### model
@@ -121,7 +122,7 @@ Examples:
 
 ```toml
 model = "gpt-5.5"
-model = "kimi-k2.6"
+model = "example-model"
 model = "gpt-4.1"
 model = "gpt-5.5-small-context"
 ```
@@ -135,9 +136,9 @@ Optional model aliases live under `[models.<name>]`. Quote names that contain do
 actual_model = "gpt-5.5"
 max_context_tokens = 6000
 
-[models.minimax-tuned]
-provider = "minimax"
-actual_model = "MiniMax-M2"
+[models.example-tuned]
+provider = "example-compat"
+actual_model = "example-model"
 max_context_tokens = 100000
 ```
 

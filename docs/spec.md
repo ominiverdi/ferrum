@@ -132,18 +132,6 @@ type = "openai-codex"
 base_url = "https://chatgpt.com/backend-api"
 default_model = "gpt-5.5"
 
-[providers.opencode-go]
-type = "openai-compatible"
-base_url = "https://opencode.ai/zen/go/v1"
-api_key_env = "OPENCODE_API_KEY"
-default_model = "kimi-k2.6"
-
-[providers.minimax]
-type = "openai-compatible"
-base_url = "https://api.minimax.io/v1"
-api_key_env = "MINIMAX_API_KEY"
-default_model = "MiniMax-M2"
-
 [models."gpt-5.5-small-context"]
 actual_model = "gpt-5.5"
 max_context_tokens = 6000
@@ -158,7 +146,7 @@ enabled = true
 Provider entries:
 
 - `type = "openai-codex"` uses ChatGPT OAuth and the Codex Responses backend.
-- `type = "openai-compatible"` uses Chat Completions with `base_url` and `api_key_env`.
+- `type = "openai-compatible"` uses Chat Completions with `base_url` and optional `api_key_env`.
 - `type = "fake"` is for local tests/offline mode.
 
 Secrets:
@@ -173,7 +161,6 @@ Environment variables:
 - `FERRUM_OFFLINE`
 - `FERRUM_CODEX_CLIENT_VERSION`
 - Provider-specific env vars referenced by `api_key_env`
-- Legacy provider shorthand env vars remain supported for compatibility.
 
 ## Context files
 
@@ -292,7 +279,7 @@ struct Message {
 - Chat Completions wire format.
 - Configured through `[providers.<name>]` with `type = "openai-compatible"`.
 - Supports remote APIs and local `/v1` servers when they implement compatible chat, tool, and image semantics.
-- Examples include OpenCode Go, MiniMax, OpenAI-compatible proxies, LM Studio, vLLM, and Ollama-compatible `/v1` servers.
+- Examples include user-defined presets for OpenCode Go, MiniMax, OpenAI-compatible proxies, LM Studio, vLLM, and Ollama-compatible `/v1` servers.
 
 ### Fake
 

@@ -135,7 +135,7 @@ impl ThinkingLevel {
 pub enum ProviderConfig {
     Fake,
     OpenAiCompat {
-        api_key_env: String,
+        api_key_env: Option<String>,
         base_url: String,
     },
     OpenAiCodex {
@@ -455,10 +455,7 @@ fn provider_from_definition(
     match definition.kind.as_str() {
         "fake" => Ok(ProviderConfig::Fake),
         "openai-compatible" => Ok(ProviderConfig::OpenAiCompat {
-            api_key_env: definition
-                .api_key_env
-                .clone()
-                .with_context(|| format!("providers.{name}.api_key_env is required"))?,
+            api_key_env: definition.api_key_env.clone(),
             base_url: definition
                 .base_url
                 .clone()
@@ -479,20 +476,9 @@ fn legacy_provider_from_name(name: &str, config_dir: &std::path::Path) -> Result
     match name {
         "fake" => Ok(ProviderConfig::Fake),
         "openai" | "openai-compatible" => Ok(ProviderConfig::OpenAiCompat {
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
             base_url: env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-        }),
-        "minimax" => Ok(ProviderConfig::OpenAiCompat {
-            api_key_env: "MINIMAX_API_KEY".to_string(),
-            base_url: env::var("MINIMAX_BASE_URL")
-                .unwrap_or_else(|_| "https://api.minimax.io/v1".to_string()),
-        }),
-        "opencode-go" => Ok(ProviderConfig::OpenAiCompat {
-            api_key_env: env::var("OPENCODE_GO_API_KEY_ENV")
-                .unwrap_or_else(|_| "OPENCODE_API_KEY".to_string()),
-            base_url: env::var("OPENCODE_GO_BASE_URL")
-                .unwrap_or_else(|_| "https://opencode.ai/zen/go/v1".to_string()),
         }),
         "openai-codex" => Ok(ProviderConfig::OpenAiCodex {
             base_url: env::var("OPENAI_CODEX_BASE_URL")

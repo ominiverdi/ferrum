@@ -23,7 +23,7 @@ use std::{
 };
 
 pub struct OpenAiCompatProvider {
-    api_key_env: String,
+    api_key_env: Option<String>,
     base_url: String,
     client: Client,
 }
@@ -36,7 +36,7 @@ fn metrics_enabled() -> bool {
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(api_key_env: String, base_url: String) -> Self {
+    pub fn new(api_key_env: Option<String>, base_url: String) -> Self {
         Self {
             api_key_env,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -54,8 +54,11 @@ impl Provider for OpenAiCompatProvider {
         thinking: ThinkingLevel,
     ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
         Box::pin(async move {
-            let api_key = env::var(&self.api_key_env)
-                .with_context(|| format!("{} is not set", self.api_key_env))?;
+            let api_key = self
+                .api_key_env
+                .as_ref()
+                .map(|name| env::var(name).with_context(|| format!("{name} is not set")))
+                .transpose()?;
             let request = ChatRequest {
                 model,
                 messages: messages.iter().map(ChatMessage::from_message).collect(),
@@ -69,10 +72,13 @@ impl Provider for OpenAiCompatProvider {
                 stream: false,
             };
 
-            let response = self
+            let mut http_request = self
                 .client
-                .post(format!("{}/chat/completions", self.base_url))
-                .bearer_auth(api_key)
+                .post(format!("{}/chat/completions", self.base_url));
+            if let Some(api_key) = api_key {
+                http_request = http_request.bearer_auth(api_key);
+            }
+            let response = http_request
                 .json(&request)
                 .send()
                 .await
