@@ -1387,12 +1387,18 @@ impl AgentState {
         }
         println!("Recent sessions in {}\n", self.cwd.display());
         print_session_list(&sessions, self.session.path());
-        println!("\nUse /sessions 2, /sessions pick, or /sessions new");
+        println!("\nUse /sessions pick, /sessions del, or /sessions new");
         Ok(())
     }
 
-    fn open_session_reference(&mut self, config: &mut Config, reference: &str) -> Result<()> {
-        let path = self.resolve_session_reference(config, reference)?;
+    fn open_session_by_index(&mut self, config: &mut Config, index: usize) -> Result<()> {
+        if self.last_session_list.is_empty() {
+            anyhow::bail!("no session list is active. Run /sessions or /sessions pick first")
+        }
+        let Some(session) = self.last_session_list.get(index.saturating_sub(1)) else {
+            anyhow::bail!("no session [{index}] in the active session list")
+        };
+        let path = session.path.clone();
         if path == *self.session.path() {
             println!("Already on session {}", path.display());
             return Ok(());
@@ -1404,30 +1410,23 @@ impl AgentState {
         Ok(())
     }
 
-    fn resolve_session_reference(&self, config: &Config, reference: &str) -> Result<PathBuf> {
-        if let Ok(index) = reference.parse::<usize>() {
-            if self.last_session_list.is_empty() {
-                anyhow::bail!(
-                    "no session list is active. Run /sessions first, then use /sessions 1"
-                )
-            }
-            let Some(session) = self.last_session_list.get(index.saturating_sub(1)) else {
-                anyhow::bail!("no session [{index}] in the last /sessions list")
-            };
-            return Ok(session.path.clone());
+    fn delete_session_by_index(&mut self, index: usize) -> Result<()> {
+        if self.last_session_list.is_empty() {
+            anyhow::bail!("no session list is active. Run /sessions or /sessions del first")
         }
-        let matches = self
-            .visible_sessions(config)?
-            .into_iter()
-            .filter(|session| {
-                session.id.starts_with(reference) || session.short_id.starts_with(reference)
-            })
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [session] => Ok(session.path.clone()),
-            [] => anyhow::bail!("no visible session matches '{reference}' in current directory"),
-            _ => anyhow::bail!("session reference '{reference}' is ambiguous"),
+        let Some(session) = self.last_session_list.get(index.saturating_sub(1)) else {
+            anyhow::bail!("no session [{index}] in the active session list")
+        };
+        let path = session.path.clone();
+        if path == *self.session.path() {
+            anyhow::bail!(
+                "cannot delete the active session; switch sessions or start /sessions new first"
+            )
         }
+        fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+        println!("deleted {}", path.display());
+        self.last_session_list.retain(|entry| entry.path != path);
+        Ok(())
     }
 
     fn new_session(&mut self, config: &Config) -> Result<()> {
@@ -1464,7 +1463,40 @@ impl AgentState {
                 return Ok(());
             }
             if input.chars().all(|ch| ch.is_ascii_digit()) {
-                return self.open_session_reference(config, input);
+                return self.open_session_by_index(config, input.parse()?);
+            }
+            query = input.to_string();
+        }
+    }
+
+    fn delete_session_picker(&mut self, config: &Config) -> Result<()> {
+        let mut query = String::new();
+        loop {
+            let all = self.visible_sessions(config)?;
+            let filtered = filter_sessions(&all, &query);
+            self.last_session_list = filtered.clone();
+            if query.is_empty() {
+                println!("Recent sessions in {}\n", self.cwd.display());
+            } else {
+                println!("Recent sessions matching '{query}'\n");
+            }
+            if filtered.is_empty() {
+                println!("No matching sessions");
+            } else {
+                print_session_list(&filtered, self.session.path());
+            }
+            print!("\nDelete number, search text, or blank to cancel: ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim();
+            if input.is_empty() {
+                println!("cancelled");
+                return Ok(());
+            }
+            if input.chars().all(|ch| ch.is_ascii_digit()) {
+                let index: usize = input.parse()?;
+                return self.delete_session_by_index(index);
             }
             query = input.to_string();
         }
@@ -1944,11 +1976,24 @@ fn print_session_preview(messages: &[messages::Message], limit: usize) {
     if preview.is_empty() {
         return;
     }
+    let total = count_visible_session_messages(messages);
     println!();
-    println!("Recent context:");
+    println!("Recent context ({}/{} messages):", preview.len(), total);
     for line in preview {
         println!("{}", line);
     }
+}
+
+fn count_visible_session_messages(messages: &[messages::Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            matches!(
+                message.role,
+                messages::Role::User | messages::Role::Assistant
+            ) && !message.display_text().trim().is_empty()
+        })
+        .count()
 }
 
 fn session_preview_lines(messages: &[messages::Message], limit: usize) -> Vec<String> {
@@ -2682,8 +2727,8 @@ fn handle_command(
             );
             println!("  /title [text]         show or set session title");
             println!("  /sessions             list recent sessions for current directory");
-            println!("  /sessions <ref>       open bracket number, id prefix, or path");
-            println!("  /sessions pick        open numbered session picker");
+            println!("  /sessions pick        open session picker");
+            println!("  /sessions del         delete session via picker");
             println!("  /sessions new         start a new session");
             println!("  /skills               list available skills");
             println!("  /skill <name> [args]  load a skill into context");
@@ -2768,14 +2813,18 @@ fn handle_command(
             match parts.next() {
                 None => state.list_sessions(config)?,
                 Some("pick") => state.pick_session(config)?,
+                Some("del") => state.delete_session_picker(config)?,
                 Some("new") => state.new_session(config)?,
-                Some("open") => {
-                    let reference = parts
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("usage: /sessions open <number|id|path>"))?;
-                    state.open_session_reference(config, reference)?;
+                Some(reference) if reference.chars().all(|ch| ch.is_ascii_digit()) => {
+                    anyhow::bail!(
+                        "numeric session shortcuts were removed; use /sessions pick or /sessions del"
+                    )
                 }
-                Some(reference) => state.open_session_reference(config, reference)?,
+                Some(reference) => {
+                    anyhow::bail!(
+                        "unknown /sessions subcommand: {reference}. Use /sessions, /sessions pick, /sessions del, or /sessions new"
+                    )
+                }
             }
             Ok(CommandAction::Continue)
         }
