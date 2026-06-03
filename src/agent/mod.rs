@@ -465,7 +465,11 @@ fn render_assistant_response(response: &messages::Message, interactive: bool) ->
         println!();
         println!("------");
     }
-    print!("{}", response.display_text());
+    let text = response.display_text();
+    print!("{text}");
+    if !text.ends_with('\n') {
+        println!();
+    }
     io::stdout().flush()?;
     Ok(())
 }
