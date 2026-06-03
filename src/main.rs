@@ -11,24 +11,33 @@ mod tools;
 
 use anyhow::Result;
 use clap::Parser;
+use config::ToolSelection;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = cli::Args::parse();
     let mut config = config::Config::load()?;
-    let mcp_enabled = if args.mcp {
-        Some(true)
-    } else if args.no_mcp {
+    let mcp_enabled = if args.no_mcp {
         Some(false)
+    } else if args.mcp.is_some() {
+        Some(true)
     } else {
         None
     };
+    let mcp_server_allow = args.mcp.clone().filter(|servers| !servers.is_empty());
+    let tool_selection = if args.no_tools {
+        Some(ToolSelection::None)
+    } else {
+        args.tools.clone().map(ToolSelection::List)
+    };
+    let tools_overridden = args.no_tools || args.tools.is_some();
     config.apply_cli_overrides(
         args.provider.as_deref(),
         args.model.as_deref(),
         args.thinking.as_deref(),
         mcp_enabled,
-        args.tools.as_deref(),
+        mcp_server_allow,
+        tool_selection,
     )?;
 
     if let Some(command) = &args.command {
@@ -56,7 +65,7 @@ async fn main() -> Result<()> {
         args.r#continue,
         args.session,
         args.thinking.is_some(),
-        args.tools.is_some(),
+        tools_overridden,
     )
     .await
 }

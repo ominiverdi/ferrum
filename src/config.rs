@@ -16,6 +16,7 @@ pub struct Config {
     pub max_tool_rounds: usize,
     pub thinking: ThinkingLevel,
     pub mcp_enabled: bool,
+    pub mcp_server_allow: Option<Vec<String>>,
     pub diff_mode: DiffMode,
     pub tools_allow: Option<Vec<String>>,
     pub tools_deny: Vec<String>,
@@ -274,6 +275,7 @@ impl Config {
                 .transpose()?
                 .unwrap_or(ThinkingLevel::Off),
             mcp_enabled: file_config.mcp_enabled.unwrap_or(true),
+            mcp_server_allow: None,
             diff_mode: file_config
                 .diff_mode
                 .as_deref()
@@ -293,7 +295,8 @@ impl Config {
         model: Option<&str>,
         thinking: Option<&str>,
         mcp_enabled: Option<bool>,
-        tools: Option<&str>,
+        mcp_server_allow: Option<Vec<String>>,
+        tools: Option<ToolSelection>,
     ) -> Result<()> {
         if let Some(provider) = provider {
             self.set_provider(provider)?;
@@ -307,8 +310,15 @@ impl Config {
         if let Some(mcp_enabled) = mcp_enabled {
             self.mcp_enabled = mcp_enabled;
         }
+        if let Some(mcp_server_allow) = mcp_server_allow {
+            self.mcp_enabled = true;
+            self.set_mcp_server_allow(mcp_server_allow)?;
+        }
         if let Some(tools) = tools {
-            self.tool_selection = Some(parse_tool_selection(tools)?);
+            self.tool_selection = Some(match tools {
+                ToolSelection::None => ToolSelection::None,
+                ToolSelection::List(names) => ToolSelection::List(validate_tool_name_list(names)?),
+            });
         }
         Ok(())
     }
@@ -365,6 +375,38 @@ impl Config {
         self.tool_selection = Some(ToolSelection::List(validate_tool_name_list(tools)?));
         Ok(())
     }
+
+    fn set_mcp_server_allow(&mut self, servers: Vec<String>) -> Result<()> {
+        let servers = validate_mcp_server_name_list(servers)?;
+        let configured = self
+            .mcp_servers
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for server in &servers {
+            if !configured.contains(server.as_str()) {
+                anyhow::bail!("unknown MCP server requested by --mcp: {server}");
+            }
+        }
+        self.mcp_server_allow = Some(servers);
+        Ok(())
+    }
+}
+
+fn validate_mcp_server_name_list(values: Vec<String>) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for raw in values {
+        let name = raw.trim();
+        if name.is_empty() {
+            anyhow::bail!("MCP server lists must not contain empty entries");
+        }
+        if !seen.insert(name.to_string()) {
+            anyhow::bail!("duplicate MCP server in --mcp list: {name}");
+        }
+        normalized.push(name.to_string());
+    }
+    Ok(normalized)
 }
 
 fn provider_model_for(model: &str, models: &BTreeMap<String, ModelDefinition>) -> String {
@@ -374,19 +416,6 @@ fn provider_model_for(model: &str, models: &BTreeMap<String, ModelDefinition>) -
         .unwrap_or_else(|| model.to_string())
 }
 
-fn parse_tool_selection(value: &str) -> Result<ToolSelection> {
-    let value = value.trim();
-    if value == "none" {
-        return Ok(ToolSelection::None);
-    }
-    if value.is_empty() {
-        anyhow::bail!("--tools requires a comma-separated list or 'none'");
-    }
-    Ok(ToolSelection::List(validate_tool_name_list(
-        value.split(',').map(str::to_string).collect(),
-    )?))
-}
-
 fn validate_tool_name_list(values: Vec<String>) -> Result<Vec<String>> {
     let mut seen = BTreeSet::new();
     let mut normalized = Vec::new();
@@ -394,9 +423,6 @@ fn validate_tool_name_list(values: Vec<String>) -> Result<Vec<String>> {
         let name = raw.trim();
         if name.is_empty() {
             anyhow::bail!("tool lists must not contain empty entries");
-        }
-        if name == "none" {
-            anyhow::bail!("'none' is reserved and cannot be used as a tool name");
         }
         if !seen.insert(name.to_string()) {
             anyhow::bail!("duplicate tool name in tool list: {name}");
@@ -510,11 +536,11 @@ mod tests {
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         assert!(!config.mcp_enabled);
         config
-            .apply_cli_overrides(None, None, None, Some(true), None)
+            .apply_cli_overrides(None, None, None, Some(true), None, None)
             .unwrap();
         assert!(config.mcp_enabled);
         config
-            .apply_cli_overrides(None, None, None, Some(false), None)
+            .apply_cli_overrides(None, None, None, Some(false), None, None)
             .unwrap();
         assert!(!config.mcp_enabled);
     }
@@ -539,7 +565,17 @@ deny = ["bash"]
         assert_eq!(config.tools_deny, vec!["bash".to_string()]);
 
         config
-            .apply_cli_overrides(None, None, None, None, Some("read,grep"))
+            .apply_cli_overrides(
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(ToolSelection::List(vec![
+                    "read".to_string(),
+                    "grep".to_string(),
+                ])),
+            )
             .unwrap();
         assert_eq!(
             config.tool_selection,
@@ -551,13 +587,64 @@ deny = ["bash"]
     }
 
     #[test]
-    fn parses_tools_none_cli_selection() {
+    fn parses_no_tools_cli_selection() {
         let dir = TempDir::new().unwrap();
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         config
-            .apply_cli_overrides(None, None, None, None, Some("none"))
+            .apply_cli_overrides(None, None, None, None, None, Some(ToolSelection::None))
             .unwrap();
         assert_eq!(config.tool_selection, Some(ToolSelection::None));
+    }
+
+    #[test]
+    fn cli_mcp_server_allow_filters_configured_servers() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[[mcp.servers]]
+name = "chrome-devtools"
+command = "node"
+
+[[mcp.servers]]
+name = "web-search"
+command = "node"
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        config
+            .apply_cli_overrides(
+                None,
+                None,
+                None,
+                Some(true),
+                Some(vec!["web-search".to_string()]),
+                None,
+            )
+            .unwrap();
+        assert!(config.mcp_enabled);
+        assert_eq!(
+            config.mcp_server_allow,
+            Some(vec!["web-search".to_string()])
+        );
+    }
+
+    #[test]
+    fn cli_mcp_server_allow_rejects_unknown_server() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let error = config
+            .apply_cli_overrides(
+                None,
+                None,
+                None,
+                Some(true),
+                Some(vec!["missing".to_string()]),
+                None,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown MCP server"));
     }
 
     #[test]

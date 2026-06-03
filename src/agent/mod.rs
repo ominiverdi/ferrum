@@ -483,6 +483,20 @@ fn tool_schema_bytes(tools: &[tools::ToolDefinition]) -> usize {
         .unwrap_or(0)
 }
 
+fn active_mcp_servers(config: &Config) -> Vec<crate::config::McpServerConfig> {
+    config
+        .mcp_servers
+        .iter()
+        .filter(|server| {
+            config
+                .mcp_server_allow
+                .as_ref()
+                .is_none_or(|allow| allow.iter().any(|name| name == &server.name))
+        })
+        .cloned()
+        .collect()
+}
+
 fn resolve_available_tools(
     tools: Vec<tools::ToolDefinition>,
     config: &Config,
@@ -1109,8 +1123,9 @@ impl AgentState {
     }
 
     async fn ensure_mcp(&mut self, config: &Config) -> Result<()> {
-        if self.mcp_enabled && self.mcp.is_none() && !config.mcp_servers.is_empty() {
-            self.mcp = Some(mcp::McpManager::start(&config.mcp_servers).await?);
+        let servers = active_mcp_servers(config);
+        if self.mcp_enabled && self.mcp.is_none() && !servers.is_empty() {
+            self.mcp = Some(mcp::McpManager::start(&servers).await?);
         }
         Ok(())
     }
@@ -1146,23 +1161,26 @@ impl AgentState {
         };
         let mut exposed = native_tools.clone();
         exposed.extend_from_slice(mcp_tools);
-        let configured = config.mcp_servers.len();
-        let configured_enabled = config
-            .mcp_servers
+        let configured_servers = active_mcp_servers(config);
+        let configured = configured_servers.len();
+        let configured_enabled = configured_servers
             .iter()
             .filter(|server| server.enabled)
             .count();
         println!("MCP: {}", if self.mcp_enabled { "on" } else { "off" });
         println!("configured_servers: {configured}");
         println!("configured_enabled_servers: {configured_enabled}");
+        if let Some(allow) = &config.mcp_server_allow {
+            println!("server_filter: {}", allow.join(","));
+        }
         println!("connected: {}", self.mcp.is_some());
         println!("native_tools: {}", native_tools.len());
         println!("mcp_tools_exposed: {}", mcp_tools.len());
         println!("total_tools_exposed: {}", exposed.len());
         println!("tool_schema_bytes: {}", tool_schema_bytes(&exposed));
-        if !config.mcp_servers.is_empty() {
+        if !configured_servers.is_empty() {
             println!("servers:");
-            for server in &config.mcp_servers {
+            for server in &configured_servers {
                 println!("- {} enabled={}", server.name, server.enabled);
             }
         }
@@ -2106,6 +2124,7 @@ mod context_pressure_tests {
             max_tool_rounds: 0,
             thinking: crate::config::ThinkingLevel::Off,
             mcp_enabled: true,
+            mcp_server_allow: None,
             diff_mode: crate::config::DiffMode::Unified,
             tools_allow: None,
             tools_deny: Vec::new(),

@@ -15,16 +15,16 @@ When a turn continues after tool execution, Ferrum prints a simple separator bef
 CLI:
 
 ```bash
-ferrum --tools read,grep,find
-ferrum --tools none
+ferrum --tools read grep find
+ferrum --no-tools
 ```
 
 Semantics:
 
 ```text
 --tools omitted        => default available tools
---tools none           => no tools exposed to the model
---tools read,grep,find => exactly those tools, subject to config policy
+--no-tools             => no tools exposed to the model
+--tools read grep find => exactly those tools, subject to config policy
 ```
 
 Config:

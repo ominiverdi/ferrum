@@ -8,7 +8,8 @@ MCP is enabled by default for compatibility. Disable it for coding-only turns to
 
 ```bash
 ferrum --no-mcp -p "fix this"
-ferrum --mcp -p "use browser/search tools if needed"
+ferrum --mcp -p "use any configured MCP server if needed"
+ferrum --mcp chrome-devtools web-search -p "use only selected MCP servers if needed"
 ```
 
 Interactive:
@@ -20,7 +21,7 @@ Interactive:
 /mcp status
 ```
 
-`/mcp status` shows configured servers, exposed MCP tools, total tools, and schema bytes before any `--tools` or `[tools]` narrowing for a model turn.
+`/mcp status` shows configured servers after any `--mcp <server...>` narrowing, exposed MCP tools, total tools, and schema bytes before any `--tools` or `[tools]` narrowing for a model turn.
 
 ## Supported
 

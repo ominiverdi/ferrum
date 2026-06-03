@@ -84,8 +84,8 @@ ferrum --image ./screenshot.png -p "describe this image"
 Limit exposed tools:
 
 ```bash
-ferrum --tools read,grep,find -p "inspect this repo"
-ferrum --tools none -p "answer without tools"
+ferrum --tools read grep find -p "inspect this repo"
+ferrum --no-tools -p "answer without tools"
 ```
 
 Start an interactive session:

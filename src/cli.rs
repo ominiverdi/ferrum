@@ -24,17 +24,21 @@ pub struct Args {
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
 
-    /// Enable configured MCP servers for this process
-    #[arg(long = "mcp", conflicts_with = "no_mcp")]
-    pub mcp: bool,
+    /// Enable configured MCP servers for this process. Optionally pass server names.
+    #[arg(long = "mcp", num_args = 0.., value_name = "SERVER", conflicts_with = "no_mcp")]
+    pub mcp: Option<Vec<String>>,
 
     /// Disable MCP servers for this process
     #[arg(long = "no-mcp")]
     pub no_mcp: bool,
 
-    /// Expose only these tools to the model, comma-separated. Use "none" to expose no tools.
-    #[arg(long = "tools", value_name = "LIST")]
-    pub tools: Option<String>,
+    /// Disable all tools for this process
+    #[arg(long = "no-tools", conflicts_with = "tools")]
+    pub no_tools: bool,
+
+    /// Expose only these tools to the model
+    #[arg(long = "tools", num_args = 1.., value_name = "TOOL")]
+    pub tools: Option<Vec<String>>,
 
     /// Resume the latest session, or a specific JSONL session path/id prefix
     #[arg(long, value_name = "REF")]
@@ -87,11 +91,28 @@ mod tests {
     #[test]
     fn parses_mcp_flags() {
         let enabled = Args::try_parse_from(["ferrum", "--mcp", "-p", "hi"]).unwrap();
-        assert!(enabled.mcp);
+        assert_eq!(enabled.mcp, Some(Vec::new()));
         assert!(!enabled.no_mcp);
 
+        let filtered = Args::try_parse_from([
+            "ferrum",
+            "--mcp",
+            "chrome-devtools",
+            "web-search",
+            "-p",
+            "hi",
+        ])
+        .unwrap();
+        assert_eq!(
+            filtered.mcp,
+            Some(vec![
+                "chrome-devtools".to_string(),
+                "web-search".to_string()
+            ])
+        );
+
         let disabled = Args::try_parse_from(["ferrum", "--no-mcp", "-p", "hi"]).unwrap();
-        assert!(!disabled.mcp);
+        assert_eq!(disabled.mcp, None);
         assert!(disabled.no_mcp);
     }
 
@@ -103,10 +124,15 @@ mod tests {
 
     #[test]
     fn parses_tools_flag() {
-        let args = Args::try_parse_from(["ferrum", "--tools", "read,grep", "-p", "hi"]).unwrap();
-        assert_eq!(args.tools.as_deref(), Some("read,grep"));
+        let args = Args::try_parse_from(["ferrum", "--tools", "read", "grep", "-p", "hi"]).unwrap();
+        assert_eq!(
+            args.tools,
+            Some(vec!["read".to_string(), "grep".to_string()])
+        );
+        assert!(!args.no_tools);
 
-        let none = Args::try_parse_from(["ferrum", "--tools", "none", "-p", "hi"]).unwrap();
-        assert_eq!(none.tools.as_deref(), Some("none"));
+        let none = Args::try_parse_from(["ferrum", "--no-tools", "-p", "hi"]).unwrap();
+        assert_eq!(none.tools, None);
+        assert!(none.no_tools);
     }
 }

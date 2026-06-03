@@ -201,10 +201,16 @@ Disable MCP for a single process:
 ferrum --no-mcp -p "fix this without external MCP tools"
 ```
 
-Enable explicitly:
+Enable all configured MCP servers explicitly:
 
 ```bash
 ferrum --mcp -p "debug this browser issue"
+```
+
+Enable only selected configured MCP servers:
+
+```bash
+ferrum --mcp chrome-devtools web-search -p "debug this browser issue"
 ```
 
 Interactive:
@@ -223,16 +229,16 @@ When MCP is off, Ferrum does not start configured MCP servers and does not expos
 Tool exposure can be narrowed per process:
 
 ```bash
-ferrum --tools read,grep,find -p "inspect this repo"
-ferrum --tools none -p "answer without tools"
+ferrum --tools read grep find -p "inspect this repo"
+ferrum --no-tools -p "answer without tools"
 ```
 
 Semantics:
 
 ```text
---tools omitted        => default available tools
---tools none           => no tools
---tools read,grep,find => exactly those tools, subject to config policy
+--tools omitted       => default available tools
+--no-tools            => no tools
+--tools read grep find => exactly those tools, subject to config policy
 ```
 
 Config policy:

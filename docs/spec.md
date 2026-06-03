@@ -310,8 +310,8 @@ Tool exposure is controlled before provider requests:
 
 ```text
 --tools omitted        => default available tools
---tools none           => no tools
---tools read,grep,find => exactly those tools, subject to config policy
+--no-tools             => no tools
+--tools read grep find => exactly those tools, subject to config policy
 ```
 
 Config policy:
