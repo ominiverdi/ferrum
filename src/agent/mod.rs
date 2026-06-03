@@ -222,6 +222,12 @@ fn restore_session_preferences(
         return Ok(());
     };
     if restore_thinking {
+        if let Some(provider) = info.provider.as_deref() {
+            config.set_provider(provider)?;
+        }
+        if let Some(model) = info.model.as_deref() {
+            config.set_model(model)?;
+        }
         if let Some(thinking) = info.thinking.as_deref() {
             config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
         }
@@ -834,6 +840,7 @@ impl AgentState {
         let mut messages = session::jsonl::load_messages(&path)?;
         let count = messages.len();
         println!("resumed {} ({count} messages)", path.display());
+        print_session_preview(&messages, 2);
         messages.push(messages::Message::text(
             messages::Role::System,
             runtime_context(config, &cwd)?,
@@ -1932,6 +1939,45 @@ fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &P
     }
 }
 
+fn print_session_preview(messages: &[messages::Message], limit: usize) {
+    let preview = session_preview_lines(messages, limit);
+    if preview.is_empty() {
+        return;
+    }
+    println!();
+    println!("Recent context:");
+    for line in preview {
+        println!("{}", line);
+    }
+}
+
+fn session_preview_lines(messages: &[messages::Message], limit: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for message in messages.iter().rev() {
+        match message.role {
+            messages::Role::User | messages::Role::Assistant => {
+                let text = message.display_text().replace('\n', " ");
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let label = match message.role {
+                    messages::Role::User => "user",
+                    messages::Role::Assistant => "assistant",
+                    _ => unreachable!(),
+                };
+                lines.push(format!("{label}: {}", truncate_chars(text, 160)));
+                if lines.len() >= limit {
+                    break;
+                }
+            }
+            messages::Role::System | messages::Role::Tool => {}
+        }
+    }
+    lines.reverse();
+    lines
+}
+
 fn filter_sessions(
     sessions: &[session::jsonl::SessionInfo],
     query: &str,
@@ -2631,6 +2677,9 @@ fn handle_command(
             println!("  /quit | /exit          exit");
             println!("  /version              show Ferrum version");
             println!("  /session              show session path/status/size");
+            println!(
+                "  /session tail [n]     show last n user/assistant messages from session UI-only"
+            );
             println!("  /title [text]         show or set session title");
             println!("  /sessions             list recent sessions for current directory");
             println!("  /sessions <ref>       open bracket number, id prefix, or path");
@@ -2662,29 +2711,45 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/session" => {
-            println!("path: {}", state.session.path().display());
-            let stats = state.stats();
-            println!("messages: {}", stats.messages);
-            println!("chars: {}", stats.chars);
-            println!("estimated_tokens: {}", stats.estimated_tokens);
-            println!("max_context_tokens: {}", config.max_context_tokens);
-            println!(
-                "context_usage_percent: {}",
-                context_usage_percent(stats.estimated_tokens, config.max_context_tokens)
-            );
-            println!("max_tool_rounds: {}", config.max_tool_rounds);
-            println!("file_bytes: {}", stats.file_bytes);
-            println!("pending_images: {}", state.pending_images.len());
-            println!("skills: {}", state.skills.len());
-            println!("mcp_enabled: {}", state.mcp_enabled);
-            println!("mcp_connected: {}", state.mcp.is_some());
-            println!("diff_mode: {}", state.diff_mode.as_str());
-            println!("model: {}", config.model);
-            if config.provider_model != config.model {
-                println!("provider_model: {}", config.provider_model);
+            match parts.next() {
+                Some("tail") => {
+                    let count = parts
+                        .next()
+                        .map(str::parse::<usize>)
+                        .transpose()?
+                        .unwrap_or(8)
+                        .max(1);
+                    print_session_preview(&state.messages, count);
+                }
+                Some(other) => {
+                    anyhow::bail!("unknown /session subcommand: {other}");
+                }
+                None => {
+                    println!("path: {}", state.session.path().display());
+                    let stats = state.stats();
+                    println!("messages: {}", stats.messages);
+                    println!("chars: {}", stats.chars);
+                    println!("estimated_tokens: {}", stats.estimated_tokens);
+                    println!("max_context_tokens: {}", config.max_context_tokens);
+                    println!(
+                        "context_usage_percent: {}",
+                        context_usage_percent(stats.estimated_tokens, config.max_context_tokens)
+                    );
+                    println!("max_tool_rounds: {}", config.max_tool_rounds);
+                    println!("file_bytes: {}", stats.file_bytes);
+                    println!("pending_images: {}", state.pending_images.len());
+                    println!("skills: {}", state.skills.len());
+                    println!("mcp_enabled: {}", state.mcp_enabled);
+                    println!("mcp_connected: {}", state.mcp.is_some());
+                    println!("diff_mode: {}", state.diff_mode.as_str());
+                    println!("model: {}", config.model);
+                    if config.provider_model != config.model {
+                        println!("provider_model: {}", config.provider_model);
+                    }
+                    println!("thinking: {}", config.thinking.as_str());
+                    println!("provider: {}", config.provider_name);
+                }
             }
-            println!("thinking: {}", config.thinking.as_str());
-            println!("provider: {}", config.provider_name);
             Ok(CommandAction::Continue)
         }
         "/title" => {
@@ -2734,6 +2799,7 @@ fn handle_command(
         "/model" => {
             if let Some(model) = parts.next() {
                 config.set_model(model)?;
+                state.session.append_model(&config.model)?;
             }
             println!("model: {}", config.model);
             if config.provider_model != config.model {
@@ -2747,6 +2813,8 @@ fn handle_command(
         "/provider" => {
             if let Some(provider) = parts.next() {
                 config.set_provider(provider)?;
+                state.session.append_provider(&config.provider_name)?;
+                state.session.append_model(&config.model)?;
             }
             println!("provider: {}", config.provider_name);
             println!("model: {}", config.model);

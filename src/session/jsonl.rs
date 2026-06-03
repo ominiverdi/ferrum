@@ -47,6 +47,8 @@ pub enum SessionEntry {
         parent_id: Option<String>,
         timestamp_ms: u64,
         title: Option<String>,
+        provider: Option<String>,
+        model: Option<String>,
         thinking: Option<String>,
         diff_mode: Option<String>,
         tools: Option<Vec<String>>,
@@ -123,6 +125,8 @@ impl JsonlSession {
             parent_id: None,
             timestamp_ms: now_ms(),
             title: Some(title.to_string()),
+            provider: None,
+            model: None,
             thinking: None,
             diff_mode: None,
             tools: None,
@@ -135,6 +139,8 @@ impl JsonlSession {
             parent_id: None,
             timestamp_ms: now_ms(),
             title: None,
+            provider: None,
+            model: None,
             thinking: Some(thinking.to_string()),
             diff_mode: None,
             tools: None,
@@ -147,6 +153,8 @@ impl JsonlSession {
             parent_id: None,
             timestamp_ms: now_ms(),
             title: None,
+            provider: None,
+            model: None,
             thinking: None,
             diff_mode: Some(diff_mode.to_string()),
             tools: None,
@@ -159,9 +167,39 @@ impl JsonlSession {
             parent_id: None,
             timestamp_ms: now_ms(),
             title: None,
+            provider: None,
+            model: None,
             thinking: None,
             diff_mode: None,
             tools: Some(tools.to_vec()),
+        })
+    }
+
+    pub fn append_provider(&mut self, provider: &str) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            provider: Some(provider.to_string()),
+            model: None,
+            thinking: None,
+            diff_mode: None,
+            tools: None,
+        })
+    }
+
+    pub fn append_model(&mut self, model: &str) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            provider: None,
+            model: Some(model.to_string()),
+            thinking: None,
+            diff_mode: None,
+            tools: None,
         })
     }
 
@@ -312,6 +350,8 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut model = None;
     let mut inferred_title = None;
     let mut explicit_title = None;
+    let mut explicit_provider = None;
+    let mut explicit_model = None;
     let mut explicit_thinking = None;
     let mut explicit_diff_mode = None;
     let mut explicit_tools = None;
@@ -338,6 +378,8 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 ..
             } => {
                 id = Some(header_id);
+                explicit_provider = header_provider.clone();
+                explicit_model = header_model.clone();
                 provider = header_provider;
                 model = header_model;
                 explicit_thinking = header_thinking;
@@ -356,6 +398,8 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
             }
             SessionEntry::Metadata {
                 title,
+                provider,
+                model,
                 thinking,
                 diff_mode,
                 tools,
@@ -364,6 +408,16 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 if let Some(title) = title {
                     if !title.trim().is_empty() {
                         explicit_title = Some(one_line_title(&title));
+                    }
+                }
+                if let Some(provider) = provider {
+                    if !provider.trim().is_empty() {
+                        explicit_provider = Some(provider);
+                    }
+                }
+                if let Some(model) = model {
+                    if !model.trim().is_empty() {
+                        explicit_model = Some(model);
                     }
                 }
                 if let Some(thinking) = thinking {
@@ -393,8 +447,8 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
         short_id,
         path: path.to_path_buf(),
         cwd,
-        provider,
-        model,
+        provider: explicit_provider.or(provider),
+        model: explicit_model.or(model),
         thinking: explicit_thinking,
         diff_mode: explicit_diff_mode,
         tools: explicit_tools,
