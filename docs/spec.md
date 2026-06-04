@@ -111,8 +111,8 @@ Main files:
 ~/.config/ferrum/config.toml
 ~/.config/ferrum/auth.json
 ~/.config/ferrum/AGENTS.md
-~/.config/ferrum/sessions/
 ~/.config/ferrum/skills/
+~/.local/share/ferrum/sessions/
 ```
 
 Config example:
@@ -179,8 +179,10 @@ Ferrum also injects runtime context describing current version, provider, provid
 Sessions are JSONL files under:
 
 ```text
-~/.config/ferrum/sessions/
+~/.local/share/ferrum/sessions/
 ```
+
+Ferrum moves a legacy `~/.config/ferrum/sessions/` directory into the data directory at startup and removes the old directory after the move completes.
 
 Current persisted entry types:
 

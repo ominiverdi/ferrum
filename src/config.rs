@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub config_dir: PathBuf,
+    pub data_dir: PathBuf,
     pub model: String,
     pub provider_model: String,
     pub provider_name: String,
@@ -196,10 +197,23 @@ impl Config {
             Some(path) => PathBuf::from(path),
             None => home_dir()?.join(".config/ferrum"),
         };
-        Self::load_from_dir(config_dir)
+        let data_dir = match env::var_os("FERRUM_DATA_DIR") {
+            Some(path) => PathBuf::from(path),
+            None => match env::var_os("XDG_DATA_HOME") {
+                Some(path) => PathBuf::from(path).join("ferrum"),
+                None => home_dir()?.join(".local/share/ferrum"),
+            },
+        };
+        Self::load_from_dirs(config_dir, data_dir)
     }
 
+    #[cfg(test)]
     fn load_from_dir(config_dir: PathBuf) -> Result<Self> {
+        Self::load_from_dirs(config_dir.clone(), config_dir)
+    }
+
+    fn load_from_dirs(config_dir: PathBuf, data_dir: PathBuf) -> Result<Self> {
+        migrate_sessions_dir(&config_dir, &data_dir)?;
         let file = config_dir.join("config.toml");
         let file_config: FileConfig = if file.exists() {
             let text = fs::read_to_string(&file)
@@ -254,6 +268,7 @@ impl Config {
 
         Ok(Self {
             config_dir,
+            data_dir,
             model: selected_model,
             provider_model,
             provider_name,
@@ -364,7 +379,7 @@ impl Config {
     }
 
     pub fn sessions_dir(&self) -> PathBuf {
-        self.config_dir.join("sessions")
+        self.data_dir.join("sessions")
     }
 
     pub fn auth_path(&self) -> PathBuf {
@@ -407,6 +422,58 @@ fn validate_mcp_server_name_list(values: Vec<String>) -> Result<Vec<String>> {
         normalized.push(name.to_string());
     }
     Ok(normalized)
+}
+
+fn migrate_sessions_dir(config_dir: &std::path::Path, data_dir: &std::path::Path) -> Result<()> {
+    let old = config_dir.join("sessions");
+    let new = data_dir.join("sessions");
+    if !old.exists() || old == new {
+        return Ok(());
+    }
+
+    eprintln!(
+        "[session] found legacy session directory in the wrong location: {}",
+        old.display()
+    );
+    eprintln!("[session] moving sessions to {}", new.display());
+    if let Some(parent) = new.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    if new.exists() {
+        move_dir_contents(&old, &new)?;
+        fs::remove_dir_all(&old).with_context(|| format!("failed to remove {}", old.display()))?;
+    } else {
+        fs::rename(&old, &new)
+            .with_context(|| format!("failed to move {} to {}", old.display(), new.display()))?;
+    }
+    eprintln!("[session] sessions have been moved");
+    Ok(())
+}
+
+fn move_dir_contents(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(to).with_context(|| format!("failed to create {}", to.display()))?;
+    for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if target.exists() {
+            if target.is_dir() {
+                fs::remove_dir_all(&target)
+            } else {
+                fs::remove_file(&target)
+            }
+            .with_context(|| format!("failed to replace {}", target.display()))?;
+        }
+        fs::rename(&source, &target).with_context(|| {
+            format!(
+                "failed to move {} to {}",
+                source.display(),
+                target.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn provider_model_for(model: &str, models: &BTreeMap<String, ModelDefinition>) -> String {

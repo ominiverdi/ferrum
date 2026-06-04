@@ -75,6 +75,7 @@ pub async fn run_interactive(
         (None, None, false) => AgentState::new(config)?,
     };
     println!("Ferrum interactive. /help for commands.");
+    print_current_session_header(&state)?;
 
     let mut rl = DefaultEditor::new()?;
     let history = config.config_dir.join("history.txt");
@@ -1411,6 +1412,7 @@ impl AgentState {
         restore_session_preferences(config, &path, true, true)?;
         let next = Self::open_session(config, path)?;
         *self = next;
+        print_current_session_header(self)?;
         Ok(())
     }
 
@@ -1438,6 +1440,7 @@ impl AgentState {
         let next = Self::new(config)?;
         println!("started new session {}", next.session.path().display());
         *self = next;
+        print_current_session_header(self)?;
         Ok(())
     }
 
@@ -1944,6 +1947,19 @@ fn indent_block(text: &str) -> String {
         .join("\n")
 }
 
+fn print_session_title(title: &str) {
+    println!();
+    println!("title: {title}");
+    println!("---");
+}
+
+fn print_current_session_header(state: &AgentState) -> Result<()> {
+    let info = session::jsonl::session_info(state.session.path())?
+        .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
+    print_session_title(&info.title);
+    Ok(())
+}
+
 fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &Path) {
     for (index, session) in sessions.iter().enumerate() {
         let marker = if session.path == current_path {
@@ -2207,6 +2223,7 @@ mod context_pressure_tests {
 
     fn test_config(config_dir: std::path::PathBuf) -> Config {
         Config {
+            data_dir: config_dir.clone(),
             config_dir,
             model: "alias".to_string(),
             provider_model: "actual-model".to_string(),

@@ -6,6 +6,14 @@ Ferrum reads config from:
 ~/.config/ferrum/config.toml
 ```
 
+Ferrum stores session data under:
+
+```text
+~/.local/share/ferrum/sessions/
+```
+
+If a legacy `sessions/` directory exists under the config directory, Ferrum moves its contents to the data directory at startup and removes the old directory.
+
 Optional system prompt override:
 
 ```text
