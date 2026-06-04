@@ -20,6 +20,10 @@ pub struct Args {
     #[arg(long)]
     pub thinking: Option<String>,
 
+    /// Set the session title
+    #[arg(long)]
+    pub title: Option<String>,
+
     /// Attach a local image file to the prompt. Repeatable. Supports png, jpg, jpeg, webp.
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
@@ -134,5 +138,11 @@ mod tests {
         let none = Args::try_parse_from(["ferrum", "--no-tools", "-p", "hi"]).unwrap();
         assert_eq!(none.tools, None);
         assert!(none.no_tools);
+    }
+
+    #[test]
+    fn parses_title_flag() {
+        let args = Args::try_parse_from(["ferrum", "--title", "Issue triage", "-p", "hi"]).unwrap();
+        assert_eq!(args.title.as_deref(), Some("Issue triage"));
     }
 }

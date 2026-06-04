@@ -3,7 +3,7 @@
 Ferrum stores sessions as JSONL under:
 
 ```text
-~/.config/ferrum/sessions/
+~/.local/share/ferrum/sessions/
 ```
 
 Each line is a JSON object.
@@ -31,13 +31,27 @@ Resume the latest session for the current directory in interactive mode:
 ferrum --resume
 ```
 
-Print mode currently starts a fresh session even if resume flags are present.
+Print mode can also resume or create a named session with `--session`:
+
+```bash
+ferrum --session mysession -p "first prompt"
+ferrum --session mysession -p "second prompt with prior context"
+```
+
+If `mysession` exists, Ferrum loads it before running the prompt. If it does not exist, Ferrum creates `mysession.jsonl` in the session data directory. User-defined session ids may contain only letters, digits, `.`, `_`, and `-`; they must not start with `.`.
 
 Resume a specific session by path or id prefix:
 
 ```bash
-ferrum --resume ~/.config/ferrum/sessions/<file>.jsonl
+ferrum --resume ~/.local/share/ferrum/sessions/<file>.jsonl
 ferrum --session <id-prefix>
+```
+
+Set a title when starting or resuming a session:
+
+```bash
+ferrum --title "Issue triage"
+ferrum --title "Quick check" -p "summarize this repo"
 ```
 
 ## Interactive session commands
@@ -46,17 +60,17 @@ ferrum --session <id-prefix>
 /session
 /title [text]
 /sessions
-/sessions 2
 /sessions pick
+/sessions del
 /sessions new
 /compact
 ```
 
-`/sessions` lists recent sessions for the current directory with bracket numbers. `/sessions 2` opens entry `[2]` from the last list. `/sessions pick` opens a lightweight numbered picker where entering a number opens that session and entering text filters the list. `/sessions new` starts a fresh session.
+`/sessions` lists recent sessions for the current directory. `/sessions pick` opens a lightweight numbered picker where entering a number opens that session and entering text filters the list. `/sessions del` opens a deletion picker. `/sessions new` starts a fresh session.
 
 Empty interactive sessions are removed automatically when you quit, switch sessions, or start a new session. A session is kept once it contains at least one message beyond the header. `/sessions` hides old empty sessions by default, while still showing the current empty session so you can see where you are.
 
-`/title` shows the current session title. `/title <text>` sets an explicit title used by `/sessions`. If no title is set, Ferrum falls back to a title inferred from the first user message.
+`/title` shows the current session title. `/title <text>` sets an explicit title used by `/sessions`. `--title <text>` sets the title when starting, resuming, or running a print-mode session. If no title is set, Ferrum falls back to a title inferred from the first user message.
 
 Thinking level is stored in session metadata. New sessions record the current thinking level, and `/thinking <level>` appends an updated level. Resuming or switching sessions restores the session thinking level unless the process was started with an explicit `--thinking` override. Provider-supplied thinking content and replay signatures are stored in message history when the provider sends them.
 

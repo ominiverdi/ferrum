@@ -55,7 +55,17 @@ async fn main() -> Result<()> {
     }
 
     if let Some(prompt) = args.print_prompt() {
-        agent::run_print(prompt, args.images.clone(), &config).await?;
+        agent::run_print(
+            prompt,
+            args.images.clone(),
+            args.session.as_deref().or(args
+                .resume
+                .as_ref()
+                .and_then(|reference| reference.as_deref())),
+            args.title.as_deref(),
+            &config,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -64,6 +74,7 @@ async fn main() -> Result<()> {
         args.resume,
         args.r#continue,
         args.session,
+        args.title.as_deref(),
         args.thinking.is_some(),
         tools_overridden,
     )

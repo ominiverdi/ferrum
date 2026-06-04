@@ -40,8 +40,21 @@ const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
 const CONSECUTIVE_ERROR_NUDGE_LIMIT: usize = 5;
 const CONSECUTIVE_ERROR_FORCE_LIMIT: usize = 8;
 
-pub async fn run_print(prompt: String, images: Vec<String>, config: &Config) -> Result<()> {
-    let mut state = AgentState::new(config)?;
+pub async fn run_print(
+    prompt: String,
+    images: Vec<String>,
+    session_ref: Option<&str>,
+    title: Option<&str>,
+    config: &Config,
+) -> Result<()> {
+    let mut state = if let Some(reference) = session_ref {
+        AgentState::resume_or_create_ref(config, reference)?
+    } else {
+        AgentState::new(config)?
+    };
+    if let Some(title) = title {
+        state.set_title(title)?;
+    }
     state.attach_images(images)?;
     let (prompt, pasted_images) = extract_pasted_images(&prompt, &state.cwd);
     state.attach_images(pasted_images)?;
@@ -53,6 +66,7 @@ pub async fn run_interactive(
     resume: Option<Option<String>>,
     continue_latest: bool,
     session_ref: Option<String>,
+    title: Option<&str>,
     thinking_overridden: bool,
     tools_overridden: bool,
 ) -> Result<()> {
@@ -74,6 +88,9 @@ pub async fn run_interactive(
         }
         (None, None, false) => AgentState::new(config)?,
     };
+    if let Some(title) = title {
+        state.set_title(title)?;
+    }
     println!("Ferrum interactive. /help for commands.");
     print_current_session_header(&state)?;
 
@@ -839,6 +856,21 @@ impl AgentState {
         Self::open_session(config, path)
     }
 
+    fn resume_or_create_ref(config: &Config, reference: &str) -> Result<Self> {
+        let cwd = std::env::current_dir()?;
+        let path = session::jsonl::resolve_or_create_session_ref(
+            &config.sessions_dir(),
+            &cwd,
+            reference,
+            Some(config.provider_name.clone()),
+            Some(config.model.clone()),
+            Some(config.thinking.as_str().to_string()),
+            Some(config.diff_mode.as_str().to_string()),
+            None,
+        )?;
+        Self::open_session(config, path)
+    }
+
     fn open_session(config: &Config, path: PathBuf) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let saved_tool_names = session::jsonl::session_info(&path)?.and_then(|info| info.tools);
@@ -1368,6 +1400,14 @@ impl AgentState {
             self.last_session_list.clear();
         }
         Ok(())
+    }
+
+    fn set_title(&mut self, title: &str) -> Result<()> {
+        let title = title.trim();
+        if title.is_empty() {
+            anyhow::bail!("session title must not be empty");
+        }
+        self.session.append_title(title)
     }
 
     fn visible_sessions(&self, config: &Config) -> Result<Vec<session::jsonl::SessionInfo>> {
@@ -2825,7 +2865,7 @@ fn handle_command(
                     .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
                 println!("title: {}", info.title);
             } else {
-                state.session.append_title(title.trim())?;
+                state.set_title(&title)?;
                 println!("title: {}", title.trim());
             }
             Ok(CommandAction::Continue)

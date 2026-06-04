@@ -64,8 +64,52 @@ impl JsonlSession {
         diff_mode: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
+        Self::create_with_header_id(
+            dir,
+            format!("{}.jsonl", now_ms()),
+            Uuid::new_v4().to_string(),
+            provider,
+            model,
+            thinking,
+            diff_mode,
+            tools,
+        )
+    }
+
+    pub fn create_named(
+        dir: PathBuf,
+        id: &str,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+        diff_mode: Option<String>,
+        tools: Option<Vec<String>>,
+    ) -> Result<Self> {
+        validate_user_session_id(id)?;
+        Self::create_with_header_id(
+            dir,
+            format!("{id}.jsonl"),
+            id.to_string(),
+            provider,
+            model,
+            thinking,
+            diff_mode,
+            tools,
+        )
+    }
+
+    fn create_with_header_id(
+        dir: PathBuf,
+        filename: String,
+        header_id: String,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+        diff_mode: Option<String>,
+        tools: Option<Vec<String>>,
+    ) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-        let path = dir.join(format!("{}.jsonl", now_ms()));
+        let path = dir.join(filename);
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -73,7 +117,7 @@ impl JsonlSession {
             .with_context(|| format!("failed to create {}", path.display()))?;
         let mut session = Self { path, file };
         session.append(&SessionEntry::Header {
-            id: Uuid::new_v4().to_string(),
+            id: header_id,
             parent_id: None,
             timestamp_ms: now_ms(),
             version: 1,
@@ -338,6 +382,38 @@ pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<Pa
     }
 }
 
+pub fn resolve_or_create_session_ref(
+    dir: &Path,
+    cwd: &Path,
+    reference: &str,
+    provider: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+    diff_mode: Option<String>,
+    tools: Option<Vec<String>>,
+) -> Result<PathBuf> {
+    match resolve_session_ref(dir, cwd, reference) {
+        Ok(path) => Ok(path),
+        Err(_) if is_valid_user_session_id(reference) => {
+            let path = dir.join(format!("{reference}.jsonl"));
+            if path.exists() {
+                return Ok(path);
+            }
+            JsonlSession::create_named(
+                dir.to_path_buf(),
+                reference,
+                provider,
+                model,
+                thinking,
+                diff_mode,
+                tools,
+            )?;
+            Ok(path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
@@ -460,6 +536,25 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     }))
 }
 
+fn validate_user_session_id(id: &str) -> Result<()> {
+    if is_valid_user_session_id(id) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "invalid session id '{id}'; use 1-80 characters from A-Z, a-z, 0-9, '.', '_', or '-', and do not start with '.'"
+    )
+}
+
+fn is_valid_user_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && !id.starts_with('.')
+        && id != ".."
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+}
+
 fn sort_sessions_newest_first(sessions: &mut [SessionInfo]) {
     sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
 }
@@ -488,6 +583,75 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::agent::messages::{Message, Role};
+
+    #[test]
+    fn creates_named_session_with_user_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create_named(
+            temp.path().to_path_buf(),
+            "mysession",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(session.path(), &temp.path().join("mysession.jsonl"));
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.id, "mysession");
+    }
+
+    #[test]
+    fn rejects_unsafe_named_session_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        for id in ["", ".hidden", "..", "bad/name", "bad name"] {
+            assert!(
+                JsonlSession::create_named(
+                    temp.path().to_path_buf(),
+                    id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn resolves_or_creates_named_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let path = resolve_or_create_session_ref(
+            temp.path(),
+            &cwd,
+            "named-session",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(path, temp.path().join("named-session.jsonl"));
+        assert!(path.exists());
+
+        let again = resolve_or_create_session_ref(
+            temp.path(),
+            &cwd,
+            "named-session",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(again, path);
+    }
 
     #[test]
     fn writes_header_and_message_jsonl() {
