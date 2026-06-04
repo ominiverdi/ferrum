@@ -113,6 +113,7 @@ Main files:
 ~/.config/ferrum/AGENTS.md
 ~/.config/ferrum/skills/
 ~/.local/share/ferrum/sessions/
+~/.local/share/ferrum/history.txt
 ```
 
 Config example:
@@ -182,7 +183,7 @@ Sessions are JSONL files under:
 ~/.local/share/ferrum/sessions/
 ```
 
-Ferrum moves a legacy `~/.config/ferrum/sessions/` directory into the data directory at startup and removes the old directory after the move completes.
+Ferrum moves a legacy `~/.config/ferrum/sessions/` directory into the data directory at startup and removes the old directory after the move completes. Ferrum also moves legacy `~/.config/ferrum/history.txt` to `~/.local/share/ferrum/history.txt`.
 
 Current persisted entry types:
 

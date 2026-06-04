@@ -78,7 +78,7 @@ pub async fn run_interactive(
     print_current_session_header(&state)?;
 
     let mut rl = DefaultEditor::new()?;
-    let history = config.config_dir.join("history.txt");
+    let history = config.history_path();
     let _ = rl.load_history(&history);
 
     let mut last_ctrl_c: Option<Instant> = None;
