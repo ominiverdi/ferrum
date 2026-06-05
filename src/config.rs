@@ -213,8 +213,6 @@ impl Config {
     }
 
     fn load_from_dirs(config_dir: PathBuf, data_dir: PathBuf) -> Result<Self> {
-        migrate_sessions_dir(&config_dir, &data_dir)?;
-        migrate_history_file(&config_dir, &data_dir)?;
         let file = config_dir.join("config.toml");
         let file_config: FileConfig = if file.exists() {
             let text = fs::read_to_string(&file)
@@ -427,87 +425,6 @@ fn validate_mcp_server_name_list(values: Vec<String>) -> Result<Vec<String>> {
         normalized.push(name.to_string());
     }
     Ok(normalized)
-}
-
-// Temporary migration for early pre-v1 users. Remove after the next milestone release once
-// known developers have moved from config-dir runtime state to the data directory.
-fn migrate_sessions_dir(config_dir: &std::path::Path, data_dir: &std::path::Path) -> Result<()> {
-    let old = config_dir.join("sessions");
-    let new = data_dir.join("sessions");
-    if !old.exists() || old == new {
-        return Ok(());
-    }
-
-    eprintln!(
-        "[session] found legacy session directory in the wrong location: {}",
-        old.display()
-    );
-    eprintln!("[session] moving sessions to {}", new.display());
-    if let Some(parent) = new.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    if new.exists() {
-        move_dir_contents(&old, &new)?;
-        fs::remove_dir_all(&old).with_context(|| format!("failed to remove {}", old.display()))?;
-    } else {
-        fs::rename(&old, &new)
-            .with_context(|| format!("failed to move {} to {}", old.display(), new.display()))?;
-    }
-    eprintln!("[session] sessions have been moved");
-    Ok(())
-}
-
-// Temporary migration for early pre-v1 users. Remove together with migrate_sessions_dir
-// after the next milestone release.
-fn migrate_history_file(config_dir: &std::path::Path, data_dir: &std::path::Path) -> Result<()> {
-    let old = config_dir.join("history.txt");
-    let new = data_dir.join("history.txt");
-    if !old.exists() || old == new {
-        return Ok(());
-    }
-
-    eprintln!(
-        "[history] found legacy history file in the wrong location: {}",
-        old.display()
-    );
-    eprintln!("[history] moving history to {}", new.display());
-    if let Some(parent) = new.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    if new.exists() {
-        fs::remove_file(&new).with_context(|| format!("failed to replace {}", new.display()))?;
-    }
-    fs::rename(&old, &new)
-        .with_context(|| format!("failed to move {} to {}", old.display(), new.display()))?;
-    eprintln!("[history] history has been moved");
-    Ok(())
-}
-
-fn move_dir_contents(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
-    fs::create_dir_all(to).with_context(|| format!("failed to create {}", to.display()))?;
-    for entry in fs::read_dir(from).with_context(|| format!("failed to read {}", from.display()))? {
-        let entry = entry?;
-        let source = entry.path();
-        let target = to.join(entry.file_name());
-        if target.exists() {
-            if target.is_dir() {
-                fs::remove_dir_all(&target)
-            } else {
-                fs::remove_file(&target)
-            }
-            .with_context(|| format!("failed to replace {}", target.display()))?;
-        }
-        fs::rename(&source, &target).with_context(|| {
-            format!(
-                "failed to move {} to {}",
-                source.display(),
-                target.display()
-            )
-        })?;
-    }
-    Ok(())
 }
 
 fn provider_model_for(model: &str, models: &BTreeMap<String, ModelDefinition>) -> String {
