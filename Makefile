@@ -1,5 +1,9 @@
 .PHONY: all build release check test fmt install install-system
 
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+DESTDIR ?=
+
 all: build
 
 build:
@@ -21,4 +25,4 @@ install:
 	cargo install --path .
 
 install-system: release
-	install -Dm755 target/release/ferrum /usr/local/bin/ferrum
+	install -Dm755 target/release/ferrum $(DESTDIR)$(BINDIR)/ferrum

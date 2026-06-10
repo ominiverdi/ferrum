@@ -144,6 +144,22 @@ sudo mv ferrum-v0.4.16-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
+From source, the repository also ships a small Makefile with system-install variables:
+
+```bash
+make install-system
+make install-system PREFIX=/usr
+make install-system DESTDIR=/tmp/pkgroot PREFIX=/usr
+```
+
+Variable meaning:
+
+```text
+PREFIX   install prefix (default: /usr/local)
+BINDIR   binary directory (default: $(PREFIX)/bin)
+DESTDIR  staging root for packaging (default: empty)
+```
+
 Optional checksum verification:
 
 ```bash

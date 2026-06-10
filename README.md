@@ -61,6 +61,19 @@ cargo install --path .
 ferrum --help
 ```
 
+Optional system-wide install with Makefile:
+
+```bash
+make install-system
+```
+
+Alternate prefix or staged package root:
+
+```bash
+make install-system PREFIX=/usr
+make install-system DESTDIR=/tmp/pkgroot PREFIX=/usr
+```
+
 ## Quick start
 
 Run a one-shot prompt:
