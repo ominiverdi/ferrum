@@ -201,7 +201,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /thinking [level]
 /diff [unified|compact|full|words|side_by_side]
 /image <path>
-/paste-image
+/image-paste
 /skills
 /skill:<name> [args]
 /compact
@@ -228,6 +228,7 @@ Shell shortcuts:
 - Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 - Benchmarks: [`docs/benchmarks.md`](docs/benchmarks.md)
 - Release process: [`docs/release.md`](docs/release.md)
+- Codeberg workflow: [`docs/codeberg.md`](docs/codeberg.md)
 
 ## Safety notes
 

@@ -866,7 +866,7 @@ impl AgentState {
 
     fn resume_or_create_ref(config: &Config, reference: &str) -> Result<Self> {
         let cwd = std::env::current_dir()?;
-        let path = session::jsonl::resolve_or_create_session_ref(
+        let resolution = session::jsonl::resolve_or_create_session_ref(
             &config.sessions_dir(),
             &cwd,
             reference,
@@ -876,16 +876,40 @@ impl AgentState {
             Some(config.diff_mode.as_str().to_string()),
             None,
         )?;
-        Self::open_session(config, path)
+        match resolution {
+            session::jsonl::SessionRefResolution::Existing(path) => {
+                let state = Self::open_session(config, path.clone())?;
+                println!(
+                    "resumed {} ({} messages)",
+                    path.display(),
+                    state.message_count()
+                );
+                print_session_preview(&state.messages, 2);
+                Ok(state)
+            }
+            session::jsonl::SessionRefResolution::Created(path) => {
+                let state = Self::open_session_with_preview(config, path.clone(), false)?;
+                println!("started named session {}", path.display());
+                Ok(state)
+            }
+        }
     }
 
     fn open_session(config: &Config, path: PathBuf) -> Result<Self> {
+        Self::open_session_with_preview(config, path, false)
+    }
+
+    fn open_session_with_preview(
+        config: &Config,
+        path: PathBuf,
+        show_preview: bool,
+    ) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let saved_tool_names = session::jsonl::session_info(&path)?.and_then(|info| info.tools);
         let mut messages = session::jsonl::load_messages(&path)?;
-        let count = messages.len();
-        println!("resumed {} ({count} messages)", path.display());
-        print_session_preview(&messages, 2);
+        if show_preview {
+            print_session_preview(&messages, 2);
+        }
         messages.push(messages::Message::text(
             messages::Role::System,
             runtime_context(config, &cwd)?,
@@ -1364,6 +1388,10 @@ impl AgentState {
             }
         }
         builtin_tools::execute(name, input, &self.cwd).await
+    }
+
+    fn message_count(&self) -> usize {
+        self.messages.len()
     }
 
     fn stats(&self) -> SessionStats {
@@ -2823,7 +2851,7 @@ fn handle_command(
                 "  /diff [mode]          show or set edit diff: unified|compact|full|words|side_by_side"
             );
             println!("  /image <path>         attach image to next message");
-            println!("  /paste-image          attach image from clipboard");
+            println!("  /image-paste          attach image from clipboard");
             println!("  !<cmd>                run shell command and send output to model");
             println!("  !!<cmd>               run shell command and print output only");
             println!("  /compact              compact current in-memory conversation");
@@ -3011,7 +3039,7 @@ fn handle_command(
             println!("attached image: {path}");
             Ok(CommandAction::Continue)
         }
-        "/paste-image" => {
+        "/image-paste" | "/paste-image" => {
             state.attach_clipboard_image()?;
             println!("attached clipboard image");
             Ok(CommandAction::Continue)

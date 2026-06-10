@@ -382,6 +382,11 @@ pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<Pa
     }
 }
 
+pub enum SessionRefResolution {
+    Existing(PathBuf),
+    Created(PathBuf),
+}
+
 pub fn resolve_or_create_session_ref(
     dir: &Path,
     cwd: &Path,
@@ -391,13 +396,13 @@ pub fn resolve_or_create_session_ref(
     thinking: Option<String>,
     diff_mode: Option<String>,
     tools: Option<Vec<String>>,
-) -> Result<PathBuf> {
+) -> Result<SessionRefResolution> {
     match resolve_session_ref(dir, cwd, reference) {
-        Ok(path) => Ok(path),
+        Ok(path) => Ok(SessionRefResolution::Existing(path)),
         Err(_) if is_valid_user_session_id(reference) => {
             let path = dir.join(format!("{reference}.jsonl"));
             if path.exists() {
-                return Ok(path);
+                return Ok(SessionRefResolution::Existing(path));
             }
             JsonlSession::create_named(
                 dir.to_path_buf(),
@@ -408,7 +413,7 @@ pub fn resolve_or_create_session_ref(
                 diff_mode,
                 tools,
             )?;
-            Ok(path)
+            Ok(SessionRefResolution::Created(path))
         }
         Err(error) => Err(error),
     }
@@ -636,8 +641,13 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(path, temp.path().join("named-session.jsonl"));
-        assert!(path.exists());
+        match path {
+            SessionRefResolution::Created(path) => {
+                assert_eq!(path, temp.path().join("named-session.jsonl"));
+                assert!(path.exists());
+            }
+            SessionRefResolution::Existing(_) => panic!("expected created named session"),
+        }
 
         let again = resolve_or_create_session_ref(
             temp.path(),
@@ -650,7 +660,12 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(again, path);
+        match again {
+            SessionRefResolution::Existing(path) => {
+                assert_eq!(path, temp.path().join("named-session.jsonl"));
+            }
+            SessionRefResolution::Created(_) => panic!("expected existing named session"),
+        }
     }
 
     #[test]

@@ -39,6 +39,14 @@ Ferrum is a new project, not a compatibility port.
 - Create the Codeberg release locally with `tea` and upload locally built assets. This is the primary and preferred release path.
 - GitHub tag push may still trigger mirror release automation if configured, but Codeberg is the primary release host.
 
+## Codeberg collaboration
+
+- Prefer Codeberg for issues, pull requests, and releases.
+- When asked to inspect Codeberg issues or PRs, use `tea` first.
+- For non-interactive issue creation on Codeberg, use:
+  `tea issues create --repo ominiverdi/ferrum --login codeberg.org ...`
+- If `tea` comment/review flows require an interactive terminal, draft the exact reply for the user instead of claiming it was posted.
+
 ## Goals
 - Native Linux CLI/TUI coding agent.
 - Small, fast, predictable.
