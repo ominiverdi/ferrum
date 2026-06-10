@@ -28,7 +28,14 @@ tea issues create \
   --description "Issue body"
 ```
 
-If issue comment/reply flows are not available non-interactively in the current environment, draft the exact reply text for the user instead of pretending it was posted.
+Reply to an issue or PR non-interactively:
+
+```bash
+tea comment 5 "Reply text" --repo ominiverdi/ferrum --login codeberg.org
+tea comment 7 "PR reply text" --repo ominiverdi/ferrum --login codeberg.org
+```
+
+If a fuller issue comment workflow is not available in the current environment, draft the exact reply text for the user instead of pretending it was posted.
 
 ## Pull requests
 
