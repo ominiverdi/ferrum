@@ -229,6 +229,7 @@ Shell shortcuts:
 - Sessions: [`docs/sessions.md`](docs/sessions.md)
 - Images: [`docs/images.md`](docs/images.md)
 - MCP: [`docs/mcp.md`](docs/mcp.md)
+- ACP investigation: [`docs/acp.md`](docs/acp.md)
 - Skills: [`docs/skills.md`](docs/skills.md)
 - Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
 - Benchmarks: [`docs/benchmarks.md`](docs/benchmarks.md)
