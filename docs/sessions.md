@@ -66,6 +66,8 @@ ferrum --title "Quick check" -p "summarize this repo"
 /compact
 ```
 
+`/session` shows the current session status. `/session tail [n]` shows the last `n` user/assistant message previews without affecting model context.
+
 `/sessions` lists recent sessions for the current directory. `/sessions pick` opens a lightweight numbered picker where entering a number opens that session and entering text filters the list. `/sessions del` opens a deletion picker. `/sessions new` starts a fresh session.
 
 Empty interactive sessions are removed automatically when you quit, switch sessions, or start a new session. A session is kept once it contains at least one message beyond the header. `/sessions` hides old empty sessions by default, while still showing the current empty session so you can see where you are.
@@ -77,6 +79,8 @@ Thinking level is stored in session metadata. New sessions record the current th
 Diff mode is also stored in session metadata. New sessions record the current `diff_mode`, and `/diff <mode>` appends an updated mode. Resuming or switching sessions restores that session's edit diff rendering mode.
 
 Color mode is stored in session metadata too. `/colors <auto|on|off>` appends an updated color mode, and resuming or switching sessions restores it.
+
+Interactive input supports completion and hints for slash commands, selected command arguments, `/skill:`, and `/image` paths.
 
 The resolved tool list is stored in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
 

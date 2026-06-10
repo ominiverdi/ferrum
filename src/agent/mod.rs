@@ -57,6 +57,8 @@ const CONSECUTIVE_ERROR_FORCE_LIMIT: usize = 8;
 struct FerrumLineHelper {
     command_hints: HashMap<&'static str, &'static str>,
     skill_names: Vec<String>,
+    model_names: Vec<String>,
+    provider_names: Vec<String>,
 }
 
 impl Helper for FerrumLineHelper {}
@@ -94,6 +96,29 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_owned_words(prefix, &self.skill_names)));
         }
+        if let Some(prefix) = before.strip_prefix("/model ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_owned_words(prefix, &self.model_names)));
+        }
+        if let Some(prefix) = before.strip_prefix("/provider ") {
+            let start = pos - prefix.len();
+            return Ok((
+                start,
+                complete_from_owned_words(prefix, &self.provider_names),
+            ));
+        }
+        if let Some(prefix) = before.strip_prefix("/thinking ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, thinking_words())));
+        }
+        if let Some(prefix) = before.strip_prefix("/diff ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, diff_mode_words())));
+        }
+        if let Some(prefix) = before.strip_prefix("/mcp ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, mcp_words())));
+        }
         if before.starts_with('/') {
             let token = before.split_whitespace().next().unwrap_or(before);
             let start = before.rfind('/').unwrap_or(0);
@@ -104,17 +129,26 @@ impl Completer for FerrumLineHelper {
 }
 
 impl FerrumLineHelper {
-    fn new(skills: &[skills::Skill]) -> Self {
+    fn new(skills: &[skills::Skill], config: &Config) -> Self {
         let mut command_hints = HashMap::new();
         command_hints.insert("/image", " <path>");
         command_hints.insert("/image-paste", "");
         command_hints.insert("/session", " tail [n]");
         command_hints.insert("/sessions", " pick | del | new");
         command_hints.insert("/colors", " auto|on|off");
+        command_hints.insert("/model", " <name>");
+        command_hints.insert("/provider", " <name>");
+        command_hints.insert("/thinking", " off|minimal|low|medium|high|xhigh");
+        command_hints.insert("/diff", " unified|compact|full|words|side_by_side");
+        command_hints.insert("/mcp", " on|off|status");
         let skill_names = skill_command_words(skills);
+        let model_names = model_command_words(config);
+        let provider_names = provider_command_words(config);
         Self {
             command_hints,
             skill_names,
+            model_names,
+            provider_names,
         }
     }
 }
@@ -147,6 +181,38 @@ fn slash_command_words() -> &'static [&'static str] {
 
 fn skill_command_words(skills: &[skills::Skill]) -> Vec<String> {
     skills.iter().map(|skill| skill.name.clone()).collect()
+}
+
+fn model_command_words(config: &Config) -> Vec<String> {
+    let mut names = config.models.keys().cloned().collect::<Vec<_>>();
+    if !names.iter().any(|name| name == &config.model) {
+        names.push(config.model.clone());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn provider_command_words(config: &Config) -> Vec<String> {
+    let mut names = config.providers.keys().cloned().collect::<Vec<_>>();
+    if !names.iter().any(|name| name == &config.provider_name) {
+        names.push(config.provider_name.clone());
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn thinking_words() -> &'static [&'static str] {
+    &["off", "minimal", "low", "medium", "high", "xhigh"]
+}
+
+fn diff_mode_words() -> &'static [&'static str] {
+    &["unified", "compact", "full", "words", "side_by_side"]
+}
+
+fn mcp_words() -> &'static [&'static str] {
+    &["on", "off", "status"]
 }
 
 fn complete_from_words(prefix: &str, words: &[&str]) -> Vec<Pair> {
@@ -278,7 +344,7 @@ pub async fn run_interactive(
     print_current_session_header(&state)?;
 
     let mut rl = Editor::<FerrumLineHelper, DefaultHistory>::new()?;
-    rl.set_helper(Some(FerrumLineHelper::new(&state.skills)));
+    rl.set_helper(Some(FerrumLineHelper::new(&state.skills, config)));
     let history = config.history_path();
     let _ = rl.load_history(&history);
 

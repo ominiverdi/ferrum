@@ -13,8 +13,6 @@ Ferrum stores runtime data under:
 ~/.local/share/ferrum/history.txt
 ```
 
-If a legacy `sessions/` directory or `history.txt` file exists under the config directory, Ferrum moves it to the data directory at startup.
-
 Optional system prompt override:
 
 ```text

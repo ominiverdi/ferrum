@@ -32,6 +32,7 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 - Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
 - Tool exposure control with `--tools` and config allow/deny lists
 - Edit diff coloring with `/colors auto|on|off`
+- Interactive completion and hints for slash commands, selected command arguments, `/image` paths, and `/skill:` names
 
 ## Install
 
@@ -192,8 +193,8 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /session
 /title [text]
 /sessions
-/sessions 2
 /sessions pick
+/sessions del
 /sessions new
 /model [name]
 /models
@@ -201,6 +202,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /providers
 /thinking [level]
 /diff [unified|compact|full|words|side_by_side]
+/colors [auto|on|off]
 /image <path>
 /image-paste
 /skills
@@ -208,6 +210,8 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /compact
 /quit
 ```
+
+Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/skill:`, and `/image` paths.
 
 Shell shortcuts:
 
