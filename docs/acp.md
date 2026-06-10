@@ -274,6 +274,61 @@ Add control-plane methods:
 - `session/delete`
 - optional `command/run`
 
+## Performance and memory considerations
+
+ACP should be treated as an opt-in runtime surface:
+
+```bash
+ferrum acp
+```
+
+Normal interactive and print modes should not pay a meaningful runtime cost when ACP is unused.
+
+### Likely memory impact
+
+ACP mode will likely have a higher baseline resident set size than one-shot print mode because it keeps more state alive in one long-lived process, such as:
+
+- session state
+- provider client state
+- optional MCP manager state
+- cached model/session metadata
+
+This is acceptable for ACP mode, but should not spill over into normal CLI usage.
+
+### Likely performance impact
+
+ACP can improve bridge-style workloads because it avoids repeated process startup and repeated config/session bootstrap for every prompt.
+
+Possible wins:
+
+- no repeated process startup
+- no repeated provider/auth initialization
+- hot in-memory session reuse
+- cleaner streaming/event handling for external clients
+
+Possible regressions if designed poorly:
+
+- JSON-RPC serialization overhead in the normal CLI path
+- unnecessary queues/threads when ACP is unused
+- too much abstraction/indirection in the core loop
+
+### Design rules to avoid regressions
+
+- ACP must remain a separate mode, not a mandatory runtime wrapper around all Ferrum execution.
+- Shared event plumbing should be close to zero-cost when no ACP/event sink is attached.
+- Session loading in ACP should be lazy.
+- Normal CLI rendering should not require protocol framing layers.
+
+### Benchmark expectations
+
+If ACP work starts, existing Ferrum benchmark profiles should be rerun after the core refactor to ensure:
+
+- no meaningful wall-time regression in normal Ferrum CLI benchmarks
+- no unexpected RSS growth in normal Ferrum CLI benchmarks
+- no accidental increase in model/tool round counts
+
+ACP-specific benchmarks can then be added separately for long-lived multi-turn bridge workflows.
+
 ## Recommendation
 
 This is a worthwhile feature if Ferrum is expected to serve as an external harness for chat bridges.
