@@ -2,6 +2,15 @@
 
 This document captures an initial investigation of an ACP-style stdio JSON-RPC server mode for Ferrum.
 
+## Reference material
+
+Before implementing ACP, review these upstream resources:
+
+- `sacp` crate docs: https://docs.rs/sacp/11.0.0/sacp/index.html
+- `sacp-cookbook` guide: https://docs.rs/sacp-cookbook/latest/sacp_cookbook/building_an_agent/index.html
+
+These may reduce protocol-design work if they match the external ACP shape Ferrum needs. At minimum, they provide useful prior art for message types, stdio server loops, session handling, and event streaming.
+
 ## Goal
 
 Add a long-lived machine-driven mode such as:
