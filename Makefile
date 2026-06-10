@@ -1,22 +1,24 @@
-.PHONY: all
+.PHONY: all build release check test fmt install install-system
+
 all: build
 
-.PHONY: build
 build:
 	cargo build
 
-.PHONY: release
 release:
 	cargo build --release
 
-.PHONY: check test
-check test:
+check:
+	cargo check
+
+test:
 	cargo test
 
-.PHONY: fmt
 fmt:
 	cargo fmt --check
 
-.PHONY: install
 install:
 	cargo install --path .
+
+install-system: release
+	install -Dm755 target/release/ferrum /usr/local/bin/ferrum

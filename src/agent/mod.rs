@@ -849,8 +849,16 @@ impl AgentState {
             Some(reference) => {
                 session::jsonl::resolve_session_ref(&config.sessions_dir(), &cwd, reference)?
             }
-            None => session::jsonl::latest_session_for_cwd(&config.sessions_dir(), &cwd)?
-                .ok_or_else(|| anyhow::anyhow!("no sessions found for {}", cwd.display()))?,
+            None => match session::jsonl::latest_session_for_cwd(&config.sessions_dir(), &cwd)? {
+                Some(path) => path,
+                None => {
+                    eprintln!(
+                        "no sessions found for {}; starting a new session",
+                        cwd.display()
+                    );
+                    return Self::new(config);
+                }
+            },
         };
         restore_session_preferences(config, &path, restore_thinking, restore_tools)?;
         Self::open_session(config, path)
@@ -1407,7 +1415,8 @@ impl AgentState {
         if title.is_empty() {
             anyhow::bail!("session title must not be empty");
         }
-        self.session.append_title(title)
+        self.session.append_title(title)?;
+        set_terminal_title(title)
     }
 
     fn visible_sessions(&self, config: &Config) -> Result<Vec<session::jsonl::SessionInfo>> {
@@ -1993,9 +2002,17 @@ fn print_session_title(title: &str) {
     println!("---");
 }
 
+fn set_terminal_title(title: &str) -> Result<()> {
+    let title = title.replace('\x1b', "").replace('\x07', "");
+    print!("\x1b]0;Ferrum: {title}\x07");
+    io::stdout().flush()?;
+    Ok(())
+}
+
 fn print_current_session_header(state: &AgentState) -> Result<()> {
     let info = session::jsonl::session_info(state.session.path())?
         .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
+    set_terminal_title(&info.title)?;
     print_session_title(&info.title);
     Ok(())
 }
