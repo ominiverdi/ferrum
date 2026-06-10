@@ -263,6 +263,38 @@ deny = ["write", "edit"]
 
 Ferrum stores the resolved tool list in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
 
+### Colors
+
+Ferrum supports terminal color control for interactive diff rendering.
+
+Config:
+
+```toml
+color = "auto"
+```
+
+Supported values:
+
+```text
+auto|on|off
+```
+
+Interactive:
+
+```text
+/colors
+/colors on
+/colors off
+/colors auto
+```
+
+Semantics:
+- `auto`: colorize only when stderr is a terminal
+- `on`: force color output
+- `off`: disable color output
+
+Color mode is stored in session metadata and restored on resume or session switch.
+
 ### diff_mode
 
 Controls how `edit` tool calls are rendered in interactive output. This is display-only and does not change edit semantics.

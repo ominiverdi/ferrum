@@ -31,6 +31,7 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 - Live model listing for supported providers
 - Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
 - Tool exposure control with `--tools` and config allow/deny lists
+- Edit diff coloring with `/colors auto|on|off`
 
 ## Install
 

@@ -91,17 +91,19 @@ Exact text replacement.
 
 Interactive output renders `edit` calls with the configured diff mode. This is display-only; edit matching and application semantics are unchanged.
 
+Color highlighting is controlled separately with `/colors` and `color = "auto|on|off"`. Ferrum colors only its own `edit` diff rendering, not arbitrary tool output.
+
 ### Edit diff display modes
 
-`/diff` shows the current mode. `/diff <mode>` changes it for the current session.
+`/diff` shows the current mode. `/diff <mode>` changes it for the current session. `/colors` shows the current color mode. `/colors <auto|on|off>` changes it for the current session.
 
 Modes:
 
-- `unified`: patch-style line diff with normal context.
-- `compact`: patch-style line diff with less context.
-- `full`: full old/new replacement blocks.
-- `words`: word-level changes marked as `[-removed-]` and `{+added+}`.
-- `side_by_side`: old and new text in two columns.
+- `unified`: patch-style line diff with normal context. Color highlights removals, additions, and hunk headers.
+- `compact`: patch-style line diff with less context. Same coloring as unified.
+- `full`: full old/new replacement blocks, with old content colored red and new content colored green.
+- `words`: word-level changes marked as `[-removed-]` and `{+added+}`, with removals colored red and additions colored green.
+- `side_by_side`: old and new text in two columns, with changed left rows colored red and changed right rows colored green.
 
 Aliases for `side_by_side`:
 

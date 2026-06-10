@@ -18,6 +18,7 @@ pub struct Config {
     pub thinking: ThinkingLevel,
     pub mcp_enabled: bool,
     pub mcp_server_allow: Option<Vec<String>>,
+    pub color_mode: ColorMode,
     pub diff_mode: DiffMode,
     pub tools_allow: Option<Vec<String>>,
     pub tools_deny: Vec<String>,
@@ -50,6 +51,33 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorMode {
+    Auto,
+    On,
+    Off,
+}
+
+impl ColorMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "on" => Ok(Self::On),
+            "off" => Ok(Self::Off),
+            other => anyhow::bail!("unsupported color mode: {other}"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +197,7 @@ struct FileConfig {
     max_tool_rounds: Option<usize>,
     thinking: Option<String>,
     mcp_enabled: Option<bool>,
+    color: Option<String>,
     diff_mode: Option<String>,
     tools: Option<FileToolsConfig>,
     mcp: Option<FileMcpConfig>,
@@ -290,6 +319,12 @@ impl Config {
                 .unwrap_or(ThinkingLevel::Off),
             mcp_enabled: file_config.mcp_enabled.unwrap_or(true),
             mcp_server_allow: None,
+            color_mode: file_config
+                .color
+                .as_deref()
+                .map(ColorMode::parse)
+                .transpose()?
+                .unwrap_or(ColorMode::Auto),
             diff_mode: file_config
                 .diff_mode
                 .as_deref()

@@ -192,7 +192,7 @@ Current persisted entry types:
 - `metadata`
 - `compaction`
 
-Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, thinking level, diff mode, and resolved tool lists. Timestamps are `u64` milliseconds.
+Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, thinking level, diff mode, color mode, and resolved tool lists. Timestamps are `u64` milliseconds.
 
 Sessions should remain human-inspectable and append-oriented. Future branching/forking must preserve backward compatibility.
 

@@ -76,6 +76,8 @@ Thinking level is stored in session metadata. New sessions record the current th
 
 Diff mode is also stored in session metadata. New sessions record the current `diff_mode`, and `/diff <mode>` appends an updated mode. Resuming or switching sessions restores that session's edit diff rendering mode.
 
+Color mode is stored in session metadata too. `/colors <auto|on|off>` appends an updated color mode, and resuming or switching sessions restores it.
+
 The resolved tool list is stored in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
 
 `/session` shows:

@@ -2,7 +2,7 @@ pub mod messages;
 pub mod tools;
 
 use crate::{
-    config::{Config, DiffMode, ToolSelection},
+    config::{ColorMode, Config, DiffMode, ToolSelection},
     context, mcp, providers, session, skills, tools as builtin_tools,
 };
 use anyhow::{Context, Result};
@@ -34,6 +34,11 @@ const CONTEXT_ADVISORY_PERCENT: usize = 75;
 const CONTEXT_WARNING_PERCENT: usize = 85;
 const CONTEXT_CRITICAL_PERCENT: usize = 92;
 const CONTEXT_AUTO_COMPACT_PERCENT: usize = 95;
+const ANSI_RED: &str = "\x1b[31m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_DIM: &str = "\x1b[2m";
+const ANSI_RESET: &str = "\x1b[0m";
 const HARD_TOOL_ROUND_LIMIT: usize = 256;
 const REPEATED_TOOL_NUDGE_LIMIT: usize = 4;
 const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
@@ -252,6 +257,9 @@ fn restore_session_preferences(
     }
     if let Some(diff_mode) = info.diff_mode.as_deref() {
         config.diff_mode = DiffMode::parse(diff_mode)?;
+    }
+    if let Some(color_mode) = info.color_mode.as_deref() {
+        config.color_mode = ColorMode::parse(color_mode)?;
     }
     if restore_tools {
         if let Some(tools) = info.tools {
@@ -786,6 +794,7 @@ struct AgentState {
     cwd: std::path::PathBuf,
     mcp: Option<mcp::McpManager>,
     mcp_enabled: bool,
+    color_mode: ColorMode,
     diff_mode: DiffMode,
     pending_images: Vec<messages::ContentBlock>,
     last_session_list: Vec<session::jsonl::SessionInfo>,
@@ -829,6 +838,7 @@ impl AgentState {
             cwd,
             mcp: None,
             mcp_enabled: config.mcp_enabled,
+            color_mode: config.color_mode,
             diff_mode: config.diff_mode,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
@@ -934,6 +944,7 @@ impl AgentState {
             cwd,
             mcp: None,
             mcp_enabled: config.mcp_enabled,
+            color_mode: config.color_mode,
             diff_mode: config.diff_mode,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
@@ -1269,10 +1280,13 @@ impl AgentState {
         let can_parallelize = tool_uses
             .iter()
             .all(|(_, name, _)| self.is_parallel_safe_builtin_tool(name));
+        let color_mode = self.color_mode;
         if can_parallelize && tool_uses.len() > 1 {
-            return self.execute_parallel_builtin_tools(tool_uses).await;
+            return self
+                .execute_parallel_builtin_tools(tool_uses, color_mode)
+                .await;
         }
-        self.execute_sequential_tools(tool_uses).await
+        self.execute_sequential_tools(tool_uses, color_mode).await
     }
 
     fn is_parallel_safe_builtin_tool(&self, name: &str) -> bool {
@@ -1285,10 +1299,11 @@ impl AgentState {
     async fn execute_parallel_builtin_tools(
         &self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
+        color_mode: ColorMode,
     ) -> Vec<ExecutedToolUse> {
         for (_, name, input) in &tool_uses {
             eprintln!();
-            render_tool_call(name, input, self.diff_mode);
+            render_tool_call(name, input, self.diff_mode, color_mode);
         }
 
         let cwd = self.cwd.clone();
@@ -1351,11 +1366,12 @@ impl AgentState {
     async fn execute_sequential_tools(
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
+        color_mode: ColorMode,
     ) -> Vec<ExecutedToolUse> {
         let mut results = Vec::new();
         for (id, name, input) in tool_uses {
             eprintln!();
-            render_tool_call(&name, &input, self.diff_mode);
+            render_tool_call(&name, &input, self.diff_mode, color_mode);
             let started = Instant::now();
             let (content, is_error) = match self.execute_tool(&name, &input).await {
                 Ok(output) => (output, false),
@@ -1699,7 +1715,20 @@ impl AgentState {
     }
 }
 
-fn render_tool_call(name: &str, input: &serde_json::Value, diff_mode: DiffMode) {
+fn color_enabled(mode: ColorMode) -> bool {
+    match mode {
+        ColorMode::Auto => io::stderr().is_terminal(),
+        ColorMode::On => true,
+        ColorMode::Off => false,
+    }
+}
+
+fn render_tool_call(
+    name: &str,
+    input: &serde_json::Value,
+    diff_mode: DiffMode,
+    color_mode: ColorMode,
+) {
     eprintln!("[tool:{name}]");
     match name {
         "bash" => {
@@ -1785,7 +1814,7 @@ fn render_tool_call(name: &str, input: &serde_json::Value, diff_mode: DiffMode) 
                 }
             }
         }
-        "edit" => render_edit_call(input, diff_mode),
+        "edit" => render_edit_call(input, diff_mode, color_mode),
         _ => {
             let rendered =
                 serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
@@ -1794,7 +1823,7 @@ fn render_tool_call(name: &str, input: &serde_json::Value, diff_mode: DiffMode) 
     }
 }
 
-fn render_edit_call(input: &serde_json::Value, diff_mode: DiffMode) {
+fn render_edit_call(input: &serde_json::Value, diff_mode: DiffMode, color_mode: ColorMode) {
     eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
     eprintln!("diff: {}", diff_mode.as_str());
     let Some(edits) = input.get("edits").and_then(|value| value.as_array()) else {
@@ -1810,18 +1839,24 @@ fn render_edit_call(input: &serde_json::Value, diff_mode: DiffMode) {
         eprintln!();
         eprintln!("edit {}:", index + 1);
         match diff_mode {
-            DiffMode::Unified => render_unified_diff(old_text, new_text, 3),
-            DiffMode::Compact => render_unified_diff(old_text, new_text, 1),
-            DiffMode::Full => render_full_diff(old_text, new_text),
-            DiffMode::Words => render_word_diff(old_text, new_text),
-            DiffMode::SideBySide => render_side_by_side_diff(old_text, new_text),
+            DiffMode::Unified => render_unified_diff(old_text, new_text, 3, color_mode),
+            DiffMode::Compact => render_unified_diff(old_text, new_text, 1, color_mode),
+            DiffMode::Full => render_full_diff(old_text, new_text, color_mode),
+            DiffMode::Words => render_word_diff(old_text, new_text, color_mode),
+            DiffMode::SideBySide => render_side_by_side_diff(old_text, new_text, color_mode),
         }
     }
 }
 
-fn render_unified_diff(old_text: &str, new_text: &str, context: usize) {
-    eprintln!("--- old");
-    eprintln!("+++ new");
+fn render_unified_diff(old_text: &str, new_text: &str, context: usize, color_mode: ColorMode) {
+    let use_color = color_enabled(color_mode);
+    if use_color {
+        eprintln!("{}--- old{}", ANSI_DIM, ANSI_RESET);
+        eprintln!("{}+++ new{}", ANSI_DIM, ANSI_RESET);
+    } else {
+        eprintln!("--- old");
+        eprintln!("+++ new");
+    }
     let diff = TextDiff::from_lines(old_text, new_text);
     for group in diff.grouped_ops(context) {
         let old_start = group
@@ -1832,19 +1867,33 @@ fn render_unified_diff(old_text: &str, new_text: &str, context: usize) {
             .first()
             .map(|op| op.new_range().start + 1)
             .unwrap_or(1);
-        eprintln!("@@ -{old_start} +{new_start} @@");
+        if use_color {
+            eprintln!("{}@@ -{old_start} +{new_start} @@{}", ANSI_CYAN, ANSI_RESET);
+        } else {
+            eprintln!("@@ -{old_start} +{new_start} @@");
+        }
         for op in group {
             for change in diff.iter_changes(&op) {
-                let prefix = match change.tag() {
-                    ChangeTag::Delete => "-",
-                    ChangeTag::Insert => "+",
-                    ChangeTag::Equal => " ",
+                let (prefix, color) = match change.tag() {
+                    ChangeTag::Delete => ("-", ANSI_RED),
+                    ChangeTag::Insert => ("+", ANSI_GREEN),
+                    ChangeTag::Equal => (" ", ""),
                 };
                 let text = change.to_string();
                 if text.ends_with('\n') {
-                    eprint!("{prefix}{text}");
+                    if use_color && !color.is_empty() {
+                        for line in text.split_inclusive('\n') {
+                            eprint!("{color}{prefix}{line}{ANSI_RESET}");
+                        }
+                    } else {
+                        eprint!("{prefix}{text}");
+                    }
                 } else {
-                    eprintln!("{prefix}{text}");
+                    if use_color && !color.is_empty() {
+                        eprintln!("{color}{prefix}{text}{ANSI_RESET}");
+                    } else {
+                        eprintln!("{prefix}{text}");
+                    }
                     eprintln!("\\ No newline at end of line");
                 }
             }
@@ -1852,23 +1901,47 @@ fn render_unified_diff(old_text: &str, new_text: &str, context: usize) {
     }
 }
 
-fn render_full_diff(old_text: &str, new_text: &str) {
-    eprintln!("--- old");
+fn render_full_diff(old_text: &str, new_text: &str, color_mode: ColorMode) {
+    let use_color = color_enabled(color_mode);
+    if use_color {
+        eprintln!("{}--- old{}", ANSI_RED, ANSI_RESET);
+    } else {
+        eprintln!("--- old");
+    }
     if old_text.is_empty() {
         eprintln!("  [empty]");
     } else {
-        eprintln!("{}", indent_block(old_text.trim_end_matches('\n')));
+        let block = indent_block(old_text.trim_end_matches('\n'));
+        if use_color {
+            for line in block.lines() {
+                eprintln!("{}{}{}", ANSI_RED, line, ANSI_RESET);
+            }
+        } else {
+            eprintln!("{block}");
+        }
     }
-    eprintln!("+++ new");
+    if use_color {
+        eprintln!("{}+++ new{}", ANSI_GREEN, ANSI_RESET);
+    } else {
+        eprintln!("+++ new");
+    }
     if new_text.is_empty() {
         eprintln!("  [empty]");
     } else {
-        eprintln!("{}", indent_block(new_text.trim_end_matches('\n')));
+        let block = indent_block(new_text.trim_end_matches('\n'));
+        if use_color {
+            for line in block.lines() {
+                eprintln!("{}{}{}", ANSI_GREEN, line, ANSI_RESET);
+            }
+        } else {
+            eprintln!("{block}");
+        }
     }
 }
 
-fn render_word_diff(old_text: &str, new_text: &str) {
+fn render_word_diff(old_text: &str, new_text: &str, color_mode: ColorMode) {
     eprintln!("words:");
+    let use_color = color_enabled(color_mode);
     let old_lines = old_text.lines().collect::<Vec<_>>();
     let new_lines = new_text.lines().collect::<Vec<_>>();
     let max_len = old_lines.len().max(new_lines.len());
@@ -1885,10 +1958,18 @@ fn render_word_diff(old_text: &str, new_text: &str) {
             let token = change.to_string().replace(['\r', '\n'], "");
             match change.tag() {
                 ChangeTag::Delete => {
-                    let _ = write!(rendered, "[-{token}-]");
+                    if use_color {
+                        let _ = write!(rendered, "{ANSI_RED}[-{token}-]{ANSI_RESET}");
+                    } else {
+                        let _ = write!(rendered, "[-{token}-]");
+                    }
                 }
                 ChangeTag::Insert => {
-                    let _ = write!(rendered, "{{+{token}+}}");
+                    if use_color {
+                        let _ = write!(rendered, "{ANSI_GREEN}{{+{token}+}}{ANSI_RESET}");
+                    } else {
+                        let _ = write!(rendered, "{{+{token}+}}");
+                    }
                 }
                 ChangeTag::Equal => rendered.push_str(&token),
             }
@@ -1897,34 +1978,68 @@ fn render_word_diff(old_text: &str, new_text: &str) {
     }
 }
 
-fn render_side_by_side_diff(old_text: &str, new_text: &str) {
+fn render_side_by_side_diff(old_text: &str, new_text: &str, color_mode: ColorMode) {
+    let use_color = color_enabled(color_mode);
     let terminal_width = std::env::var("COLUMNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(60, 200);
     let column_width = (terminal_width.saturating_sub(9) / 2).max(20);
-    eprintln!(
-        "{:<width$} | {:<width$}",
-        "old",
-        "new",
-        width = column_width
-    );
-    eprintln!(
-        "{}-+-{}",
-        "-".repeat(column_width),
-        "-".repeat(column_width)
-    );
+    if use_color {
+        eprintln!(
+            "{}{:<width$} | {:<width$}{}",
+            ANSI_DIM,
+            "old",
+            "new",
+            ANSI_RESET,
+            width = column_width
+        );
+        eprintln!(
+            "{}{}-+-{}{}",
+            ANSI_DIM,
+            "-".repeat(column_width),
+            "-".repeat(column_width),
+            ANSI_RESET
+        );
+    } else {
+        eprintln!(
+            "{:<width$} | {:<width$}",
+            "old",
+            "new",
+            width = column_width
+        );
+        eprintln!(
+            "{}-+-{}",
+            "-".repeat(column_width),
+            "-".repeat(column_width)
+        );
+    }
 
     for row in side_by_side_rows(old_text, new_text) {
-        eprintln!(
-            "{}{:<width$} | {}{:<width$}",
+        let left = format!(
+            "{}{:<width$}",
             row.left_marker,
             truncate_display(&row.left, column_width),
+            width = column_width
+        );
+        let right = format!(
+            "{}{:<width$}",
             row.right_marker,
             truncate_display(&row.right, column_width),
             width = column_width
         );
+        let left_colored = if use_color && row.left_marker == "-" {
+            format!("{ANSI_RED}{left}{ANSI_RESET}")
+        } else {
+            left
+        };
+        let right_colored = if use_color && row.right_marker == "+" {
+            format!("{ANSI_GREEN}{right}{ANSI_RESET}")
+        } else {
+            right
+        };
+        eprintln!("{} | {}", left_colored, right_colored);
     }
 }
 
@@ -2322,6 +2437,7 @@ mod context_pressure_tests {
             thinking: crate::config::ThinkingLevel::Off,
             mcp_enabled: true,
             mcp_server_allow: None,
+            color_mode: crate::config::ColorMode::Auto,
             diff_mode: crate::config::DiffMode::Unified,
             tools_allow: None,
             tools_deny: Vec::new(),
@@ -2844,6 +2960,7 @@ fn handle_command(
             println!("  /provider [name]      show or set provider");
             println!("  /providers            list configured providers");
             println!("  /mcp [on|off|status]  show or toggle MCP tools");
+            println!("  /colors [mode]        show or set colors: auto|on|off");
             println!(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
@@ -3011,6 +3128,16 @@ fn handle_command(
                 }
                 Some(other) => anyhow::bail!("usage: /mcp [on|off|status], got: {other}"),
             }
+            Ok(CommandAction::Continue)
+        }
+        "/colors" => {
+            if let Some(mode) = parts.next() {
+                let parsed = ColorMode::parse(mode)?;
+                config.color_mode = parsed;
+                state.color_mode = parsed;
+                state.session.append_color_mode(parsed.as_str())?;
+            }
+            println!("colors: {}", config.color_mode.as_str());
             Ok(CommandAction::Continue)
         }
         "/thinking" => {

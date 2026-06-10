@@ -50,6 +50,7 @@ pub enum SessionEntry {
         provider: Option<String>,
         model: Option<String>,
         thinking: Option<String>,
+        color_mode: Option<String>,
         diff_mode: Option<String>,
         tools: Option<Vec<String>>,
     },
@@ -172,6 +173,7 @@ impl JsonlSession {
             provider: None,
             model: None,
             thinking: None,
+            color_mode: None,
             diff_mode: None,
             tools: None,
         })
@@ -186,6 +188,7 @@ impl JsonlSession {
             provider: None,
             model: None,
             thinking: Some(thinking.to_string()),
+            color_mode: None,
             diff_mode: None,
             tools: None,
         })
@@ -200,6 +203,7 @@ impl JsonlSession {
             provider: None,
             model: None,
             thinking: None,
+            color_mode: None,
             diff_mode: Some(diff_mode.to_string()),
             tools: None,
         })
@@ -214,8 +218,24 @@ impl JsonlSession {
             provider: None,
             model: None,
             thinking: None,
+            color_mode: None,
             diff_mode: None,
             tools: Some(tools.to_vec()),
+        })
+    }
+
+    pub fn append_color_mode(&mut self, color_mode: &str) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            provider: None,
+            model: None,
+            thinking: None,
+            color_mode: Some(color_mode.to_string()),
+            diff_mode: None,
+            tools: None,
         })
     }
 
@@ -228,6 +248,7 @@ impl JsonlSession {
             provider: Some(provider.to_string()),
             model: None,
             thinking: None,
+            color_mode: None,
             diff_mode: None,
             tools: None,
         })
@@ -242,6 +263,7 @@ impl JsonlSession {
             provider: None,
             model: Some(model.to_string()),
             thinking: None,
+            color_mode: None,
             diff_mode: None,
             tools: None,
         })
@@ -323,6 +345,7 @@ pub struct SessionInfo {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub thinking: Option<String>,
+    pub color_mode: Option<String>,
     pub diff_mode: Option<String>,
     pub tools: Option<Vec<String>>,
     pub title: String,
@@ -434,6 +457,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut explicit_provider = None;
     let mut explicit_model = None;
     let mut explicit_thinking = None;
+    let mut explicit_color_mode = None;
     let mut explicit_diff_mode = None;
     let mut explicit_tools = None;
     let mut message_count = 0usize;
@@ -482,6 +506,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 provider,
                 model,
                 thinking,
+                color_mode,
                 diff_mode,
                 tools,
                 ..
@@ -504,6 +529,11 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 if let Some(thinking) = thinking {
                     if !thinking.trim().is_empty() {
                         explicit_thinking = Some(thinking);
+                    }
+                }
+                if let Some(color_mode) = color_mode {
+                    if !color_mode.trim().is_empty() {
+                        explicit_color_mode = Some(color_mode);
                     }
                 }
                 if let Some(diff_mode) = diff_mode {
@@ -531,6 +561,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
         provider: explicit_provider.or(provider),
         model: explicit_model.or(model),
         thinking: explicit_thinking,
+        color_mode: explicit_color_mode,
         diff_mode: explicit_diff_mode,
         tools: explicit_tools,
         title: explicit_title
