@@ -11,7 +11,15 @@ use crossterm::{
     event::{self, Event, KeyCode},
     terminal,
 };
-use rustyline::{DefaultEditor, error::ReadlineError};
+use rustyline::{
+    Editor, Helper,
+    completion::{Completer, Pair},
+    error::ReadlineError,
+    highlight::Highlighter,
+    hint::Hinter,
+    history::DefaultHistory,
+    validate::Validator,
+};
 use similar::{ChangeTag, TextDiff};
 use std::{
     collections::{HashMap, HashSet},
@@ -44,6 +52,176 @@ const REPEATED_TOOL_NUDGE_LIMIT: usize = 4;
 const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
 const CONSECUTIVE_ERROR_NUDGE_LIMIT: usize = 5;
 const CONSECUTIVE_ERROR_FORCE_LIMIT: usize = 8;
+
+#[derive(Default)]
+struct FerrumLineHelper {
+    command_hints: HashMap<&'static str, &'static str>,
+    skill_names: Vec<String>,
+}
+
+impl Helper for FerrumLineHelper {}
+impl Validator for FerrumLineHelper {}
+impl Highlighter for FerrumLineHelper {}
+
+impl Hinter for FerrumLineHelper {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, _ctx: &rustyline::Context<'_>) -> Option<Self::Hint> {
+        if pos != line.len() {
+            return None;
+        }
+        self.command_hints
+            .iter()
+            .find_map(|(prefix, hint)| line.trim_end().eq(*prefix).then(|| (*hint).to_string()))
+    }
+}
+
+impl Completer for FerrumLineHelper {
+    type Candidate = Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+        let before = &line[..pos];
+        if let Some(prefix) = before.strip_prefix("/image ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_path_candidates(prefix)));
+        }
+        if let Some(prefix) = before.strip_prefix("/skill:") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_owned_words(prefix, &self.skill_names)));
+        }
+        if before.starts_with('/') {
+            let token = before.split_whitespace().next().unwrap_or(before);
+            let start = before.rfind('/').unwrap_or(0);
+            return Ok((start, complete_from_words(token, slash_command_words())));
+        }
+        Ok((pos, Vec::new()))
+    }
+}
+
+impl FerrumLineHelper {
+    fn new(skills: &[skills::Skill]) -> Self {
+        let mut command_hints = HashMap::new();
+        command_hints.insert("/image", " <path>");
+        command_hints.insert("/image-paste", "");
+        command_hints.insert("/session", " tail [n]");
+        command_hints.insert("/sessions", " pick | del | new");
+        command_hints.insert("/colors", " auto|on|off");
+        let skill_names = skill_command_words(skills);
+        Self {
+            command_hints,
+            skill_names,
+        }
+    }
+}
+
+fn slash_command_words() -> &'static [&'static str] {
+    &[
+        "/help",
+        "/quit",
+        "/exit",
+        "/version",
+        "/session",
+        "/sessions",
+        "/title",
+        "/skills",
+        "/skill",
+        "/model",
+        "/models",
+        "/provider",
+        "/providers",
+        "/thinking",
+        "/mcp",
+        "/colors",
+        "/diff",
+        "/image",
+        "/image-paste",
+        "/paste-image",
+        "/compact",
+    ]
+}
+
+fn skill_command_words(skills: &[skills::Skill]) -> Vec<String> {
+    skills.iter().map(|skill| skill.name.clone()).collect()
+}
+
+fn complete_from_words(prefix: &str, words: &[&str]) -> Vec<Pair> {
+    words
+        .iter()
+        .filter(|word| word.starts_with(prefix))
+        .map(|word| Pair {
+            display: (*word).to_string(),
+            replacement: (*word).to_string(),
+        })
+        .collect()
+}
+
+fn complete_from_owned_words(prefix: &str, words: &[String]) -> Vec<Pair> {
+    words
+        .iter()
+        .filter(|word| word.starts_with(prefix))
+        .map(|word| Pair {
+            display: word.clone(),
+            replacement: word.clone(),
+        })
+        .collect()
+}
+
+fn complete_path_candidates(prefix: &str) -> Vec<Pair> {
+    let (typed_dir, needle) = match prefix.rsplit_once('/') {
+        Some((dir, needle)) => (dir, needle),
+        None => (".", prefix),
+    };
+    let dir = expand_tilde_path(typed_dir);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(needle) {
+            continue;
+        }
+        let mut replacement = if prefix.contains('/') {
+            match typed_dir {
+                "." => name.to_string(),
+                "/" => format!("/{name}"),
+                dir_text => format!("{dir_text}/{name}"),
+            }
+        } else {
+            name.to_string()
+        };
+        if path.is_dir() {
+            replacement.push('/');
+        }
+        matches.push(Pair {
+            display: replacement.clone(),
+            replacement,
+        });
+    }
+    matches.sort_by(|a, b| a.display.cmp(&b.display));
+    matches
+}
+
+fn expand_tilde_path(path: &str) -> PathBuf {
+    if path == "~" {
+        return std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
+}
 
 pub async fn run_print(
     prompt: String,
@@ -99,7 +277,8 @@ pub async fn run_interactive(
     println!("Ferrum interactive. /help for commands.");
     print_current_session_header(&state)?;
 
-    let mut rl = DefaultEditor::new()?;
+    let mut rl = Editor::<FerrumLineHelper, DefaultHistory>::new()?;
+    rl.set_helper(Some(FerrumLineHelper::new(&state.skills)));
     let history = config.history_path();
     let _ = rl.load_history(&history);
 
