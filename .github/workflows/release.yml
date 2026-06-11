@@ -34,6 +34,8 @@ jobs:
           mkdir -p "${package}"
           cp target/release/ferrum "${package}/"
           cp README.md LICENSE "${package}/"
+          mkdir -p "${package}/docs"
+          cp docs/ferrum.1 "${package}/docs/"
           tar -czf "${package}.tar.gz" "${package}"
           sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
 

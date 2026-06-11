@@ -41,17 +41,17 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 Download the latest release asset from Codeberg.
 
 ```bash
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.17/ferrum-v0.4.17-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.17-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.18-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
 Optional checksum verification:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.17/ferrum-v0.4.17-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.17/ferrum-v0.4.17-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.4.17-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### From source
