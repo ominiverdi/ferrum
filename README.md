@@ -56,6 +56,8 @@ sha256sum -c ferrum-v0.4.17-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 ### From source
 
+Install with Cargo:
+
 ```bash
 git clone https://codeberg.org/ominiverdi/ferrum.git
 cd ferrum
@@ -63,18 +65,14 @@ cargo install --path .
 ferrum --help
 ```
 
-Optional system-wide install with Makefile:
+Install the local man page from a source checkout:
 
 ```bash
-make install-system
+sudo install -Dm644 docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+mandb 2>/dev/null || true
+man ferrum
 ```
 
-Alternate prefix or staged package root:
-
-```bash
-make install-system PREFIX=/usr
-make install-system DESTDIR=/tmp/pkgroot PREFIX=/usr
-```
 
 ## Quick start
 

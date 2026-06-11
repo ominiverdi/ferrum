@@ -144,20 +144,13 @@ sudo mv ferrum-v0.4.17-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
-From source, the repository also ships a small Makefile with system-install variables:
+From source, use Cargo:
 
 ```bash
-make install-system
-make install-system PREFIX=/usr
-make install-system DESTDIR=/tmp/pkgroot PREFIX=/usr
-```
-
-Variable meaning:
-
-```text
-PREFIX   install prefix (default: /usr/local)
-BINDIR   binary directory (default: $(PREFIX)/bin)
-DESTDIR  staging root for packaging (default: empty)
+git clone https://codeberg.org/ominiverdi/ferrum.git
+cd ferrum
+cargo install --path .
+ferrum --help
 ```
 
 Optional checksum verification:
