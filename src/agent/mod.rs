@@ -2666,6 +2666,19 @@ mod context_pressure_tests {
         assert_eq!(rendered, "custom prompt for alias using actual-model");
     }
 
+    #[test]
+    fn resume_without_matching_session_creates_new_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+
+        let state = AgentState::resume_ref(&mut config, None, true, true).unwrap();
+
+        assert_eq!(state.cwd, cwd);
+        assert!(state.session.path().exists());
+        assert!(state.session.path().starts_with(config.sessions_dir()));
+    }
+
     fn test_config(config_dir: std::path::PathBuf) -> Config {
         Config {
             data_dir: config_dir.clone(),
