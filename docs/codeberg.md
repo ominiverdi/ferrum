@@ -35,6 +35,23 @@ tea comment 5 "Reply text" --repo ominiverdi/ferrum --login codeberg.org
 tea comment 7 "PR reply text" --repo ominiverdi/ferrum --login codeberg.org
 ```
 
+For multiline comments, write the body to a temporary file and pass it as the positional comment argument:
+
+```bash
+cat > /tmp/ferrum-comment.md <<'EOF'
+Comment body.
+EOF
+tea comment 5 "$(cat /tmp/ferrum-comment.md)" --repo ominiverdi/ferrum --login codeberg.org
+```
+
+Close an issue:
+
+```bash
+tea issues close 5 --repo ominiverdi/ferrum --login codeberg.org
+```
+
+`tea comment` is singular. There is no `tea comments create` command.
+
 If a fuller issue comment workflow is not available in the current environment, draft the exact reply text for the user instead of pretending it was posted.
 
 ## Pull requests
@@ -68,27 +85,34 @@ List releases:
 tea releases ls --repo ominiverdi/ferrum
 ```
 
-Create a release entry:
+Create a release entry and upload assets in one command:
 
 ```bash
-version=v0.4.16
+version=v0.4.18
+target=x86_64-unknown-linux-gnu
+package="ferrum-${version}-${target}"
+
 tea releases create "$version" \
-  --repo ominiverdi/ferrum \
   --title "Ferrum $version" \
-  --note-file "/tmp/ferrum-${version}-notes.md"
+  --note-file "/tmp/ferrum-${version}-notes.md" \
+  --asset "/tmp/${package}.tar.gz" \
+  --asset "/tmp/${package}.tar.gz.sha256" \
+  --repo ominiverdi/ferrum \
+  --login codeberg.org
 ```
 
-Upload release assets:
+If the release already exists and only missing assets need to be uploaded:
 
 ```bash
-version=v0.4.16
+version=v0.4.18
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 
 tea releases assets create "$version" \
-  "${package}.tar.gz" \
-  "${package}.tar.gz.sha256" \
-  --repo ominiverdi/ferrum
+  "/tmp/${package}.tar.gz" \
+  "/tmp/${package}.tar.gz.sha256" \
+  --repo ominiverdi/ferrum \
+  --login codeberg.org
 ```
 
 Verify uploaded assets:

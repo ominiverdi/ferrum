@@ -43,10 +43,8 @@ Ferrum is a new project, not a compatibility port.
 
 - Prefer Codeberg for issues, pull requests, and releases.
 - When asked to inspect Codeberg issues or PRs, use `tea` first.
-- For non-interactive issue creation on Codeberg, use:
-  `tea issues create --repo ominiverdi/ferrum --login codeberg.org ...`
-- For non-interactive issue or PR replies on Codeberg, use:
-  `tea comment <index> "..." --repo ominiverdi/ferrum --login codeberg.org`
+- See `docs/codeberg.md` for known-good `tea` commands for listing, viewing, commenting, closing issues, PR inspection, and release asset creation.
+- For non-interactive issue or PR replies on Codeberg, use `tea comment <index> "..." --repo ominiverdi/ferrum --login codeberg.org`; `tea comment` is singular.
 - If `tea` review flows still require an interactive terminal, draft the exact reply for the user instead of claiming it was posted.
 
 ## Goals
