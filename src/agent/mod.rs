@@ -1560,7 +1560,14 @@ impl AgentState {
             handles.push(tokio::spawn(async move {
                 let started = Instant::now();
                 let (content, is_error) = if !active_tool_names.contains(&name) {
-                    (format!("Tool '{name}' is not available"), true)
+                    let content = if active_tool_names.is_empty() {
+                        format!(
+                            "Tool '{name}' is not available because tools are disabled (--no-tools)"
+                        )
+                    } else {
+                        format!("Tool '{name}' is not in the active tool set")
+                    };
+                    (content, true)
                 } else {
                     match builtin_tools::execute(&name, &input, &cwd).await {
                         Ok(output) => (output, false),
@@ -1639,7 +1646,12 @@ impl AgentState {
 
     async fn execute_tool(&mut self, name: &str, input: &serde_json::Value) -> Result<String> {
         if !self.active_tool_names.contains(name) {
-            anyhow::bail!("Tool '{name}' is not available");
+            let message = if self.active_tool_names.is_empty() {
+                format!("Tool '{name}' is not available because tools are disabled (--no-tools)")
+            } else {
+                format!("Tool '{name}' is not in the active tool set")
+            };
+            anyhow::bail!(message);
         }
         if self.mcp_enabled {
             if let Some(mcp) = &mut self.mcp {
@@ -2363,6 +2375,11 @@ fn render_tool_result(name: &str, content: &str, is_error: bool) {
     let status = if is_error { "error" } else { "ok" };
     let line_count = content.lines().count();
     let bytes = content.len();
+    if is_error {
+        if let Some(reason) = blocked_tool_reason(name, content) {
+            eprintln!("[tool:{name} blocked] {reason}");
+        }
+    }
     eprintln!("[result:{name} {status}, {line_count} lines, {bytes} bytes]");
     let preview = truncate_chars(content.trim(), TOOL_PREVIEW_MAX_CHARS);
     if !preview.is_empty() {
@@ -2370,6 +2387,25 @@ fn render_tool_result(name: &str, content: &str, is_error: bool) {
         if content.chars().count() > TOOL_PREVIEW_MAX_CHARS {
             eprintln!("  [result truncated for display; full result kept in context]");
         }
+    }
+}
+
+fn blocked_tool_reason<'a>(name: &str, content: &'a str) -> Option<&'a str> {
+    let disabled =
+        format!("Tool '{name}' is not available because tools are disabled (--no-tools)");
+    let not_in_set = format!("Tool '{name}' is not in the active tool set");
+    let denied = format!("Tool '{name}' is denied by config");
+    let unavailable = format!("Tool '{name}' is not available");
+    if content == disabled {
+        Some("tools are disabled (--no-tools)")
+    } else if content == not_in_set {
+        Some("tool is not in the active tool set")
+    } else if content == denied {
+        Some("tool is denied by config")
+    } else if content == unavailable {
+        Some("tool is not available in this session")
+    } else {
+        None
     }
 }
 
