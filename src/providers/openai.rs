@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use reqwest::Client;
+use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use std::{
     env,
@@ -132,36 +132,46 @@ impl Provider for OpenAiCompatProvider {
                 .as_ref()
                 .map(|name| env::var(name).with_context(|| format!("{name} is not set")))
                 .transpose()?;
-            let request = ChatRequest {
+            let mut response = send_openai_compat_stream_request(
+                self,
+                api_key.as_deref(),
                 model,
-                messages: messages.iter().map(ChatMessage::from_message).collect(),
-                tools: openai_tools(tools),
-                tool_choice: if tools.is_empty() { None } else { Some("auto") },
-                reasoning_effort: thinking.as_openai(),
-                stream: true,
-                stream_options: self.stream_usage.then_some(ChatStreamOptions {
-                    include_usage: true,
-                }),
-            };
-
-            let mut http_request = self
-                .client
-                .post(format!("{}/chat/completions", self.base_url));
-            if let Some(api_key) = api_key {
-                http_request = http_request.bearer_auth(api_key);
-            }
-            let response = http_request
-                .json(&request)
-                .send()
-                .await
-                .context("OpenAI-compatible streaming request failed")?;
+                messages,
+                tools,
+                thinking,
+                self.stream_usage,
+            )
+            .await?;
             let status = response.status();
             if !status.is_success() {
                 let text = response
                     .text()
                     .await
                     .context("failed to read provider error response")?;
-                anyhow::bail!("OpenAI-compatible provider returned {status}: {text}");
+                if self.stream_usage && is_stream_usage_unsupported_error(&text) {
+                    response = send_openai_compat_stream_request(
+                        self,
+                        api_key.as_deref(),
+                        model,
+                        messages,
+                        tools,
+                        thinking,
+                        false,
+                    )
+                    .await?;
+                    let retry_status = response.status();
+                    if !retry_status.is_success() {
+                        let retry_text = response
+                            .text()
+                            .await
+                            .context("failed to read provider retry error response")?;
+                        anyhow::bail!(
+                            "OpenAI-compatible provider returned {retry_status}: {retry_text}"
+                        );
+                    }
+                } else {
+                    anyhow::bail!("OpenAI-compatible provider returned {status}: {text}");
+                }
             }
 
             let mut parser = ChatSseParser::default();
@@ -189,6 +199,49 @@ impl Provider for OpenAiCompatProvider {
             parser.finish()
         })
     }
+}
+
+async fn send_openai_compat_stream_request(
+    provider: &OpenAiCompatProvider,
+    api_key: Option<&str>,
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    thinking: ThinkingLevel,
+    include_usage: bool,
+) -> Result<Response> {
+    let request = ChatRequest {
+        model,
+        messages: messages.iter().map(ChatMessage::from_message).collect(),
+        tools: openai_tools(tools),
+        tool_choice: if tools.is_empty() { None } else { Some("auto") },
+        reasoning_effort: thinking.as_openai(),
+        stream: true,
+        stream_options: include_usage.then_some(ChatStreamOptions {
+            include_usage: true,
+        }),
+    };
+
+    let mut http_request = provider
+        .client
+        .post(format!("{}/chat/completions", provider.base_url));
+    if let Some(api_key) = api_key {
+        http_request = http_request.bearer_auth(api_key);
+    }
+    http_request
+        .json(&request)
+        .send()
+        .await
+        .context("OpenAI-compatible streaming request failed")
+}
+
+fn is_stream_usage_unsupported_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("stream_options")
+        || lower.contains("stream options")
+        || (lower.contains("include_usage") && lower.contains("unsupported"))
+        || (lower.contains("include_usage") && lower.contains("unknown"))
+        || (lower.contains("include_usage") && lower.contains("invalid"))
 }
 
 pub struct OpenAiCodexProvider {
@@ -1396,6 +1449,20 @@ mod tests {
 
         assert_eq!(json["stream"], true);
         assert_eq!(json["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn detects_stream_usage_unsupported_errors() {
+        assert!(is_stream_usage_unsupported_error(
+            "400: unknown field stream_options"
+        ));
+        assert!(is_stream_usage_unsupported_error(
+            "include_usage is unsupported by this provider"
+        ));
+        assert!(is_stream_usage_unsupported_error(
+            "invalid include_usage option"
+        ));
+        assert!(!is_stream_usage_unsupported_error("model is unavailable"));
     }
 
     #[test]
