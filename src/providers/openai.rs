@@ -1002,6 +1002,16 @@ impl ResponsesSseParser {
                     }
                 }
             }
+            Some("response.output_text.done") => {
+                if let Some(text) = event.get("text").and_then(|value| value.as_str()) {
+                    self.append_completed_output(text, None);
+                }
+            }
+            Some("response.completed") => {
+                if let Some(response) = event.get("response") {
+                    self.absorb_completed_response(response);
+                }
+            }
             Some("response.output_item.added") => {
                 if let Some(item) = event.get("item") {
                     if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
@@ -1076,6 +1086,74 @@ impl ResponsesSseParser {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn append_completed_output(
+        &mut self,
+        text: &str,
+        on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) {
+        if text.is_empty() || self.output.ends_with(text) {
+            return;
+        }
+        let delta = text.strip_prefix(&self.output).unwrap_or(text).to_string();
+        self.output.push_str(&delta);
+        if !delta.is_empty() {
+            if let Some(on_event) = on_event {
+                on_event(StreamEvent::TextDelta(delta));
+            }
+        }
+    }
+
+    fn absorb_completed_response(&mut self, response: &serde_json::Value) {
+        if let Some(text) = extract_responses_text(response) {
+            self.append_completed_output(&text, None);
+        }
+        for item in response
+            .get("output")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if item.get("type").and_then(|value| value.as_str()) == Some("reasoning") {
+                let final_thinking = thinking_text_from_item(item);
+                if !final_thinking.trim().is_empty() {
+                    self.thinking = final_thinking;
+                }
+                self.thinking_signature = Some(item.to_string());
+            }
+            if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
+                let call_id = item
+                    .get("call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("call")
+                    .to_string();
+                let item_id = item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("fc_call")
+                    .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let args = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string();
+                let call = (call_id, item_id, name, args);
+                if !self
+                    .tool_calls
+                    .iter()
+                    .any(|existing| existing.0 == call.0 || existing.1 == call.1)
+                {
+                    self.tool_calls.push(call);
+                }
+                self.current_call = None;
+            }
         }
     }
 
@@ -1326,6 +1404,44 @@ mod tests {
         };
         assert_eq!(text, "Plan first.");
         assert!(signature.as_deref().unwrap_or_default().contains("rs_1"));
+    }
+
+    #[test]
+    fn extracts_output_from_completed_response_event() {
+        let sse = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"hello\"}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let message = extract_sse_responses_message(sse).unwrap();
+        assert_eq!(message.display_text(), "hello");
+    }
+
+    #[test]
+    fn extracts_output_from_output_text_done_event() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"hello\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let message = extract_sse_responses_message(sse).unwrap();
+        assert_eq!(message.display_text(), "hello");
+    }
+
+    #[test]
+    fn completed_response_deduplicates_tool_calls() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"Cargo.toml\\\"}\"}]}}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let message = extract_sse_responses_message(sse).unwrap();
+        let tool_calls = message
+            .content
+            .iter()
+            .filter(|block| matches!(block, ContentBlock::ToolUse { .. }))
+            .count();
+
+        assert_eq!(tool_calls, 1);
     }
 
     #[test]
