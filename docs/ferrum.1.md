@@ -236,17 +236,17 @@ configuration directory.
 Download the release tarball from Codeberg, extract it, and install the binary:
 
 ```sh
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.4.18-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.4.19-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
 ferrum --help
 ```
 
 Optional checksum verification:
 
 ```sh
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## From source

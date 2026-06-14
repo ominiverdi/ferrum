@@ -33,7 +33,7 @@ Set the next version in `Cargo.toml`, `Cargo.lock`, and install docs.
 Example:
 
 ```toml
-version = "0.4.18"
+version = "0.4.19"
 ```
 
 ## Tag release
@@ -41,7 +41,7 @@ version = "0.4.18"
 Use annotated tags and push Codeberg first, then the GitHub mirror:
 
 ```bash
-version=v0.4.18
+version=v0.4.19
 notes=/tmp/ferrum-${version}-notes.md
 
 git tag -a "$version" -F "$notes"
@@ -72,7 +72,7 @@ docs/ferrum.1
 Manual packaging:
 
 ```bash
-version=v0.4.18
+version=v0.4.19
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 mkdir -p "$package/docs"
@@ -88,7 +88,7 @@ sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
 Create the Codeberg release with `tea` after pushing the tag:
 
 ```bash
-version=v0.4.18
+version=v0.4.19
 tea releases create "$version" \
   --title "Ferrum $version" \
   --note-file "/tmp/ferrum-${version}-notes.md" \
@@ -98,7 +98,7 @@ tea releases create "$version" \
 Upload release assets:
 
 ```bash
-version=v0.4.18
+version=v0.4.19
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 
@@ -113,7 +113,7 @@ If the release already exists, upload only missing assets.
 Verify Codeberg assets:
 
 ```bash
-version=v0.4.18
+version=v0.4.19
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 mkdir -p /tmp/ferrum-codeberg-release-check
@@ -141,8 +141,8 @@ sha256sum -c ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256
 Release notes should include Codeberg primary install commands:
 
 ```bash
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.18-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv ferrum-v0.4.19-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
 
@@ -158,9 +158,9 @@ ferrum --help
 Optional checksum verification:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.18/ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.4.18-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## CI
