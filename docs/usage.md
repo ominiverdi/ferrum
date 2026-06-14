@@ -58,11 +58,13 @@ streaming = true
 stream_usage = true
 ```
 
-`stream_usage` defaults to `true` for OpenAI-compatible providers. If a provider rejects `stream_options.include_usage`, set:
+`stream_usage` defaults to `true` for OpenAI-compatible providers. If a provider rejects `stream_options.include_usage`, Ferrum retries that request once without streaming usage options and records estimated usage if the provider still omits usage. Set:
 
 ```toml
 stream_usage = false
 ```
+
+for providers known to reject usage-in-streaming options, to skip the retry path.
 
 OpenAI Codex streaming usage is parsed from completed response events when the Codex backend includes a `usage` object. If the backend omits usage, Ferrum records an estimated entry.
 

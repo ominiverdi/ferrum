@@ -125,7 +125,7 @@ Fields:
 - `streaming`: optional OpenAI-compatible streaming toggle; defaults to `true`
 - `stream_usage`: optional `stream_options.include_usage` toggle for OpenAI-compatible streaming; defaults to `true`
 
-Set `stream_usage = false` when an OpenAI-compatible provider supports streaming but rejects usage-in-streaming options. Ferrum will still record estimated usage when provider usage is absent.
+Set `stream_usage = false` for OpenAI-compatible providers known to reject usage-in-streaming options. Otherwise Ferrum retries once without `stream_options.include_usage` when a provider rejects it, then records estimated usage if provider usage is absent.
 
 ### model
 

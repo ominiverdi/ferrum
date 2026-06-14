@@ -73,7 +73,7 @@ streaming = true
 stream_usage = true
 ```
 
-`streaming` and `stream_usage` default to `true` for OpenAI-compatible providers. Set `stream_usage = false` for providers that support streaming but reject OpenAI's `stream_options.include_usage`. Set `streaming = false` for providers with incompatible streaming responses.
+`streaming` and `stream_usage` default to `true` for OpenAI-compatible providers. If a provider rejects OpenAI's `stream_options.include_usage`, Ferrum retries the request once without usage options and records estimated usage when provider usage is absent. Set `stream_usage = false` for providers known to reject usage-in-streaming options, to skip that retry path. Set `streaming = false` for providers with incompatible streaming responses.
 
 If top-level `model` is omitted, Ferrum uses the selected provider's `default_model`. A top-level `model` still takes precedence.
 
