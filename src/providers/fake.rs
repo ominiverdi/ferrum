@@ -1,4 +1,4 @@
-use super::Provider;
+use super::{Provider, ProviderResponse};
 use crate::{
     agent::{
         messages::{ContentBlock, Message, Role},
@@ -18,10 +18,12 @@ impl Provider for FakeProvider {
         messages: &'a [Message],
         _tools: &'a [ToolDefinition],
         _thinking: ThinkingLevel,
-    ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             if let Ok(script) = std::env::var("FERRUM_FAKE_SCRIPT") {
-                return Ok(scripted_response(&script, messages));
+                return Ok(ProviderResponse::message(scripted_response(
+                    &script, messages,
+                )));
             }
             let last_user = messages
                 .iter()
@@ -29,10 +31,10 @@ impl Provider for FakeProvider {
                 .find(|message| matches!(message.role, Role::User))
                 .map(Message::text_content)
                 .unwrap_or_default();
-            Ok(Message::text(
+            Ok(ProviderResponse::message(Message::text(
                 Role::Assistant,
                 format!("fake provider response: {last_user}\n"),
-            ))
+            )))
         })
     }
 }
@@ -69,6 +71,7 @@ fn edit_preview_response(messages: &[Message]) -> Message {
                 }]
             }),
         }],
+        usage: None,
     }
 }
 
@@ -115,6 +118,7 @@ fn mixed_write_read_response(messages: &[Message]) -> Message {
                 input: serde_json::json!({"path": "generated.txt"}),
             },
         ],
+        usage: None,
     }
 }
 
@@ -142,6 +146,7 @@ fn missing_read_response(messages: &[Message]) -> Message {
             name: "read".to_string(),
             input: serde_json::json!({"path": format!("missing-{tool_results}.txt")}),
         }],
+        usage: None,
     }
 }
 
@@ -169,6 +174,7 @@ fn repeat_read_response(messages: &[Message]) -> Message {
             name: "read".to_string(),
             input: serde_json::json!({"path": "loop.txt"}),
         }],
+        usage: None,
     }
 }
 

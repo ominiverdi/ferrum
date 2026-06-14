@@ -196,6 +196,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /sessions new
 /model [name]
 /models
+/usage [day|week|month]
 /provider [name]
 /providers
 /thinking [level]
@@ -225,6 +226,7 @@ Shell shortcuts:
 - Providers: [`docs/providers.md`](docs/providers.md)
 - Tools: [`docs/tools.md`](docs/tools.md)
 - Sessions: [`docs/sessions.md`](docs/sessions.md)
+- Usage accounting: [`docs/usage.md`](docs/usage.md)
 - Images: [`docs/images.md`](docs/images.md)
 - MCP: [`docs/mcp.md`](docs/mcp.md)
 - ACP investigation: [`docs/acp.md`](docs/acp.md)

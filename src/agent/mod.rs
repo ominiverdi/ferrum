@@ -3,7 +3,7 @@ pub mod tools;
 
 use crate::{
     config::{ColorMode, Config, DiffMode, ToolSelection},
-    context, mcp, providers, session, skills, tools as builtin_tools,
+    context, mcp, providers, session, skills, tools as builtin_tools, usage,
 };
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -42,6 +42,7 @@ const CONTEXT_ADVISORY_PERCENT: usize = 75;
 const CONTEXT_WARNING_PERCENT: usize = 85;
 const CONTEXT_CRITICAL_PERCENT: usize = 92;
 const CONTEXT_AUTO_COMPACT_PERCENT: usize = 95;
+const CONTEXT_RESERVE_TOKENS: usize = 16_384;
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_CYAN: &str = "\x1b[36m";
@@ -119,6 +120,10 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, mcp_words())));
         }
+        if let Some(prefix) = before.strip_prefix("/usage ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, usage_words())));
+        }
         if before.starts_with('/') {
             let token = before.split_whitespace().next().unwrap_or(before);
             let start = before.rfind('/').unwrap_or(0);
@@ -141,6 +146,7 @@ impl FerrumLineHelper {
         command_hints.insert("/thinking", " off|minimal|low|medium|high|xhigh");
         command_hints.insert("/diff", " unified|compact|full|words|side_by_side");
         command_hints.insert("/mcp", " on|off|status");
+        command_hints.insert("/usage", " day|week|month");
         let skill_names = skill_command_words(skills);
         let model_names = model_command_words(config);
         let provider_names = provider_command_words(config);
@@ -174,6 +180,7 @@ fn slash_command_words() -> &'static [&'static str] {
         "/diff",
         "/image",
         "/image-paste",
+        "/usage",
         "/paste-image",
         "/compact",
     ]
@@ -213,6 +220,10 @@ fn diff_mode_words() -> &'static [&'static str] {
 
 fn mcp_words() -> &'static [&'static str] {
     &["on", "off", "status"]
+}
+
+fn usage_words() -> &'static [&'static str] {
+    &["day", "week", "month"]
 }
 
 fn complete_from_words(prefix: &str, words: &[&str]) -> Vec<Pair> {
@@ -623,6 +634,44 @@ fn emit_model_metrics_end(request: usize, duration: Duration, response: &message
         duration.as_millis(),
         output_chars.div_ceil(4)
     );
+}
+
+fn usage_for_response(
+    provider_usage: Option<messages::TokenUsage>,
+    request_messages: &[messages::Message],
+    tools: &[tools::ToolDefinition],
+    response: &messages::Message,
+) -> messages::TokenUsage {
+    provider_usage
+        .unwrap_or_else(|| estimated_usage_for_response(request_messages, tools, response))
+}
+
+fn estimated_usage_for_response(
+    request_messages: &[messages::Message],
+    tools: &[tools::ToolDefinition],
+    response: &messages::Message,
+) -> messages::TokenUsage {
+    let input_tokens = estimated_request_tokens(request_messages, tools) as u64;
+    let output_tokens = estimated_tokens_for_message(response) as u64;
+    messages::TokenUsage {
+        input_tokens: Some(input_tokens),
+        output_tokens: Some(output_tokens),
+        total_tokens: Some(input_tokens.saturating_add(output_tokens)),
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        source: "estimated".to_string(),
+    }
+}
+
+fn estimated_request_tokens(
+    messages: &[messages::Message],
+    tools: &[tools::ToolDefinition],
+) -> usize {
+    let message_tokens = estimated_tokens_for_messages(messages);
+    let tool_tokens = serde_json::to_vec(tools)
+        .map(|bytes| bytes.len().div_ceil(4))
+        .unwrap_or(0);
+    message_tokens.saturating_add(tool_tokens)
 }
 
 struct ActiveTurnAbort {
@@ -1282,6 +1331,7 @@ impl AgentState {
         let metrics_enabled = metrics_enabled();
         let mut model_request_index = 0usize;
         let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
+        let mut overflow_recovery_attempted = false;
         let force_final_reason = loop {
             model_request_index += 1;
             if interactive && model_request_index > 1 {
@@ -1325,8 +1375,53 @@ impl AgentState {
                     println!("aborted");
                     return Ok(());
                 }
+                Err(error) if is_context_overflow_error(&error) && !overflow_recovery_attempted => {
+                    overflow_recovery_attempted = true;
+                    eprintln!(
+                        "[session] provider reported context overflow; compacting and retrying once"
+                    );
+                    let outcome = self.compact(config, None, true).await?;
+                    self.last_context_warning_bucket = None;
+                    match outcome {
+                        CompactionOutcome::Compacted {
+                            before_tokens,
+                            after_tokens,
+                        } => eprintln!(
+                            "[session] compacted context after overflow: {before_tokens} -> {after_tokens} estimated tokens"
+                        ),
+                        CompactionOutcome::Skipped { reason, .. } => {
+                            eprintln!("[session] overflow recovery compaction skipped: {reason}")
+                        }
+                    }
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
+            let provider_usage = response.usage;
+            let mut response = response.message;
+            let token_usage = usage_for_response(
+                provider_usage.or_else(|| response.usage.clone()),
+                &self.messages,
+                &tools,
+                &response,
+            );
+            if response.usage.is_none() {
+                response.usage = Some(token_usage.clone());
+            }
+            let _ = usage::append_usage_record(
+                &config.data_dir,
+                &usage::UsageRecord {
+                    timestamp_unix: usage::now_unix(),
+                    provider: config.provider_name.clone(),
+                    model: config.provider_model.clone(),
+                    input_tokens: token_usage.input_tokens,
+                    output_tokens: token_usage.output_tokens,
+                    total_tokens: token_usage.total_tokens,
+                    cache_read_tokens: token_usage.cache_read_tokens,
+                    cache_write_tokens: token_usage.cache_write_tokens,
+                    source: token_usage.source.clone(),
+                },
+            );
             if metrics_enabled {
                 emit_model_metrics_end(model_request_index, started.elapsed(), &response);
             }
@@ -1374,6 +1469,7 @@ impl AgentState {
                         content: executed.content,
                         is_error: executed.is_error,
                     }],
+                    usage: None,
                 };
                 self.session.append_message(&result)?;
                 self.messages.push(result);
@@ -1417,6 +1513,31 @@ impl AgentState {
                 config.thinking,
             )
             .await?;
+        let provider_usage = final_response.usage;
+        let mut final_response = final_response.message;
+        let token_usage = usage_for_response(
+            provider_usage.or_else(|| final_response.usage.clone()),
+            &final_messages,
+            &[],
+            &final_response,
+        );
+        if final_response.usage.is_none() {
+            final_response.usage = Some(token_usage.clone());
+        }
+        let _ = usage::append_usage_record(
+            &config.data_dir,
+            &usage::UsageRecord {
+                timestamp_unix: usage::now_unix(),
+                provider: config.provider_name.clone(),
+                model: config.provider_model.clone(),
+                input_tokens: token_usage.input_tokens,
+                output_tokens: token_usage.output_tokens,
+                total_tokens: token_usage.total_tokens,
+                cache_read_tokens: token_usage.cache_read_tokens,
+                cache_write_tokens: token_usage.cache_write_tokens,
+                source: token_usage.source.clone(),
+            },
+        );
         if metrics_enabled {
             emit_model_metrics_end(model_request_index, started.elapsed(), &final_response);
         }
@@ -1673,13 +1794,22 @@ impl AgentState {
             .iter()
             .map(|message| message.text_content().chars().count())
             .sum::<usize>();
+        let (estimated_tokens, context_source) = context_tokens_from_usage(&self.messages)
+            .map(|tokens| (tokens, ContextTokenSource::UsagePlusEstimate))
+            .unwrap_or_else(|| {
+                (
+                    estimated_tokens_for_messages(&self.messages),
+                    ContextTokenSource::Estimate,
+                )
+            });
         let file_bytes = fs::metadata(self.session.path())
             .map(|metadata| metadata.len())
             .unwrap_or(0);
         SessionStats {
             messages: self.messages.len(),
             chars,
-            estimated_tokens: chars.div_ceil(4),
+            estimated_tokens,
+            context_source,
             file_bytes,
         }
     }
@@ -1968,7 +2098,7 @@ impl AgentState {
                 config.thinking,
             )
             .await?;
-        Ok(response.text_content())
+        Ok(response.message.text_content())
     }
 }
 
@@ -2472,6 +2602,45 @@ fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &P
     }
 }
 
+fn print_usage_summary(period: usage::UsagePeriod, rows: &[usage::UsageSummaryRow]) {
+    println!("usage: {}", period.label());
+    if rows.is_empty() {
+        println!("no usage records found");
+        return;
+    }
+    println!(
+        "{:<32} {:>4} {:>7} {:>10} {:>10} {:>8} {:>10}",
+        "provider/model", "req", "exact/est", "input", "output", "cached", "total"
+    );
+    for row in rows {
+        println!(
+            "{:<32} {:>4} {:>7} {:>10} {:>10} {:>8} {:>10}",
+            truncate_chars(&format!("{}/{}", row.provider, row.model), 32),
+            row.summary.requests,
+            format!(
+                "{}/{}",
+                row.summary.provider_records, row.summary.estimated_records
+            ),
+            format_token_count(row.summary.input_tokens),
+            format_token_count(row.summary.output_tokens),
+            format_token_count(row.summary.cache_read_tokens),
+            format_token_count(row.summary.total_tokens),
+        );
+    }
+}
+
+fn format_token_count(value: u64) -> String {
+    let text = value.to_string();
+    let mut out = String::new();
+    for (index, ch) in text.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push('_');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
+}
+
 fn print_session_preview(messages: &[messages::Message], limit: usize) {
     let preview = session_preview_lines(messages, limit);
     if preview.is_empty() {
@@ -2566,9 +2735,42 @@ fn format_age(modified: SystemTime) -> String {
     }
 }
 
+fn is_context_overflow_error(error: &anyhow::Error) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    let overflow_patterns = [
+        "prompt is too long",
+        "request_too_large",
+        "input is too long for requested model",
+        "exceeds the context window",
+        "maximum context length",
+        "input token count",
+        "maximum prompt length",
+        "reduce the length of the messages",
+        "context window exceeds limit",
+        "exceeded model token limit",
+        "too large for model",
+        "model_context_window_exceeded",
+        "prompt too long",
+        "context length exceeded",
+        "context_length_exceeded",
+        "too many tokens",
+        "token limit exceeded",
+    ];
+    let non_overflow_patterns = ["rate limit", "too many requests", "throttling"];
+    overflow_patterns
+        .iter()
+        .any(|pattern| text.contains(pattern))
+        && !non_overflow_patterns
+            .iter()
+            .any(|pattern| text.contains(pattern))
+}
+
 fn should_auto_compact(estimated_tokens: usize, max_context_tokens: usize) -> bool {
     if max_context_tokens == 0 {
         return false;
+    }
+    if max_context_tokens > CONTEXT_RESERVE_TOKENS {
+        return estimated_tokens >= max_context_tokens.saturating_sub(CONTEXT_RESERVE_TOKENS);
     }
     estimated_tokens.saturating_mul(100)
         >= max_context_tokens.saturating_mul(CONTEXT_AUTO_COMPACT_PERCENT)
@@ -2635,7 +2837,8 @@ mod context_pressure_tests {
     fn auto_compacts_before_full_context() {
         assert!(!should_auto_compact(94, 100));
         assert!(should_auto_compact(95, 100));
-        assert!(should_auto_compact(190_000, 200_000));
+        assert!(!should_auto_compact(183_615, 200_000));
+        assert!(should_auto_compact(183_616, 200_000));
     }
 
     #[test]
@@ -2655,6 +2858,7 @@ mod context_pressure_tests {
                     name: "read".to_string(),
                     input: serde_json::json!({"path": "a.txt"}),
                 }],
+                usage: None,
             },
             messages::Message {
                 role: messages::Role::Tool,
@@ -2663,6 +2867,7 @@ mod context_pressure_tests {
                     content: "result".to_string(),
                     is_error: false,
                 }],
+                usage: None,
             },
             messages::Message::text(messages::Role::User, "new question"),
         ];
@@ -2785,6 +2990,25 @@ fn estimated_tokens_for_messages(messages: &[messages::Message]) -> usize {
         .iter()
         .map(estimated_tokens_for_message)
         .sum::<usize>()
+}
+
+fn context_tokens_from_usage(messages: &[messages::Message]) -> Option<usize> {
+    let (index, usage) = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            matches!(message.role, messages::Role::Assistant)
+                .then_some(message.usage.as_ref())
+                .flatten()
+                .and_then(|usage| usage.context_tokens().map(|tokens| (index, tokens)))
+        })?;
+    let trailing = messages
+        .iter()
+        .skip(index + 1)
+        .map(estimated_tokens_for_message)
+        .sum::<usize>();
+    Some((usage as usize).saturating_add(trailing))
 }
 
 fn estimated_tokens_for_message(message: &messages::Message) -> usize {
@@ -3171,10 +3395,25 @@ fn command_exists(command: &str) -> bool {
         .is_some_and(|paths| std::env::split_paths(&paths).any(|path| path.join(command).is_file()))
 }
 
+enum ContextTokenSource {
+    UsagePlusEstimate,
+    Estimate,
+}
+
+impl ContextTokenSource {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::UsagePlusEstimate => "usage+estimate",
+            Self::Estimate => "estimate",
+        }
+    }
+}
+
 struct SessionStats {
     messages: usize,
     chars: usize,
     estimated_tokens: usize,
+    context_source: ContextTokenSource,
     file_bytes: u64,
 }
 
@@ -3251,6 +3490,7 @@ fn handle_command(
             println!("  /skill:<name> [args]  load a skill into context");
             println!("  /model [name]         show or set model");
             println!("  /models               list known models for current provider");
+            println!("  /usage [period]       show token usage: day|week|month");
             println!("  /provider [name]      show or set provider");
             println!("  /providers            list configured providers");
             println!("  /mcp [on|off|status]  show or toggle MCP tools");
@@ -3291,7 +3531,8 @@ fn handle_command(
                     let stats = state.stats();
                     println!("messages: {}", stats.messages);
                     println!("chars: {}", stats.chars);
-                    println!("estimated_tokens: {}", stats.estimated_tokens);
+                    println!("context_tokens: {}", stats.estimated_tokens);
+                    println!("context_source: {}", stats.context_source.as_str());
                     println!("max_context_tokens: {}", config.max_context_tokens);
                     println!(
                         "context_usage_percent: {}",
@@ -3375,6 +3616,15 @@ fn handle_command(
         }
         "/models" => {
             anyhow::bail!("/models is async; this command should be handled before sync commands")
+        }
+        "/usage" => {
+            let period = usage::UsagePeriod::parse(parts.next())?;
+            if let Some(extra) = parts.next() {
+                anyhow::bail!("usage: /usage [day|week|month], got extra argument: {extra}");
+            }
+            let rows = usage::summarize_usage(&config.data_dir, period, usage::now_unix())?;
+            print_usage_summary(period, &rows);
+            Ok(CommandAction::Continue)
         }
         "/provider" => {
             if let Some(provider) = parts.next() {

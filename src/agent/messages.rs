@@ -47,6 +47,33 @@ pub enum ContentBlock {
 pub struct Message {
     pub role: Role,
     pub content: Vec<ContentBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_write_tokens: u64,
+    pub source: String,
+}
+
+impl TokenUsage {
+    pub fn context_tokens(&self) -> Option<u64> {
+        self.total_tokens.or_else(|| {
+            Some(
+                self.input_tokens?
+                    .saturating_add(self.output_tokens.unwrap_or(0))
+                    .saturating_add(self.cache_read_tokens)
+                    .saturating_add(self.cache_write_tokens),
+            )
+        })
+    }
 }
 
 impl Message {
@@ -54,13 +81,18 @@ impl Message {
         Self {
             role,
             content: vec![ContentBlock::Text { text: text.into() }],
+            usage: None,
         }
     }
 
     pub fn with_images(role: Role, text: impl Into<String>, images: Vec<ContentBlock>) -> Self {
         let mut content = vec![ContentBlock::Text { text: text.into() }];
         content.extend(images);
-        Self { role, content }
+        Self {
+            role,
+            content,
+            usage: None,
+        }
     }
 
     pub fn text_content(&self) -> String {

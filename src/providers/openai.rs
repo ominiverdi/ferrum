@@ -1,4 +1,4 @@
-use super::{Provider, StreamEvent};
+use super::{Provider, ProviderResponse, StreamEvent, TokenUsage};
 use crate::{
     agent::{
         messages::{ContentBlock, Message, Role},
@@ -52,7 +52,7 @@ impl Provider for OpenAiCompatProvider {
         messages: &'a [Message],
         _tools: &'a [ToolDefinition],
         thinking: ThinkingLevel,
-    ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             let api_key = self
                 .api_key_env
@@ -95,8 +95,12 @@ impl Provider for OpenAiCompatProvider {
 
             let body: ChatResponse = serde_json::from_str(&text)
                 .with_context(|| format!("failed to parse provider response: {text}"))?;
+            let usage = body.usage.as_ref().map(OpenAiUsage::to_token_usage);
             let message = body.choices.into_iter().next().map(|choice| choice.message);
-            Ok(chat_response_to_message(message))
+            Ok(ProviderResponse {
+                message: chat_response_to_message(message),
+                usage,
+            })
         })
     }
 }
@@ -134,7 +138,7 @@ impl Provider for OpenAiCodexProvider {
         messages: &'a [Message],
         _tools: &'a [ToolDefinition],
         thinking: ThinkingLevel,
-    ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             let api_key = openai_codex::get_api_key_from_path(self.auth_path.clone())
                 .await?
@@ -182,13 +186,15 @@ impl Provider for OpenAiCodexProvider {
             if !status.is_success() {
                 anyhow::bail!("OpenAI Codex returned {status}: {text}");
             }
-            Ok(extract_sse_responses_message(&text).unwrap_or_else(|| {
-                let content = serde_json::from_str::<serde_json::Value>(&text)
-                    .ok()
-                    .and_then(|body| extract_responses_text(&body))
-                    .unwrap_or_default();
-                Message::text(Role::Assistant, content)
-            }))
+            Ok(ProviderResponse::message(
+                extract_sse_responses_message(&text).unwrap_or_else(|| {
+                    let content = serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|body| extract_responses_text(&body))
+                        .unwrap_or_default();
+                    Message::text(Role::Assistant, content)
+                }),
+            ))
         })
     }
 
@@ -200,7 +206,7 @@ impl Provider for OpenAiCodexProvider {
         thinking: ThinkingLevel,
         on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
         cancelled: Option<Arc<AtomicBool>>,
-    ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             let api_key = openai_codex::get_api_key_from_path(self.auth_path.clone())
                 .await?
@@ -404,6 +410,44 @@ impl ChatMessage {
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<ChatChoice>,
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiUsage {
+    #[serde(alias = "input_tokens", alias = "input")]
+    prompt_tokens: Option<u64>,
+    #[serde(alias = "output_tokens", alias = "output")]
+    completion_tokens: Option<u64>,
+    #[serde(alias = "totalTokens", alias = "total")]
+    total_tokens: Option<u64>,
+    prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiPromptTokensDetails {
+    cached_tokens: Option<u64>,
+}
+
+impl OpenAiUsage {
+    fn to_token_usage(&self) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.prompt_tokens,
+            output_tokens: self.completion_tokens,
+            total_tokens: self.total_tokens.or_else(|| {
+                self.prompt_tokens
+                    .zip(self.completion_tokens)
+                    .map(|(input, output)| input.saturating_add(output))
+            }),
+            cache_read_tokens: self
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens)
+                .unwrap_or(0),
+            cache_write_tokens: 0,
+            source: "provider".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,6 +521,7 @@ fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Message {
     Message {
         role: Role::Assistant,
         content,
+        usage: None,
     }
 }
 
@@ -810,7 +855,7 @@ impl ResponsesSseParser {
         }
     }
 
-    fn finish(mut self) -> Result<Message> {
+    fn finish(mut self) -> Result<ProviderResponse> {
         if let Some(call) = self.current_call.take() {
             self.tool_calls.push(call);
         }
@@ -836,9 +881,13 @@ impl ResponsesSseParser {
         if content.is_empty() {
             anyhow::bail!("OpenAI Codex stream produced no message content");
         }
-        Ok(Message {
-            role: Role::Assistant,
-            content,
+        Ok(ProviderResponse {
+            message: Message {
+                role: Role::Assistant,
+                content,
+                usage: None,
+            },
+            usage: None,
         })
     }
 }
@@ -896,7 +945,7 @@ fn extract_sse_responses_message(text: &str) -> Option<Message> {
     for line in text.lines() {
         parser.process_line(line, None);
     }
-    parser.finish().ok()
+    parser.finish().ok().map(|response| response.message)
 }
 
 fn thinking_text_from_item(item: &serde_json::Value) -> String {
@@ -999,6 +1048,7 @@ mod tests {
                 text: "Plan first.".to_string(),
                 signature: Some(r#"{"type":"reasoning","id":"rs_1"}"#.to_string()),
             }],
+            usage: None,
         };
         let inputs = codex_inputs(&[message]);
         let json = serde_json::to_value(&inputs).unwrap();

@@ -8,6 +8,7 @@ mod providers;
 mod session;
 mod skills;
 mod tools;
+mod usage;
 
 use anyhow::Result;
 use clap::Parser;

@@ -29,7 +29,7 @@ pub trait Provider: Send + Sync {
         messages: &'a [Message],
         tools: &'a [ToolDefinition],
         thinking: ThinkingLevel,
-    ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>>;
 
     fn complete_streaming<'a>(
         &'a self,
@@ -39,8 +39,25 @@ pub trait Provider: Send + Sync {
         thinking: ThinkingLevel,
         _on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
         _cancelled: Option<Arc<AtomicBool>>,
-    ) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         self.complete(model, messages, tools, thinking)
+    }
+}
+
+pub use crate::agent::messages::TokenUsage;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderResponse {
+    pub message: Message,
+    pub usage: Option<TokenUsage>,
+}
+
+impl ProviderResponse {
+    pub fn message(message: Message) -> Self {
+        Self {
+            message,
+            usage: None,
+        }
     }
 }
 
