@@ -1,5 +1,6 @@
 use crate::agent::messages::{Message, Role};
 use anyhow::{Context, Result};
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -326,10 +327,13 @@ pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
             serde_json::from_str(&line).context("failed to parse session entry")?;
         match entry {
             SessionEntry::Message { message, .. } => messages.push(message),
-            SessionEntry::Compaction { summary, .. } => messages.push(Message::text(
-                Role::System,
-                format!("Conversation summary from previous compaction:\n{summary}"),
-            )),
+            SessionEntry::Compaction { summary, .. } => {
+                messages.clear();
+                messages.push(Message::text(
+                    Role::System,
+                    format!("Conversation summary from previous compaction:\n{summary}"),
+                ));
+            }
             SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => {}
         }
     }
@@ -350,7 +354,18 @@ pub struct SessionInfo {
     pub tools: Option<Vec<String>>,
     pub title: String,
     pub message_count: usize,
+    pub archived_message_count: usize,
+    pub compaction_count: usize,
+    pub last_compaction_timestamp_ms: Option<u64>,
     pub modified: SystemTime,
+}
+
+#[derive(Debug, Clone)]
+pub struct HistorySearchMatch {
+    pub line_number: usize,
+    pub archived: bool,
+    pub role: String,
+    pub snippet: String,
 }
 
 pub fn latest_session_for_cwd(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
@@ -403,6 +418,85 @@ pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<Pa
         [] => anyhow::bail!("no session matches '{reference}' in current directory"),
         _ => anyhow::bail!("session reference '{reference}' is ambiguous"),
     }
+}
+
+pub fn search_history(path: &Path, pattern: &str, limit: usize) -> Result<Vec<HistorySearchMatch>> {
+    let regex = RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+        .with_context(|| format!("invalid history search pattern: {pattern}"))?;
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut parsed = Vec::new();
+    let mut latest_compaction_line = None;
+    for (index, line) in reader.lines().enumerate() {
+        let line_number = index + 1;
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: SessionEntry = match serde_json::from_str(&line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if matches!(entry, SessionEntry::Compaction { .. }) {
+            latest_compaction_line = Some(line_number);
+        }
+        parsed.push((line_number, entry));
+    }
+
+    let mut matches = Vec::new();
+    let archive_cutoff = latest_compaction_line.unwrap_or(0);
+    for (line_number, entry) in parsed {
+        let (role, text) = match entry {
+            SessionEntry::Message { message, .. } => (
+                format!("{:?}", message.role).to_lowercase(),
+                message.text_content(),
+            ),
+            SessionEntry::Compaction { summary, .. } => ("compaction".to_string(), summary),
+            SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => continue,
+        };
+        if !regex.is_match(&text) {
+            continue;
+        }
+        matches.push(HistorySearchMatch {
+            line_number,
+            archived: line_number < archive_cutoff,
+            role,
+            snippet: history_snippet(&text, &regex),
+        });
+        if matches.len() >= limit {
+            break;
+        }
+    }
+    Ok(matches)
+}
+
+fn history_snippet(text: &str, regex: &regex::Regex) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let Some(found) = regex.find(&compact) else {
+        return compact.chars().take(160).collect();
+    };
+    let start = compact[..found.start()]
+        .char_indices()
+        .rev()
+        .nth(60)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let end = compact[found.end()..]
+        .char_indices()
+        .nth(100)
+        .map(|(index, _)| found.end() + index)
+        .unwrap_or(compact.len());
+    let mut snippet = String::new();
+    if start > 0 {
+        snippet.push_str("...");
+    }
+    snippet.push_str(&compact[start..end]);
+    if end < compact.len() {
+        snippet.push_str("...");
+    }
+    snippet
 }
 
 pub enum SessionRefResolution {
@@ -460,7 +554,11 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut explicit_color_mode = None;
     let mut explicit_diff_mode = None;
     let mut explicit_tools = None;
-    let mut message_count = 0usize;
+    let mut total_message_count = 0usize;
+    let mut visible_message_count = 0usize;
+    let mut archived_message_count = 0usize;
+    let mut compaction_count = 0usize;
+    let mut last_compaction_timestamp_ms = None;
 
     for line in reader.lines() {
         let line = line?;
@@ -493,7 +591,8 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 cwd = header_cwd;
             }
             SessionEntry::Message { message, .. } => {
-                message_count += 1;
+                total_message_count += 1;
+                visible_message_count += 1;
                 if inferred_title.is_none() && matches!(message.role, Role::User) {
                     let text = message.text_content();
                     if !text.trim().is_empty() {
@@ -545,7 +644,12 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                     explicit_tools = Some(tools);
                 }
             }
-            SessionEntry::Compaction { .. } => {}
+            SessionEntry::Compaction { timestamp_ms, .. } => {
+                archived_message_count = total_message_count;
+                visible_message_count = 1;
+                compaction_count += 1;
+                last_compaction_timestamp_ms = Some(timestamp_ms);
+            }
         }
     }
 
@@ -567,7 +671,10 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
         title: explicit_title
             .or(inferred_title)
             .unwrap_or_else(|| "(empty session)".to_string()),
-        message_count,
+        message_count: visible_message_count,
+        archived_message_count,
+        compaction_count,
+        last_compaction_timestamp_ms,
         modified,
     }))
 }
@@ -714,6 +821,98 @@ mod tests {
         assert!(lines[0].contains("\"type\":\"header\""));
         assert!(lines[0].contains("\"cwd\""));
         assert!(lines[1].contains("\"type\":\"message\""));
+    }
+
+    #[test]
+    fn compaction_replaces_prior_messages_when_loading() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        session
+            .append_message(&Message::text(Role::User, "old context"))
+            .unwrap();
+        session.append_compaction("summary checkpoint").unwrap();
+        session
+            .append_message(&Message::text(Role::User, "new context"))
+            .unwrap();
+
+        let messages = load_messages(session.path()).unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::System);
+        assert!(messages[0].text_content().contains("summary checkpoint"));
+        assert_eq!(messages[1].text_content(), "new context");
+        assert!(
+            !messages
+                .iter()
+                .any(|message| message.text_content() == "old context")
+        );
+    }
+
+    #[test]
+    fn latest_compaction_replaces_earlier_compaction_when_loading() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        session
+            .append_message(&Message::text(Role::User, "old context"))
+            .unwrap();
+        session.append_compaction("first summary").unwrap();
+        session
+            .append_message(&Message::text(Role::User, "middle context"))
+            .unwrap();
+        session.append_compaction("second summary").unwrap();
+        session
+            .append_message(&Message::text(Role::User, "new context"))
+            .unwrap();
+
+        let messages = load_messages(session.path()).unwrap();
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].text_content().contains("second summary"));
+        assert!(!messages[0].text_content().contains("first summary"));
+        assert_eq!(messages[1].text_content(), "new context");
+    }
+
+    #[test]
+    fn session_info_counts_visible_messages_after_compaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        session
+            .append_message(&Message::text(Role::User, "old context"))
+            .unwrap();
+        session.append_compaction("summary checkpoint").unwrap();
+        session
+            .append_message(&Message::text(Role::User, "new context"))
+            .unwrap();
+
+        let info = session_info(session.path()).unwrap().unwrap();
+
+        assert_eq!(info.message_count, 2);
+        assert_eq!(info.archived_message_count, 1);
+        assert_eq!(info.compaction_count, 1);
+        assert!(info.last_compaction_timestamp_ms.is_some());
+    }
+
+    #[test]
+    fn history_search_finds_archived_messages() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        session
+            .append_message(&Message::text(Role::User, "old token plan"))
+            .unwrap();
+        session.append_compaction("summary checkpoint").unwrap();
+        session
+            .append_message(&Message::text(Role::User, "new token plan"))
+            .unwrap();
+
+        let matches = search_history(session.path(), "token\\s+plan", 10).unwrap();
+
+        assert_eq!(matches.len(), 2);
+        assert!(matches[0].archived);
+        assert!(!matches[1].archived);
     }
 
     #[test]

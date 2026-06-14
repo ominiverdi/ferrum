@@ -37,6 +37,7 @@ use std::{
 
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 2_000;
+const LOCAL_COMPACTION_SUMMARY_MAX_CHARS: usize = 16_000;
 const TOOL_PREVIEW_MAX_CHARS: usize = 4_000;
 const CONTEXT_ADVISORY_PERCENT: usize = 75;
 const CONTEXT_WARNING_PERCENT: usize = 85;
@@ -139,6 +140,7 @@ impl FerrumLineHelper {
         command_hints.insert("/image", " <path>");
         command_hints.insert("/image-paste", "");
         command_hints.insert("/session", " tail [n]");
+        command_hints.insert("/history", " search <pattern>");
         command_hints.insert("/sessions", " pick | del | new");
         command_hints.insert("/colors", " auto|on|off");
         command_hints.insert("/model", " <name>");
@@ -166,6 +168,7 @@ fn slash_command_words() -> &'static [&'static str] {
         "/exit",
         "/version",
         "/session",
+        "/history",
         "/sessions",
         "/title",
         "/skills",
@@ -2584,15 +2587,38 @@ fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &P
         if diff_mode != "unified" {
             provider_model.push_str(&format!(" diff={diff_mode}"));
         }
+        let message_label = if session.archived_message_count > 0 {
+            format!(
+                "{} msgs +{} archived",
+                session.message_count, session.archived_message_count
+            )
+        } else {
+            format!("{} msgs", session.message_count)
+        };
+        let compaction_label = session
+            .last_compaction_timestamp_ms
+            .map(|timestamp| format!(" compacted={}", format_timestamp_ms(timestamp)))
+            .unwrap_or_default();
         println!(
-            "[{}] {marker} {:>4} {:>4} msgs  {:<28} {}",
+            "[{}] {marker} {:>4} {:<22} {:<28} {}{}",
             index + 1,
             age,
-            session.message_count,
+            truncate_chars(&message_label, 22).replace('\n', " "),
             truncate_chars(&provider_model, 28).replace('\n', " "),
-            session.title
+            session.title,
+            compaction_label
         );
     }
+}
+
+fn format_timestamp_ms(timestamp_ms: u64) -> String {
+    let seconds = (timestamp_ms / 1000).min(i64::MAX as u64) as i64;
+    let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(seconds) else {
+        return timestamp_ms.to_string();
+    };
+    datetime
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| timestamp_ms.to_string())
 }
 
 fn print_usage_summary(period: usage::UsagePeriod, rows: &[usage::UsageSummaryRow]) {
@@ -2879,6 +2905,29 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn forced_fallback_summary_is_bounded() {
+        let messages = (0..200)
+            .map(|index| {
+                messages::Message::text(
+                    messages::Role::User,
+                    format!("message {index} {}", "x".repeat(1_000)),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let summary = compaction_summary_or_fallback(
+            Err(anyhow::anyhow!("provider failed")),
+            &messages,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert!(summary.len() < LOCAL_COMPACTION_SUMMARY_MAX_CHARS + 2_000);
+        assert!(summary.contains("omitted from local fallback summary"));
+    }
+
+    #[test]
     fn compaction_split_drops_orphan_tool_results_from_recent_context() {
         let messages = vec![
             messages::Message::text(messages::Role::User, "old question"),
@@ -3119,16 +3168,28 @@ fn local_compaction_summary(
     summary.push_str("## Goal\n(unknown; model summarization failed)\n\n");
     summary.push_str("## Constraints & Preferences\n- (unknown)\n\n");
     summary.push_str("## Progress\n### Done\n");
+    let mut omitted = 0usize;
     for message in messages {
         let text = message_text_for_compaction(message);
-        if !text.trim().is_empty() {
-            let _ = writeln!(
-                summary,
-                "- {:?}: {}",
-                message.role,
-                truncate_chars(text.trim(), 500)
-            );
+        if text.trim().is_empty() {
+            continue;
         }
+        let entry = format!(
+            "- {:?}: {}\n",
+            message.role,
+            truncate_chars(text.trim(), 500)
+        );
+        if summary.len().saturating_add(entry.len()) > LOCAL_COMPACTION_SUMMARY_MAX_CHARS {
+            omitted += 1;
+            continue;
+        }
+        summary.push_str(&entry);
+    }
+    if omitted > 0 {
+        let _ = writeln!(
+            summary,
+            "- ({omitted} older messages omitted from local fallback summary to keep context bounded)"
+        );
     }
     summary.push_str("\n### In Progress\n- (unknown)\n\n");
     summary.push_str("### Blocked\n- model-generated compaction failed\n\n");
@@ -3534,6 +3595,7 @@ fn handle_command(
             println!(
                 "  /session tail [n]     show last n user/assistant messages from session UI-only"
             );
+            println!("  /history search <re> search active and archived session history");
             println!("  /title [text]         show or set session title");
             println!("  /sessions             list recent sessions for current directory");
             println!("  /sessions pick        open session picker");
@@ -3584,6 +3646,15 @@ fn handle_command(
                     println!("path: {}", state.session.path().display());
                     let stats = state.stats();
                     println!("messages: {}", stats.messages);
+                    let info = session::jsonl::session_info(state.session.path())?
+                        .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
+                    println!("archived_messages: {}", info.archived_message_count);
+                    println!("compactions: {}", info.compaction_count);
+                    if let Some(timestamp) = info.last_compaction_timestamp_ms {
+                        println!("last_compaction: {}", format_timestamp_ms(timestamp));
+                    } else {
+                        println!("last_compaction: none");
+                    }
                     println!("chars: {}", stats.chars);
                     println!("context_tokens: {}", stats.estimated_tokens);
                     println!("context_source: {}", stats.context_source.as_str());
@@ -3606,6 +3677,36 @@ fn handle_command(
                     println!("thinking: {}", config.thinking.as_str());
                     println!("provider: {}", config.provider_name);
                 }
+            }
+            Ok(CommandAction::Continue)
+        }
+        "/history" => {
+            match parts.next() {
+                Some("search") => {
+                    let pattern = parts.collect::<Vec<_>>().join(" ");
+                    if pattern.trim().is_empty() {
+                        anyhow::bail!("usage: /history search <regex>");
+                    }
+                    let matches =
+                        session::jsonl::search_history(state.session.path(), &pattern, 25)?;
+                    if matches.is_empty() {
+                        println!("no history matches");
+                    } else {
+                        for matched in matches {
+                            let status = if matched.archived {
+                                "archived"
+                            } else {
+                                "active"
+                            };
+                            println!(
+                                "{}:{}:{}: {}",
+                                matched.line_number, status, matched.role, matched.snippet
+                            );
+                        }
+                    }
+                }
+                Some(other) => anyhow::bail!("unknown /history subcommand: {other}"),
+                None => anyhow::bail!("usage: /history search <regex>"),
             }
             Ok(CommandAction::Continue)
         }
