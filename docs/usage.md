@@ -35,7 +35,7 @@ Columns:
 - `input`: input tokens
 - `output`: output tokens
 - `cached`: cached input tokens reported by providers when available
-- `total`: total tokens
+- `total`: total tokens reported by the provider, or Ferrum's normalized input/output total for estimated records
 
 ## Exact vs estimated usage
 
@@ -44,6 +44,27 @@ Ferrum prefers provider-reported usage when providers return it. Those records c
 When a provider does not return usage, Ferrum records an estimated usage entry instead. Those records count as `est`.
 
 Estimated usage is based on Ferrum's local request/response size estimate. It is useful for trend tracking, but it is not a billing-grade source of truth.
+
+Provider-reported totals can differ from `input + output + cached` depending on the provider's accounting schema. Ferrum shows cached input separately so cache behavior is visible instead of folding it into another column.
+
+## Streaming usage
+
+OpenAI-compatible streaming can request provider usage with:
+
+```toml
+[providers.example]
+type = "openai-compatible"
+streaming = true
+stream_usage = true
+```
+
+`stream_usage` defaults to `true` for OpenAI-compatible providers. If a provider rejects `stream_options.include_usage`, set:
+
+```toml
+stream_usage = false
+```
+
+OpenAI Codex streaming usage is parsed from completed response events when the Codex backend includes a `usage` object. If the backend omits usage, Ferrum records an estimated entry.
 
 ## Context accounting
 

@@ -55,6 +55,8 @@ type = "openai-compatible"
 base_url = "https://example.com/v1"
 api_key_env = "EXAMPLE_API_KEY"
 default_model = "example-model"
+streaming = true
+stream_usage = true
 
 [models."gpt-5.5-small-context"]
 actual_model = "gpt-5.5"
@@ -120,6 +122,10 @@ Fields:
 - `base_url`: provider endpoint
 - `api_key_env`: optional environment variable for `openai-compatible` providers; when omitted, Ferrum sends no `Authorization` header
 - `default_model`: model selected when `/provider <name>` switches to this provider, and used at startup when top-level `model` is omitted
+- `streaming`: optional OpenAI-compatible streaming toggle; defaults to `true`
+- `stream_usage`: optional `stream_options.include_usage` toggle for OpenAI-compatible streaming; defaults to `true`
+
+Set `stream_usage = false` when an OpenAI-compatible provider supports streaming but rejects usage-in-streaming options. Ferrum will still record estimated usage when provider usage is absent.
 
 ### model
 

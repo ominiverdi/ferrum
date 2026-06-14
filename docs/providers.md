@@ -69,7 +69,11 @@ type = "openai-compatible"
 base_url = "https://example.com/v1"
 api_key_env = "EXAMPLE_API_KEY"
 default_model = "example-model"
+streaming = true
+stream_usage = true
 ```
+
+`streaming` and `stream_usage` default to `true` for OpenAI-compatible providers. Set `stream_usage = false` for providers that support streaming but reject OpenAI's `stream_options.include_usage`. Set `streaming = false` for providers with incompatible streaming responses.
 
 If top-level `model` is omitted, Ferrum uses the selected provider's `default_model`. A top-level `model` still takes precedence.
 

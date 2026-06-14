@@ -514,6 +514,7 @@ struct OpenAiUsage {
     completion_tokens: Option<u64>,
     #[serde(alias = "totalTokens", alias = "total")]
     total_tokens: Option<u64>,
+    #[serde(alias = "input_tokens_details")]
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
 }
 
@@ -947,6 +948,7 @@ struct ResponsesSseParser {
     output: String,
     thinking: String,
     thinking_signature: Option<String>,
+    usage: Option<TokenUsage>,
     tool_calls: Vec<(String, String, String, String)>,
     current_call: Option<(String, String, String, String)>,
 }
@@ -966,6 +968,14 @@ impl ResponsesSseParser {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
             return;
         };
+        if let Some(usage) = event
+            .get("response")
+            .and_then(|response| response.get("usage"))
+            .or_else(|| event.get("usage"))
+            .filter(|usage| !usage.is_null())
+        {
+            self.absorb_usage(usage);
+        }
         let event_type = event.get("type").and_then(|value| value.as_str());
         if let Some(event_type) = event_type {
             emit_codex_usage_metrics_if_enabled(event_type, &event);
@@ -1106,7 +1116,16 @@ impl ResponsesSseParser {
         }
     }
 
+    fn absorb_usage(&mut self, usage: &serde_json::Value) {
+        if let Ok(parsed) = serde_json::from_value::<OpenAiUsage>(usage.clone()) {
+            self.usage = Some(parsed.to_token_usage());
+        }
+    }
+
     fn absorb_completed_response(&mut self, response: &serde_json::Value) {
+        if let Some(usage) = response.get("usage").filter(|usage| !usage.is_null()) {
+            self.absorb_usage(usage);
+        }
         if let Some(text) = extract_responses_text(response) {
             self.append_completed_output(&text, None);
         }
@@ -1189,7 +1208,7 @@ impl ResponsesSseParser {
                 content,
                 usage: None,
             },
-            usage: None,
+            usage: self.usage,
         })
     }
 }
@@ -1424,6 +1443,29 @@ mod tests {
         );
         let message = extract_sse_responses_message(sse).unwrap();
         assert_eq!(message.display_text(), "hello");
+    }
+
+    #[test]
+    fn extracts_codex_usage_from_completed_response() {
+        let sse = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":{\"output_text\":\"hello\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"total_tokens\":13,\"input_tokens_details\":{\"cached_tokens\":4}}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let response = {
+            let mut parser = ResponsesSseParser::default();
+            for line in sse.lines() {
+                parser.process_line(line, None);
+            }
+            parser.finish().unwrap()
+        };
+
+        assert_eq!(response.message.display_text(), "hello");
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.source, "provider");
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, Some(3));
+        assert_eq!(usage.total_tokens, Some(13));
+        assert_eq!(usage.cache_read_tokens, 4);
     }
 
     #[test]
