@@ -53,11 +53,22 @@ In the primary local clone, `origin` should point to Codeberg and `github` shoul
 
 ## Release assets
 
-Build and package the Linux x86_64 asset locally after validation:
+Build and package the Linux x86_64 assets locally after validation:
+
+```bash
+cargo build --release
+scripts/package-linux.sh v0.4.19
+```
+
+The script writes assets to `dist/`:
 
 ```text
-ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz
-ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256
+ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz
+ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz.sha256
+ferrum_0.4.19_amd64.deb
+ferrum_0.4.19_amd64.deb.sha256
+ferrum-0.4.19-1.x86_64.rpm
+ferrum-0.4.19-1.x86_64.rpm.sha256
 ```
 
 The tarball includes:
@@ -69,18 +80,31 @@ LICENSE
 docs/ferrum.1
 ```
 
-Manual packaging:
+The Debian and RPM packages install:
+
+```text
+/usr/bin/ferrum
+/usr/share/doc/ferrum/README.md
+/usr/share/doc/ferrum/LICENSE
+/usr/share/man/man1/ferrum.1.gz  # Debian
+/usr/share/man/man1/ferrum.1     # RPM
+```
+
+RPM packaging requires `cargo-generate-rpm`:
 
 ```bash
-version=v0.4.19
-target=x86_64-unknown-linux-gnu
-package="ferrum-${version}-${target}"
-mkdir -p "$package/docs"
-cp target/release/ferrum "$package/"
-cp README.md LICENSE "$package/"
-cp docs/ferrum.1 "$package/docs/"
-tar -czf "${package}.tar.gz" "$package"
-sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
+cargo install cargo-generate-rpm
+```
+
+Verify local packages:
+
+```bash
+cd dist
+sha256sum -c ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum_0.4.19_amd64.deb.sha256
+sha256sum -c ferrum-0.4.19-1.x86_64.rpm.sha256
+dpkg-deb --info ferrum_0.4.19_amd64.deb
+dpkg-deb --contents ferrum_0.4.19_amd64.deb | head
 ```
 
 ## Codeberg release
@@ -99,12 +123,13 @@ Upload release assets:
 
 ```bash
 version=v0.4.19
-target=x86_64-unknown-linux-gnu
-package="ferrum-${version}-${target}"
-
 tea releases assets create "$version" \
-  "${package}.tar.gz" \
-  "${package}.tar.gz.sha256" \
+  dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz \
+  dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256 \
+  dist/ferrum_${version#v}_amd64.deb \
+  dist/ferrum_${version#v}_amd64.deb.sha256 \
+  dist/ferrum-${version#v}-1.x86_64.rpm \
+  dist/ferrum-${version#v}-1.x86_64.rpm.sha256 \
   --repo ominiverdi/ferrum
 ```
 
@@ -114,14 +139,25 @@ Verify Codeberg assets:
 
 ```bash
 version=v0.4.19
+plain_version=${version#v}
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 mkdir -p /tmp/ferrum-codeberg-release-check
 cd /tmp/ferrum-codeberg-release-check
-curl -fsSLO "https://codeberg.org/ominiverdi/ferrum/releases/download/${version}/${package}.tar.gz"
-curl -fsSLO "https://codeberg.org/ominiverdi/ferrum/releases/download/${version}/${package}.tar.gz.sha256"
+for file in \
+  "${package}.tar.gz" \
+  "${package}.tar.gz.sha256" \
+  "ferrum_${plain_version}_amd64.deb" \
+  "ferrum_${plain_version}_amd64.deb.sha256" \
+  "ferrum-${plain_version}-1.x86_64.rpm" \
+  "ferrum-${plain_version}-1.x86_64.rpm.sha256"; do
+  curl -fsSLO "https://codeberg.org/ominiverdi/ferrum/releases/download/${version}/${file}"
+done
 sha256sum -c "${package}.tar.gz.sha256"
+sha256sum -c "ferrum_${plain_version}_amd64.deb.sha256"
+sha256sum -c "ferrum-${plain_version}-1.x86_64.rpm.sha256"
 tar -tzf "${package}.tar.gz" | head
+dpkg-deb --info "ferrum_${plain_version}_amd64.deb" | head
 ```
 
 ## Verify GitHub mirror release
@@ -132,19 +168,40 @@ After the GitHub workflow completes:
 gh release view "$version" --repo ominiverdi/ferrum --json tagName,isDraft,assets,url
 mkdir -p /tmp/ferrum-github-release-check
 cd /tmp/ferrum-github-release-check
-gh release download "$version" --repo ominiverdi/ferrum --pattern '*.tar.gz' --pattern '*.sha256'
+gh release download "$version" --repo ominiverdi/ferrum --pattern '*.tar.gz' --pattern '*.deb' --pattern '*.rpm' --pattern '*.sha256'
 sha256sum -c ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum_${version#v}_amd64.deb.sha256
+sha256sum -c ferrum-${version#v}-1.x86_64.rpm.sha256
 ```
-
 ## Install docs
 
-Release notes should include Codeberg primary install commands:
+Release notes should include Codeberg primary install commands.
+
+Tarball:
 
 ```bash
 curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv ferrum-v0.4.19-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
 ferrum --help
 ```
+
+Debian/Ubuntu:
+
+```bash
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum_0.4.19_amd64.deb
+sudo apt install ./ferrum_0.4.19_amd64.deb
+ferrum --help
+```
+
+Fedora/RHEL/openSUSE:
+
+```bash
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-0.4.19-1.x86_64.rpm
+sudo dnf install ./ferrum-0.4.19-1.x86_64.rpm
+ferrum --help
+```
+
+Use `sudo zypper install ./ferrum-0.4.19-1.x86_64.rpm` on openSUSE.
 
 From source, use Cargo:
 
