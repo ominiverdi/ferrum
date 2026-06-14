@@ -25,6 +25,8 @@ use std::{
 pub struct OpenAiCompatProvider {
     api_key_env: Option<String>,
     base_url: String,
+    streaming: bool,
+    stream_usage: bool,
     client: Client,
 }
 
@@ -36,10 +38,17 @@ fn metrics_enabled() -> bool {
 }
 
 impl OpenAiCompatProvider {
-    pub fn new(api_key_env: Option<String>, base_url: String) -> Self {
+    pub fn new(
+        api_key_env: Option<String>,
+        base_url: String,
+        streaming: bool,
+        stream_usage: bool,
+    ) -> Self {
         Self {
             api_key_env,
             base_url: base_url.trim_end_matches('/').to_string(),
+            streaming,
+            stream_usage,
             client: Client::new(),
         }
     }
@@ -70,6 +79,7 @@ impl Provider for OpenAiCompatProvider {
                 },
                 reasoning_effort: thinking.as_openai(),
                 stream: false,
+                stream_options: None,
             };
 
             let mut http_request = self
@@ -101,6 +111,82 @@ impl Provider for OpenAiCompatProvider {
                 message: chat_response_to_message(message),
                 usage,
             })
+        })
+    }
+
+    fn complete_streaming<'a>(
+        &'a self,
+        model: &'a str,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+        thinking: ThinkingLevel,
+        on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
+        if !self.streaming {
+            return self.complete(model, messages, tools, thinking);
+        }
+        Box::pin(async move {
+            let api_key = self
+                .api_key_env
+                .as_ref()
+                .map(|name| env::var(name).with_context(|| format!("{name} is not set")))
+                .transpose()?;
+            let request = ChatRequest {
+                model,
+                messages: messages.iter().map(ChatMessage::from_message).collect(),
+                tools: openai_tools(tools),
+                tool_choice: if tools.is_empty() { None } else { Some("auto") },
+                reasoning_effort: thinking.as_openai(),
+                stream: true,
+                stream_options: self.stream_usage.then_some(ChatStreamOptions {
+                    include_usage: true,
+                }),
+            };
+
+            let mut http_request = self
+                .client
+                .post(format!("{}/chat/completions", self.base_url));
+            if let Some(api_key) = api_key {
+                http_request = http_request.bearer_auth(api_key);
+            }
+            let response = http_request
+                .json(&request)
+                .send()
+                .await
+                .context("OpenAI-compatible streaming request failed")?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = response
+                    .text()
+                    .await
+                    .context("failed to read provider error response")?;
+                anyhow::bail!("OpenAI-compatible provider returned {status}: {text}");
+            }
+
+            let mut parser = ChatSseParser::default();
+            let mut buffer = String::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                if cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    anyhow::bail!("aborted");
+                }
+                let chunk = chunk.context("failed to read OpenAI-compatible stream")?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(index) = buffer.find('\n') {
+                    let line = buffer[..index].trim_end_matches('\r').to_string();
+                    buffer.drain(..=index);
+                    parser.process_line(&line, Some(on_event));
+                }
+            }
+            if !buffer.is_empty() {
+                let line = buffer.trim_end_matches('\r').to_string();
+                parser.process_line(&line, Some(on_event));
+            }
+            parser.finish()
         })
     }
 }
@@ -293,6 +379,13 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<ChatStreamOptions>,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -522,6 +615,137 @@ fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Message {
         role: Role::Assistant,
         content,
         usage: None,
+    }
+}
+
+#[derive(Default)]
+struct ChatSseParser {
+    output: String,
+    thinking: String,
+    tool_calls: Vec<ChatStreamToolCall>,
+    usage: Option<TokenUsage>,
+}
+
+#[derive(Default)]
+struct ChatStreamToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl ChatSseParser {
+    fn process_line(
+        &mut self,
+        line: &str,
+        mut on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) {
+        let Some(data) = line.strip_prefix("data: ") else {
+            return;
+        };
+        if data == "[DONE]" {
+            return;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
+        };
+        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
+            if let Ok(parsed) = serde_json::from_value::<OpenAiUsage>(usage.clone()) {
+                self.usage = Some(parsed.to_token_usage());
+            }
+        }
+        for choice in event
+            .get("choices")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+        {
+            let Some(delta) = choice.get("delta") else {
+                continue;
+            };
+            if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
+                self.output.push_str(text);
+                if let Some(on_event) = on_event.as_deref_mut() {
+                    on_event(StreamEvent::TextDelta(text.to_string()));
+                }
+            }
+            if let Some(text) = delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
+                .and_then(|value| value.as_str())
+            {
+                self.thinking.push_str(text);
+                if let Some(on_event) = on_event.as_deref_mut() {
+                    on_event(StreamEvent::ThinkingDelta(text.to_string()));
+                }
+            }
+            for tool_call in delta
+                .get("tool_calls")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+            {
+                let index = tool_call
+                    .get("index")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(self.tool_calls.len() as u64) as usize;
+                while self.tool_calls.len() <= index {
+                    self.tool_calls.push(ChatStreamToolCall::default());
+                }
+                let current = &mut self.tool_calls[index];
+                if let Some(id) = tool_call.get("id").and_then(|value| value.as_str()) {
+                    current.id = id.to_string();
+                }
+                if let Some(function) = tool_call.get("function") {
+                    if let Some(name) = function.get("name").and_then(|value| value.as_str()) {
+                        current.name.push_str(name);
+                    }
+                    if let Some(arguments) =
+                        function.get("arguments").and_then(|value| value.as_str())
+                    {
+                        current.arguments.push_str(arguments);
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Result<ProviderResponse> {
+        let mut content = Vec::new();
+        if !self.thinking.trim().is_empty() {
+            content.push(ContentBlock::Thinking {
+                text: self.thinking.trim().to_string(),
+                signature: None,
+            });
+        }
+        if !self.output.is_empty() {
+            content.push(ContentBlock::Text { text: self.output });
+        }
+        for call in self.tool_calls {
+            if call.name.is_empty() {
+                continue;
+            }
+            let input = serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+            content.push(ContentBlock::ToolUse {
+                id: if call.id.is_empty() {
+                    format!("call_{}", content.len())
+                } else {
+                    call.id
+                },
+                name: call.name,
+                input,
+            });
+        }
+        if content.is_empty() {
+            anyhow::bail!("OpenAI-compatible stream produced no message content");
+        }
+        Ok(ProviderResponse {
+            message: Message {
+                role: Role::Assistant,
+                content,
+                usage: None,
+            },
+            usage: self.usage,
+        })
     }
 }
 
@@ -1011,6 +1235,70 @@ mod tests {
         let chat = ChatMessage::from_message(&message);
         assert_eq!(chat.role, "user");
         assert_eq!(chat.content, "hello");
+    }
+
+    #[test]
+    fn extracts_chat_stream_usage() {
+        let mut parser = ChatSseParser::default();
+        parser.process_line(r#"data: {"choices":[{"delta":{"content":"hel"}}]}"#, None);
+        parser.process_line(r#"data: {"choices":[{"delta":{"content":"lo"}}]}"#, None);
+        parser.process_line(
+            r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13,"prompt_tokens_details":{"cached_tokens":4}}}"#,
+            None,
+        );
+
+        let response = parser.finish().unwrap();
+
+        assert_eq!(response.message.display_text(), "hello");
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.source, "provider");
+        assert_eq!(usage.input_tokens, Some(10));
+        assert_eq!(usage.output_tokens, Some(3));
+        assert_eq!(usage.total_tokens, Some(13));
+        assert_eq!(usage.cache_read_tokens, 4);
+    }
+
+    #[test]
+    fn extracts_chat_stream_tool_call() {
+        let mut parser = ChatSseParser::default();
+        parser.process_line(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\"pa"}}]}}]}"#,
+            None,
+        );
+        parser.process_line(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"Cargo.toml\"}"}}]}}]}"#,
+            None,
+        );
+
+        let response = parser.finish().unwrap();
+
+        let Some(ContentBlock::ToolUse { id, name, input }) = response.message.content.first()
+        else {
+            panic!("missing tool call");
+        };
+        assert_eq!(id, "call_1");
+        assert_eq!(name, "read");
+        assert_eq!(input["path"], "Cargo.toml");
+    }
+
+    #[test]
+    fn serializes_chat_stream_options() {
+        let request = ChatRequest {
+            model: "m",
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            reasoning_effort: None,
+            stream: true,
+            stream_options: Some(ChatStreamOptions {
+                include_usage: true,
+            }),
+        };
+
+        let json = serde_json::to_value(request).unwrap();
+
+        assert_eq!(json["stream"], true);
+        assert_eq!(json["stream_options"]["include_usage"], true);
     }
 
     #[test]

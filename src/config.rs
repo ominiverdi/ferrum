@@ -166,6 +166,8 @@ pub enum ProviderConfig {
     OpenAiCompat {
         api_key_env: Option<String>,
         base_url: String,
+        streaming: bool,
+        stream_usage: bool,
     },
     OpenAiCodex {
         base_url: String,
@@ -180,6 +182,8 @@ pub struct ProviderDefinition {
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
     pub default_model: Option<String>,
+    pub streaming: Option<bool>,
+    pub stream_usage: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -513,6 +517,8 @@ fn provider_from_definition(
                 .base_url
                 .clone()
                 .with_context(|| format!("providers.{name}.base_url is required"))?,
+            streaming: definition.streaming.unwrap_or(true),
+            stream_usage: definition.stream_usage.unwrap_or(true),
         }),
         "openai-codex" => Ok(ProviderConfig::OpenAiCodex {
             base_url: definition
@@ -532,6 +538,8 @@ fn legacy_provider_from_name(name: &str, config_dir: &std::path::Path) -> Result
             api_key_env: Some("OPENAI_API_KEY".to_string()),
             base_url: env::var("OPENAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            streaming: true,
+            stream_usage: true,
         }),
         "openai-codex" => Ok(ProviderConfig::OpenAiCodex {
             base_url: env::var("OPENAI_CODEX_BASE_URL")

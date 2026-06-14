@@ -137,6 +137,7 @@ pub async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
         ProviderConfig::OpenAiCompat {
             api_key_env,
             base_url,
+            ..
         } => {
             let url = format!("{}/models", base_url.trim_end_matches('/'));
             let mut request = Client::builder()
@@ -189,9 +190,13 @@ pub fn from_config(config: &ProviderConfig) -> Box<dyn Provider> {
         ProviderConfig::OpenAiCompat {
             api_key_env,
             base_url,
+            streaming,
+            stream_usage,
         } => Box::new(openai::OpenAiCompatProvider::new(
             api_key_env.clone(),
             base_url.clone(),
+            *streaming,
+            *stream_usage,
         )),
         ProviderConfig::OpenAiCodex {
             base_url,
