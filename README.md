@@ -42,8 +42,11 @@ Download the latest release asset from Codeberg.
 
 ```bash
 curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv ferrum-v0.4.19-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/
+sudo install -Dm755 ferrum-v0.4.19-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.4.19-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+sudo mandb 2>/dev/null || true
 ferrum --help
+man ferrum
 ```
 
 Optional checksum verification:

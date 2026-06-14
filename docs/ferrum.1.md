@@ -233,12 +233,15 @@ configuration directory.
 
 ## Release binary
 
-Download the release tarball from Codeberg, extract it, and install the binary:
+Download the release tarball from Codeberg, extract it, and install the binary and man page:
 
 ```sh
 curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.4.19/ferrum-v0.4.19-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo install -Dm755 ferrum-v0.4.19-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.4.19-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+sudo mandb 2>/dev/null || true
 ferrum --help
+man ferrum
 ```
 
 Optional checksum verification:
@@ -262,11 +265,11 @@ ferrum --help
 
 ## System-wide man page
 
-If the release or source checkout includes **docs/ferrum.1**, install it with:
+If a release tarball was extracted, the main install command above installs the included man page. From a source checkout, install **docs/ferrum.1** with:
 
 ```sh
 sudo install -Dm644 docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
-mandb 2>/dev/null || true
+sudo mandb 2>/dev/null || true
 man ferrum
 ```
 
