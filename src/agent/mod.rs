@@ -2031,20 +2031,13 @@ impl AgentState {
             });
         }
 
-        let summary = match self
-            .generate_compaction_summary(config, to_summarize, custom_instructions)
-            .await
-        {
-            Ok(summary) if !summary.trim().is_empty() => summary,
-            Ok(_) => anyhow::bail!("compaction summary was empty"),
-            Err(error) if force => {
-                eprintln!(
-                    "[session] model compaction failed: {error}; using local fallback summary"
-                );
-                local_compaction_summary(to_summarize, custom_instructions)
-            }
-            Err(error) => return Err(error).context("model compaction failed"),
-        };
+        let summary = compaction_summary_or_fallback(
+            self.generate_compaction_summary(config, to_summarize, custom_instructions)
+                .await,
+            to_summarize,
+            custom_instructions,
+            force,
+        )?;
 
         let summary_message = messages::Message::text(
             messages::Role::System,
@@ -2848,6 +2841,44 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn forced_compaction_uses_fallback_for_empty_model_summary() {
+        let messages = vec![messages::Message::text(messages::Role::User, "old context")];
+
+        let summary =
+            compaction_summary_or_fallback(Ok("   ".to_string()), &messages, None, true).unwrap();
+
+        assert!(summary.contains("## Goal"));
+        assert!(summary.contains("local fallback summary"));
+        assert!(summary.contains("old context"));
+    }
+
+    #[test]
+    fn manual_compaction_still_reports_empty_model_summary() {
+        let messages = vec![messages::Message::text(messages::Role::User, "old context")];
+
+        let error =
+            compaction_summary_or_fallback(Ok("".to_string()), &messages, None, false).unwrap_err();
+
+        assert_eq!(error.to_string(), "compaction summary was empty");
+    }
+
+    #[test]
+    fn forced_compaction_uses_fallback_for_model_error() {
+        let messages = vec![messages::Message::text(messages::Role::User, "old context")];
+
+        let summary = compaction_summary_or_fallback(
+            Err(anyhow::anyhow!("provider failed")),
+            &messages,
+            Some("token plans"),
+            true,
+        )
+        .unwrap();
+
+        assert!(summary.contains("local fallback summary"));
+        assert!(summary.contains("User compaction focus: token plans"));
+    }
+
+    #[test]
     fn compaction_split_drops_orphan_tool_results_from_recent_context() {
         let messages = vec![
             messages::Message::text(messages::Role::User, "old question"),
@@ -3055,6 +3086,29 @@ Keep each section concise. Preserve exact file paths, function names, commands, 
         prompt.push_str(instructions.trim());
     }
     prompt
+}
+
+fn compaction_summary_or_fallback(
+    generated: Result<String>,
+    messages: &[messages::Message],
+    custom_instructions: Option<&str>,
+    force: bool,
+) -> Result<String> {
+    match generated {
+        Ok(summary) if !summary.trim().is_empty() => Ok(summary),
+        Ok(_) if force => {
+            eprintln!(
+                "[session] model compaction returned an empty summary; using local fallback summary"
+            );
+            Ok(local_compaction_summary(messages, custom_instructions))
+        }
+        Ok(_) => anyhow::bail!("compaction summary was empty"),
+        Err(error) if force => {
+            eprintln!("[session] model compaction failed: {error}; using local fallback summary");
+            Ok(local_compaction_summary(messages, custom_instructions))
+        }
+        Err(error) => Err(error).context("model compaction failed"),
+    }
 }
 
 fn local_compaction_summary(
