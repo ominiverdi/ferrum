@@ -12,6 +12,9 @@ use anyhow::Result;
 use serde_json::json;
 use std::{path::Path, time::Duration};
 
+const DEFAULT_BASH_TIMEOUT_SECONDS: u64 = 30;
+const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
+
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
@@ -44,13 +47,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "bash".to_string(),
-            description: "Run focused bash commands in the current working directory with a timeout. Prefer find/grep/ls tools for broad filesystem exploration; if using shell find/grep, exclude .git, target, and node_modules."
+            description: "Run focused bash commands in the current working directory with a timeout. Prefer find/grep/ls tools for broad filesystem exploration; if using shell find/grep, exclude .git, target, and node_modules. Use nohup with redirected logs for background jobs or commands that should outlive the tool call."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
-                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 120 }
+                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": MAX_BASH_TIMEOUT_SECONDS }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -155,7 +158,12 @@ pub async fn execute(name: &str, input: &serde_json::Value, cwd: &Path) -> Resul
             let timeout = input
                 .get("timeout_seconds")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(30);
+                .unwrap_or(DEFAULT_BASH_TIMEOUT_SECONDS);
+            if timeout > MAX_BASH_TIMEOUT_SECONDS {
+                anyhow::bail!(
+                    "bash timeout_seconds must be <= {MAX_BASH_TIMEOUT_SECONDS}, got {timeout}"
+                );
+            }
             let output = bash::run(command, cwd, Duration::from_secs(timeout)).await?;
             Ok(format!(
                 "status: {:?}\ntimed_out: {}\nstdout:\n{}\nstderr:\n{}",
@@ -222,4 +230,39 @@ fn required_str<'a>(input: &'a serde_json::Value, key: &str) -> Result<&'a str> 
         .get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing required string field: {key}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bash_schema_allows_ten_minute_timeout() {
+        let bash = definitions()
+            .into_iter()
+            .find(|tool| tool.name == "bash")
+            .unwrap();
+
+        assert_eq!(
+            bash.input_schema["properties"]["timeout_seconds"]["maximum"],
+            MAX_BASH_TIMEOUT_SECONDS
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_rejects_timeout_above_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = serde_json::json!({
+            "command": "true",
+            "timeout_seconds": MAX_BASH_TIMEOUT_SECONDS + 1,
+        });
+
+        let error = execute("bash", &input, temp.path()).await.unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("bash timeout_seconds must be <=")
+        );
+    }
 }
