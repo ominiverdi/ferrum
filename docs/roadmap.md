@@ -58,6 +58,12 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
   - better automatic continuation after compaction/retry events
   - JSON/RPC benchmark traces for fair cross-agent tool-event scoring
 
+### Background tasks
+- Explore model-owned background tasks as a future substrate for independent agentic work.
+- Start with passive monitors that run bounded checks, write durable task events, and inject those events into the active session for user/model visibility.
+- Avoid hidden token spend and autonomous mutation until task permissions, budgets, and audit trails are designed.
+- See `docs/background-tasks.md`.
+
 ### Core tools
 - Improve `read` rendering for large files with clearer line ranges and truncation notices.
 - Improve `edit` failure diagnostics for duplicate or non-unique replacements.
