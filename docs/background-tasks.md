@@ -37,6 +37,36 @@ The model should be able to start a task without the user learning a new slash c
 
 A first version should observe and report. It should not independently spend tokens or mutate files unless that behavior is explicitly authorized.
 
+## Related prior art: OpenClaw
+
+OpenClaw has a more mature version of this problem space, built around its Gateway rather than the local interactive harness alone. The local clone inspected at `~/tmp/openclaw` shows several relevant mechanisms.
+
+Documented behavior:
+
+- `docs/automation/cron-jobs.md` describes a Gateway scheduler. Cron jobs persist in shared SQLite state, wake agents at scheduled times, and create background task records for all cron executions.
+- `docs/automation/tasks.md` describes background tasks as an activity ledger, not a scheduler. It tracks ACP runs, subagent spawns, isolated cron executions, CLI operations, and media-generation jobs.
+- Task records move through `queued -> running -> terminal`, where terminal statuses include `succeeded`, `failed`, `timed_out`, `cancelled`, and `lost`.
+- OpenClaw distinguishes task notification policies: `done_only`, `state_changes`, and `silent`.
+- Completion is push-driven. The docs explicitly say status polling loops are usually the wrong shape; detached work can notify directly or wake the requester session/heartbeat.
+- Standing orders combine ongoing instructions with scheduled or continuous triggers. The docs include a continuous monitoring example with health checks, escalation rules, and bounded retry behavior.
+
+Code-level findings:
+
+- `src/tasks/task-registry.types.ts` defines the task ledger shape: runtime, owner/requester session keys, child session, status, delivery status, notify policy, timestamps, progress summary, terminal summary, and terminal outcome.
+- `src/tasks/task-executor-policy.ts` formats pushed messages such as `Background task started: ...`, `Background task update: ...`, and blocked follow-up messages.
+- `src/agents/subagent-system-prompt.ts` instructs spawned subagents to avoid polling loops. Subagent results auto-announce back to the parent; if required completions have not arrived, the parent should call `sessions_yield` to end the turn and wait for completion events as user messages.
+- `src/agents/embedded-agent-runner/run/attempt.async-tasks.ts` waits for completion-required async tasks by polling the task registry internally until terminal state, timeout, or abort. This polling is runtime-owned, not model-authored shell polling.
+
+Implications for Ferrum:
+
+- The idea is valid; OpenClaw has converged on a similar separation between scheduler, task ledger, delivery, and agent sessions.
+- Ferrum should avoid model-authored polling loops and prefer pushed task events that become session-visible.
+- A task ledger should be separate from scheduling. Monitors or cron-like triggers decide when work runs; task records describe what happened.
+- Event delivery should be explicit and auditable, with notification policies rather than unconditional session spam.
+- `sessions_yield` is a useful concept to remember if Ferrum later supports model-owned child/background sessions: the model can voluntarily end the current turn and wait for runtime-pushed completion events instead of polling.
+
+OpenClaw is larger and Gateway-oriented; Ferrum should not copy the architecture wholesale. The useful lesson is the shape: durable task registry, push-driven completion, visible event delivery, bounded autonomous work, and no hidden infinite polling loops.
+
 ## Possible levels
 
 ### Level 1: passive monitors

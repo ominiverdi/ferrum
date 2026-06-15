@@ -61,6 +61,7 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 ### Background tasks
 - Explore model-owned background tasks as a future substrate for independent agentic work.
 - Start with passive monitors that run bounded checks, write durable task events, and inject those events into the active session for user/model visibility.
+- Use OpenClaw's Gateway/task-ledger design as prior art: separate scheduling from task records, prefer push-driven completion over model polling, and support notification policies.
 - Avoid hidden token spend and autonomous mutation until task permissions, budgets, and audit trails are designed.
 - See `docs/background-tasks.md`.
 
