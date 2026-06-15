@@ -393,7 +393,7 @@ pub async fn run_interactive(
                 if let Some((name, args)) = parse_skill_invocation(input) {
                     match state.expand_skill_prompt(name, args.as_deref()) {
                         Ok(prompt) => match state.run_turn(prompt, config, true).await {
-                            Ok(()) => println!(),
+                            Ok(()) => render_prompt_separator(),
                             Err(error) => eprintln!("Error: {error}"),
                         },
                         Err(error) => eprintln!("Error: {error}"),
@@ -462,7 +462,7 @@ pub async fn run_interactive(
                     }
                 }
                 match state.run_turn(prompt, config, true).await {
-                    Ok(()) => println!(),
+                    Ok(()) => render_prompt_separator(),
                     Err(error) => {
                         eprintln!("Error: {error}");
                         continue;
@@ -749,6 +749,7 @@ impl Drop for ActiveTurnAbort {
 struct LiveRenderState {
     thinking_started: bool,
     text_started: bool,
+    text_ended_with_newline: bool,
 }
 
 impl LiveRenderState {
@@ -768,8 +769,17 @@ impl LiveRenderState {
                         print!("\r\n\r\n------\r\n");
                     }
                 }
+                self.text_ended_with_newline = delta.ends_with('\n');
                 print_raw_mode_text(&delta);
             }
+        }
+        io::stdout().flush()?;
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<()> {
+        if self.text_started && !self.text_ended_with_newline {
+            println!();
         }
         io::stdout().flush()?;
         Ok(())
@@ -778,6 +788,23 @@ impl LiveRenderState {
 
 fn print_raw_mode_text(text: &str) {
     print!("{}", text.replace('\n', "\r\n"));
+}
+
+fn render_turn_separator() {
+    println!();
+    println!("------");
+}
+
+fn render_status_notice(message: &str) {
+    println!();
+    println!("------");
+    println!("{message}");
+    println!("------");
+}
+
+fn render_prompt_separator() {
+    println!();
+    println!("------");
 }
 
 fn render_assistant_response(response: &messages::Message, interactive: bool) -> Result<()> {
@@ -1295,7 +1322,11 @@ impl AgentState {
                 }
             }
         } else {
-            self.maybe_warn_context_pressure(stats.estimated_tokens, config.max_context_tokens);
+            self.maybe_warn_context_pressure(
+                stats.estimated_tokens,
+                config.max_context_tokens,
+                interactive,
+            );
         }
 
         let images = std::mem::take(&mut self.pending_images);
@@ -1308,7 +1339,7 @@ impl AgentState {
         self.messages.push(user);
 
         if interactive {
-            println!("\n------");
+            render_turn_separator();
             io::stdout().flush()?;
         }
 
@@ -1338,7 +1369,7 @@ impl AgentState {
         let force_final_reason = loop {
             model_request_index += 1;
             if interactive && model_request_index > 1 {
-                println!("\n------");
+                render_turn_separator();
                 io::stdout().flush()?;
             }
             let mut abort = ActiveTurnAbort::start(interactive);
@@ -1428,6 +1459,9 @@ impl AgentState {
             if metrics_enabled {
                 emit_model_metrics_end(model_request_index, started.elapsed(), &response);
             }
+            if interactive {
+                live_render.finish()?;
+            }
             if !interactive || !live_render.text_started {
                 render_assistant_response(&response, interactive)?;
             }
@@ -1449,6 +1483,7 @@ impl AgentState {
                 self.maybe_warn_context_pressure(
                     self.stats().estimated_tokens,
                     config.max_context_tokens,
+                    interactive,
                 );
                 return Ok(());
             }
@@ -1547,7 +1582,11 @@ impl AgentState {
         render_assistant_response(&final_response, interactive)?;
         self.session.append_message(&final_response)?;
         self.messages.push(final_response);
-        self.maybe_warn_context_pressure(self.stats().estimated_tokens, config.max_context_tokens);
+        self.maybe_warn_context_pressure(
+            self.stats().estimated_tokens,
+            config.max_context_tokens,
+            interactive,
+        );
         Ok(())
     }
 
@@ -1817,7 +1856,12 @@ impl AgentState {
         }
     }
 
-    fn maybe_warn_context_pressure(&mut self, estimated_tokens: usize, max_context_tokens: usize) {
+    fn maybe_warn_context_pressure(
+        &mut self,
+        estimated_tokens: usize,
+        max_context_tokens: usize,
+        interactive: bool,
+    ) {
         let percent = context_usage_percent(estimated_tokens, max_context_tokens);
         let Some(bucket) = context_warning_bucket(percent) else {
             self.last_context_warning_bucket = None;
@@ -1830,10 +1874,12 @@ impl AgentState {
             return;
         }
 
-        eprintln!(
-            "{}",
-            context_pressure_message(percent, estimated_tokens, max_context_tokens)
-        );
+        let message = context_pressure_message(percent, estimated_tokens, max_context_tokens);
+        if interactive {
+            render_status_notice(&message);
+        } else {
+            eprintln!("{message}");
+        }
         self.last_context_warning_bucket = Some(bucket);
     }
 
