@@ -104,6 +104,18 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_owned_words(prefix, &self.skill_names)));
         }
+        if let Some(prefix) = command_before.strip_prefix("/skill ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_owned_words(prefix, &self.skill_names)));
+        }
+        if let Some(prefix) = command_before.strip_prefix("/session ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, session_words())));
+        }
+        if let Some(prefix) = command_before.strip_prefix("/history ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, history_words())));
+        }
         if let Some(prefix) = command_before.strip_prefix("/sessions ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, sessions_words())));
@@ -131,6 +143,10 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, mcp_words())));
         }
+        if let Some(prefix) = command_before.strip_prefix("/colors ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, color_words())));
+        }
         if let Some(prefix) = command_before.strip_prefix("/usage ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, usage_words())));
@@ -151,6 +167,7 @@ impl FerrumLineHelper {
         let mut command_hints = HashMap::new();
         command_hints.insert("/image", " <path>");
         command_hints.insert("/image-paste", "");
+        command_hints.insert("/paste-image", "");
         command_hints.insert("/session", " tail [n]");
         command_hints.insert("/history", " search <pattern>");
         command_hints.insert("/sessions", " pick | del | new");
@@ -225,8 +242,20 @@ fn provider_command_words(config: &Config) -> Vec<String> {
     names
 }
 
+fn session_words() -> &'static [&'static str] {
+    &["tail"]
+}
+
+fn history_words() -> &'static [&'static str] {
+    &["search"]
+}
+
 fn sessions_words() -> &'static [&'static str] {
     &["pick", "del", "new"]
+}
+
+fn color_words() -> &'static [&'static str] {
+    &["auto", "on", "off"]
 }
 
 fn thinking_words() -> &'static [&'static str] {
@@ -238,7 +267,7 @@ fn diff_mode_words() -> &'static [&'static str] {
 }
 
 fn mcp_words() -> &'static [&'static str] {
-    &["on", "off", "status"]
+    &["on", "off", "status", "list"]
 }
 
 fn usage_words() -> &'static [&'static str] {
@@ -2914,6 +2943,36 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn completes_known_subcommands_and_modes() {
+        let temp = tempfile::tempdir().unwrap();
+        let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
+        let history = DefaultHistory::default();
+        let ctx = rustyline::Context::new(&history);
+
+        assert_completion(&helper, &ctx, "/session t", "tail");
+        assert_completion(&helper, &ctx, "/history s", "search");
+        assert_completion(&helper, &ctx, "/colors a", "auto");
+        assert_completion(&helper, &ctx, "/mcp l", "list");
+    }
+
+    #[test]
+    fn completes_skill_space_invocation() {
+        let temp = tempfile::tempdir().unwrap();
+        let skill = skills::Skill {
+            name: "ferrum-test".to_string(),
+            description: "test skill".to_string(),
+            path: temp.path().join("SKILL.md"),
+            dir: temp.path().to_path_buf(),
+        };
+        let helper = FerrumLineHelper::new(&[skill], &test_config(temp.path().to_path_buf()));
+        let history = DefaultHistory::default();
+        let ctx = rustyline::Context::new(&history);
+
+        assert_completion(&helper, &ctx, "/skill ferr", "ferrum-test");
+        assert_completion(&helper, &ctx, "/skill:ferr", "ferrum-test");
+    }
+
+    #[test]
     fn does_not_insert_command_hint_after_trailing_space() {
         let temp = tempfile::tempdir().unwrap();
         let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
@@ -3101,6 +3160,18 @@ mod context_pressure_tests {
         assert_eq!(state.cwd, cwd);
         assert!(state.session.path().exists());
         assert!(state.session.path().starts_with(config.sessions_dir()));
+    }
+
+    fn assert_completion(
+        helper: &FerrumLineHelper,
+        ctx: &rustyline::Context<'_>,
+        line: &str,
+        expected: &str,
+    ) {
+        let (_start, candidates) = helper.complete(line, line.len(), ctx).unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].replacement, expected);
     }
 
     fn test_config(config_dir: std::path::PathBuf) -> Config {
