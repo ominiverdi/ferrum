@@ -64,19 +64,27 @@ Slash commands:
 - `/help`
 - `/version`
 - `/session`
+- `/session tail [n]`
+- `/history search <regex>`
+- `/title [text]`
 - `/sessions`
-- `/sessions <number|id-prefix|path>`
 - `/sessions pick`
+- `/sessions del`
 - `/sessions new`
 - `/model [name]`
 - `/models`
+- `/usage [day|week|month]`
 - `/provider [name]`
 - `/providers`
+- `/mcp [on|off|status|list]`
+- `/colors [auto|on|off]`
 - `/thinking [off|minimal|low|medium|high|xhigh]`
+- `/diff [unified|compact|full|words|side_by_side]`
 - `/skills`
 - `/skill:<name> [args]`
 - `/skill <name> [args]`
 - `/image <path>`
+- `/image-paste`
 - `/paste-image`
 - `/compact`
 
@@ -92,9 +100,9 @@ Session resume:
 - `ferrum --resume` resumes the latest JSONL session for the current directory.
 - `ferrum --resume <path|id-prefix>` resumes a specific JSONL session.
 - `ferrum --session <path|id-prefix>` opens a specific JSONL session.
-- `/sessions` lists current-directory sessions with bracket numbers.
-- `/sessions 2` opens entry `[2]` from the last list.
+- `/sessions` lists current-directory sessions.
 - `/sessions pick` provides a lightweight numbered picker with text filtering.
+- `/sessions del` provides a deletion picker.
 - `/sessions new` starts a fresh session.
 
 ## Configuration

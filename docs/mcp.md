@@ -19,9 +19,10 @@ Interactive:
 /mcp on
 /mcp off
 /mcp status
+/mcp list
 ```
 
-`/mcp status` shows configured servers after any `--mcp <server...>` narrowing, exposed MCP tools, total tools, and schema bytes before any `--tools` or `[tools]` narrowing for a model turn.
+`/mcp status` and `/mcp list` show configured servers after any `--mcp <server...>` narrowing, exposed MCP tools, total tools, and schema bytes before any `--tools` or `[tools]` narrowing for a model turn.
 
 ## Supported
 

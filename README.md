@@ -191,7 +191,10 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 
 ```text
 /help
+/version
 /session
+/session tail [n]
+/history search <regex>
 /title [text]
 /sessions
 /sessions pick
@@ -202,15 +205,19 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /usage [day|week|month]
 /provider [name]
 /providers
-/thinking [level]
+/mcp [on|off|status|list]
+/thinking [off|minimal|low|medium|high|xhigh]
 /diff [unified|compact|full|words|side_by_side]
 /colors [auto|on|off]
 /image <path>
 /image-paste
+/paste-image
 /skills
+/skill <name> [args]
 /skill:<name> [args]
 /compact
 /quit
+/exit
 ```
 
 Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/skill:`, and `/image` paths.

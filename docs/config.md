@@ -234,6 +234,7 @@ Interactive:
 /mcp on
 /mcp off
 /mcp status
+/mcp list
 ```
 
 When MCP is off, Ferrum does not start configured MCP servers and does not expose MCP tool schemas to the model. Native tools remain available.

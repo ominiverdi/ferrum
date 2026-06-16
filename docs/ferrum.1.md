@@ -125,14 +125,20 @@ Common slash commands:
 **/session**
 : Show current session information.
 
+**/session tail** [N]
+: Show recent user/assistant message previews.
+
+**/history search** REGEX
+: Search active and archived session history.
+
 **/sessions**
 : List recent sessions.
 
-**/sessions** REF
-: Open a session by number, id prefix, or path.
-
 **/sessions pick**
 : Open an interactive session picker.
+
+**/sessions del**
+: Open an interactive session deletion picker.
 
 **/sessions new**
 : Start a new session.
@@ -152,7 +158,7 @@ Common slash commands:
 **/providers**
 : List configured providers.
 
-**/mcp** on|off|status
+**/mcp** on|off|status|list
 : Manage MCP server availability for the current session.
 
 **/thinking** LEVEL
@@ -161,8 +167,17 @@ Common slash commands:
 **/diff** MODE
 : Set diff display mode.
 
+**/colors** MODE
+: Set color mode.
+
+**/usage** [day|week|month]
+: Show token usage summary.
+
 **/skills**
 : List discovered skills.
+
+**/skill** NAME [ARGS]
+: Load a skill.
 
 **/skill:**NAME [ARGS]
 : Load a skill.
@@ -170,10 +185,16 @@ Common slash commands:
 **/image** PATH
 : Attach an image.
 
+**/image-paste**
+: Attach an image from the clipboard.
+
+**/paste-image**
+: Attach an image from the clipboard.
+
 **/compact**
 : Ask the model to compact session context.
 
-**/quit**
+**/quit**, **/exit**
 : Exit Ferrum.
 
 Shell shortcuts:

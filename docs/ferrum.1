@@ -136,14 +136,20 @@ Show Ferrum version.
 \f[B]/session\f[R]
 Show current session information.
 .TP
+\f[B]/session tail\f[R] [N]
+Show recent user/assistant message previews.
+.TP
+\f[B]/history search\f[R] REGEX
+Search active and archived session history.
+.TP
 \f[B]/sessions\f[R]
 List recent sessions.
 .TP
-\f[B]/sessions\f[R] REF
-Open a session by number, id prefix, or path.
-.TP
 \f[B]/sessions pick\f[R]
 Open an interactive session picker.
+.TP
+\f[B]/sessions del\f[R]
+Open an interactive session deletion picker.
 .TP
 \f[B]/sessions new\f[R]
 Start a new session.
@@ -163,7 +169,7 @@ Switch provider.
 \f[B]/providers\f[R]
 List configured providers.
 .TP
-\f[B]/mcp\f[R] on|off|status
+\f[B]/mcp\f[R] on|off|status|list
 Manage MCP server availability for the current session.
 .TP
 \f[B]/thinking\f[R] LEVEL
@@ -172,8 +178,17 @@ Set thinking level.
 \f[B]/diff\f[R] MODE
 Set diff display mode.
 .TP
+\f[B]/colors\f[R] MODE
+Set color mode.
+.TP
+\f[B]/usage\f[R] [day|week|month]
+Show token usage summary.
+.TP
 \f[B]/skills\f[R]
 List discovered skills.
+.TP
+\f[B]/skill\f[R] NAME [ARGS]
+Load a skill.
 .TP
 \f[B]/skill:\f[R]NAME [ARGS]
 Load a skill.
@@ -181,10 +196,16 @@ Load a skill.
 \f[B]/image\f[R] PATH
 Attach an image.
 .TP
+\f[B]/image-paste\f[R]
+Attach an image from the clipboard.
+.TP
+\f[B]/paste-image\f[R]
+Attach an image from the clipboard.
+.TP
 \f[B]/compact\f[R]
 Ask the model to compact session context.
 .TP
-\f[B]/quit\f[R]
+\f[B]/quit\f[R], \f[B]/exit\f[R]
 Exit Ferrum.
 .PP
 Shell shortcuts:
