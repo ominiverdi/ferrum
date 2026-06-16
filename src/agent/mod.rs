@@ -74,9 +74,13 @@ impl Hinter for FerrumLineHelper {
         if pos != line.len() {
             return None;
         }
+        if line.chars().last().is_some_and(char::is_whitespace) {
+            return None;
+        }
+        let command = line.trim_start();
         self.command_hints
             .iter()
-            .find_map(|(prefix, hint)| line.trim_end().eq(*prefix).then(|| (*hint).to_string()))
+            .find_map(|(prefix, hint)| command.eq(*prefix).then(|| (*hint).to_string()))
     }
 }
 
@@ -90,45 +94,53 @@ impl Completer for FerrumLineHelper {
         _ctx: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
         let before = &line[..pos];
-        if let Some(prefix) = before.strip_prefix("/image ") {
+        let leading_spaces = before.len() - before.trim_start().len();
+        let command_before = &before[leading_spaces..];
+        if let Some(prefix) = command_before.strip_prefix("/image ") {
             let start = pos - prefix.len();
             return Ok((start, complete_path_candidates(prefix)));
         }
-        if let Some(prefix) = before.strip_prefix("/skill:") {
+        if let Some(prefix) = command_before.strip_prefix("/skill:") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_owned_words(prefix, &self.skill_names)));
         }
-        if let Some(prefix) = before.strip_prefix("/model ") {
+        if let Some(prefix) = command_before.strip_prefix("/sessions ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, sessions_words())));
+        }
+        if let Some(prefix) = command_before.strip_prefix("/model ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_owned_words(prefix, &self.model_names)));
         }
-        if let Some(prefix) = before.strip_prefix("/provider ") {
+        if let Some(prefix) = command_before.strip_prefix("/provider ") {
             let start = pos - prefix.len();
             return Ok((
                 start,
                 complete_from_owned_words(prefix, &self.provider_names),
             ));
         }
-        if let Some(prefix) = before.strip_prefix("/thinking ") {
+        if let Some(prefix) = command_before.strip_prefix("/thinking ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, thinking_words())));
         }
-        if let Some(prefix) = before.strip_prefix("/diff ") {
+        if let Some(prefix) = command_before.strip_prefix("/diff ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, diff_mode_words())));
         }
-        if let Some(prefix) = before.strip_prefix("/mcp ") {
+        if let Some(prefix) = command_before.strip_prefix("/mcp ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, mcp_words())));
         }
-        if let Some(prefix) = before.strip_prefix("/usage ") {
+        if let Some(prefix) = command_before.strip_prefix("/usage ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, usage_words())));
         }
-        if before.starts_with('/') {
-            let token = before.split_whitespace().next().unwrap_or(before);
-            let start = before.rfind('/').unwrap_or(0);
-            return Ok((start, complete_from_words(token, slash_command_words())));
+        if command_before.starts_with('/') && !command_before.chars().any(char::is_whitespace) {
+            let start = leading_spaces + command_before.rfind('/').unwrap_or(0);
+            return Ok((
+                start,
+                complete_from_words(command_before, slash_command_words()),
+            ));
         }
         Ok((pos, Vec::new()))
     }
@@ -211,6 +223,10 @@ fn provider_command_words(config: &Config) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+fn sessions_words() -> &'static [&'static str] {
+    &["pick", "del", "new"]
 }
 
 fn thinking_words() -> &'static [&'static str] {
@@ -2881,6 +2897,47 @@ fn context_pressure_message(
 #[cfg(test)]
 mod context_pressure_tests {
     use super::*;
+
+    #[test]
+    fn completes_sessions_subcommands() {
+        let temp = tempfile::tempdir().unwrap();
+        let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
+        let history = DefaultHistory::default();
+        let ctx = rustyline::Context::new(&history);
+
+        let line = " /sessions p";
+        let (start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+
+        assert_eq!(start, line.len() - 1);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].replacement, "pick");
+    }
+
+    #[test]
+    fn does_not_insert_command_hint_after_trailing_space() {
+        let temp = tempfile::tempdir().unwrap();
+        let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
+        let history = DefaultHistory::default();
+        let ctx = rustyline::Context::new(&history);
+
+        assert_eq!(
+            helper.hint("/sessions", "/sessions".len(), &ctx),
+            Some(" pick | del | new".to_string())
+        );
+        assert_eq!(helper.hint("/sessions ", "/sessions ".len(), &ctx), None);
+    }
+
+    #[test]
+    fn slash_command_completion_ignores_arguments_without_specific_completer() {
+        let temp = tempfile::tempdir().unwrap();
+        let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
+        let history = DefaultHistory::default();
+        let ctx = rustyline::Context::new(&history);
+
+        let (_start, candidates) = helper.complete("/title p", "/title p".len(), &ctx).unwrap();
+
+        assert!(candidates.is_empty());
+    }
 
     #[test]
     fn buckets_context_pressure_by_cadence() {
