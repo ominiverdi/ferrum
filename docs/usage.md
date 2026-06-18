@@ -81,8 +81,9 @@ context_source: usage+estimate
 
 `context_source` values:
 
-- `usage+estimate`: last assistant usage plus estimates for messages after that response
+- `usage+estimate`: last post-compaction assistant usage plus estimates for messages after that response
 - `estimate`: no usage-bearing assistant response is available, so Ferrum used local estimates only
+- `estimate_after_compaction`: the latest available provider usage is before the latest compaction boundary, so Ferrum used local estimates for current context pressure
 
 This is intentionally separate from `/usage` totals:
 
@@ -90,3 +91,5 @@ This is intentionally separate from `/usage` totals:
 - `/session` tracks the current active context size for compaction pressure
 
 These numbers do not need to match exactly.
+
+See [`context-accounting.md`](context-accounting.md) for the design note on how compaction boundaries affect current-context token accounting.

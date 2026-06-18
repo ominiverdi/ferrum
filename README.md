@@ -237,6 +237,7 @@ Shell shortcuts:
 - Tools: [`docs/tools.md`](docs/tools.md)
 - Sessions: [`docs/sessions.md`](docs/sessions.md)
 - Usage accounting: [`docs/usage.md`](docs/usage.md)
+- Context accounting and compaction boundaries: [`docs/context-accounting.md`](docs/context-accounting.md)
 - Images: [`docs/images.md`](docs/images.md)
 - MCP: [`docs/mcp.md`](docs/mcp.md)
 - ACP investigation: [`docs/acp.md`](docs/acp.md)

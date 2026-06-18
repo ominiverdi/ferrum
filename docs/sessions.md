@@ -129,3 +129,5 @@ Ferrum warns as context usage rises: 75-84% every 5%, 85-91% every 3%, and 92-94
 `/compact` summarizes older conversation with the current provider model, keeps recent context, and stores a `compaction` entry. The summary is loaded back as system context when the session is resumed.
 
 Manual compaction is skipped when there is nothing old enough to summarize or when the resulting context would not be smaller. Automatic compaction can force a fallback local summary if model-generated compaction fails while the session is over budget. Ferrum avoids retaining orphan tool results whose matching tool calls were summarized away.
+
+See [`context-accounting.md`](context-accounting.md) for the design note on compaction boundaries and stale provider usage.

@@ -1884,10 +1884,12 @@ impl AgentState {
         let (estimated_tokens, context_source) = context_tokens_from_usage(&self.messages)
             .map(|tokens| (tokens, ContextTokenSource::UsagePlusEstimate))
             .unwrap_or_else(|| {
-                (
-                    estimated_tokens_for_messages(&self.messages),
-                    ContextTokenSource::Estimate,
-                )
+                let source = if has_compaction_boundary(&self.messages) {
+                    ContextTokenSource::EstimateAfterCompaction
+                } else {
+                    ContextTokenSource::Estimate
+                };
+                (estimated_tokens_for_messages(&self.messages), source)
             });
         let file_bytes = fs::metadata(self.session.path())
             .map(|metadata| metadata.len())
@@ -2143,7 +2145,7 @@ impl AgentState {
 
         let mut compacted_messages = system_messages;
         compacted_messages.push(summary_message.clone());
-        compacted_messages.extend(recent.iter().cloned());
+        compacted_messages.extend(recent.iter().cloned().map(clear_message_usage));
         let after_tokens = estimated_tokens_for_messages(&compacted_messages);
 
         if !force && after_tokens >= before_tokens {
@@ -3023,6 +3025,105 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn context_usage_ignores_pre_compaction_assistant_usage() {
+        let messages = vec![
+            assistant_with_usage(237_351),
+            messages::Message::text(
+                messages::Role::System,
+                "The conversation history before this point was compacted into the following summary:\n\n<summary>short</summary>",
+            ),
+            messages::Message::text(messages::Role::User, "recent request"),
+        ];
+
+        assert_eq!(context_tokens_from_usage(&messages), None);
+        assert_eq!(
+            estimated_tokens_for_messages(&messages),
+            messages
+                .iter()
+                .map(estimated_tokens_for_message)
+                .sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn context_usage_uses_post_compaction_assistant_usage() {
+        let messages = vec![
+            assistant_with_usage(237_351),
+            messages::Message::text(
+                messages::Role::System,
+                "The conversation history before this point was compacted into the following summary:\n\n<summary>short</summary>",
+            ),
+            assistant_with_usage(12_000),
+            messages::Message::text(messages::Role::User, "recent request"),
+        ];
+
+        let trailing = estimated_tokens_for_message(messages.last().unwrap());
+        assert_eq!(
+            context_tokens_from_usage(&messages),
+            Some(12_000 + trailing)
+        );
+    }
+
+    #[test]
+    fn loaded_compaction_summary_is_context_boundary() {
+        let messages = vec![
+            assistant_with_usage(237_351),
+            messages::Message::text(
+                messages::Role::System,
+                "Conversation summary from previous compaction:\nshort",
+            ),
+        ];
+
+        assert_eq!(context_tokens_from_usage(&messages), None);
+        assert!(has_compaction_boundary(&messages));
+    }
+
+    #[test]
+    fn estimate_after_compaction_context_source_is_reported() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        state.messages = vec![
+            assistant_with_usage(237_351),
+            messages::Message::text(
+                messages::Role::System,
+                "The conversation history before this point was compacted into the following summary:\n\n<summary>short</summary>",
+            ),
+            messages::Message::text(messages::Role::User, "recent request"),
+        ];
+
+        let stats = state.stats();
+
+        assert_eq!(stats.context_source.as_str(), "estimate_after_compaction");
+        assert_eq!(
+            stats.estimated_tokens,
+            estimated_tokens_for_messages(&state.messages)
+        );
+    }
+
+    #[test]
+    fn clear_message_usage_removes_stale_retained_usage() {
+        let retained = assistant_with_usage(237_351);
+        let cleared = clear_message_usage(retained);
+
+        assert!(cleared.usage.is_none());
+    }
+
+    #[test]
+    fn compacted_retained_messages_do_not_reuse_pre_compaction_usage() {
+        let compacted = vec![
+            messages::Message::text(
+                messages::Role::System,
+                "The conversation history before this point was compacted into the following summary:\n\n<summary>short</summary>",
+            ),
+            clear_message_usage(assistant_with_usage(237_351)),
+            messages::Message::text(messages::Role::User, "recent request"),
+        ];
+
+        assert_eq!(context_tokens_from_usage(&compacted), None);
+    }
+
+    #[test]
     fn buckets_context_pressure_by_cadence() {
         assert_eq!(context_warning_bucket(74), None);
         assert_eq!(context_warning_bucket(75), Some(75));
@@ -3198,6 +3299,23 @@ mod context_pressure_tests {
         assert_eq!(candidates[0].replacement, expected);
     }
 
+    fn assistant_with_usage(total_tokens: u64) -> messages::Message {
+        messages::Message {
+            role: messages::Role::Assistant,
+            content: vec![messages::ContentBlock::Text {
+                text: "assistant response".to_string(),
+            }],
+            usage: Some(messages::TokenUsage {
+                input_tokens: Some(total_tokens.saturating_sub(1)),
+                output_tokens: Some(1),
+                total_tokens: Some(total_tokens),
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                source: "test".to_string(),
+            }),
+        }
+    }
+
     fn test_config(config_dir: std::path::PathBuf) -> Config {
         Config {
             data_dir: config_dir.clone(),
@@ -3263,6 +3381,11 @@ fn message_has_tool_result(message: &messages::Message) -> bool {
         .any(|block| matches!(block, messages::ContentBlock::ToolResult { .. }))
 }
 
+fn clear_message_usage(mut message: messages::Message) -> messages::Message {
+    message.usage = None;
+    message
+}
+
 fn estimated_tokens_for_messages(messages: &[messages::Message]) -> usize {
     messages
         .iter()
@@ -3271,9 +3394,11 @@ fn estimated_tokens_for_messages(messages: &[messages::Message]) -> usize {
 }
 
 fn context_tokens_from_usage(messages: &[messages::Message]) -> Option<usize> {
+    let usage_start = latest_compaction_boundary(messages).map_or(0, |index| index + 1);
     let (index, usage) = messages
         .iter()
         .enumerate()
+        .skip(usage_start)
         .rev()
         .find_map(|(index, message)| {
             matches!(message.role, messages::Role::Assistant)
@@ -3287,6 +3412,29 @@ fn context_tokens_from_usage(messages: &[messages::Message]) -> Option<usize> {
         .map(estimated_tokens_for_message)
         .sum::<usize>();
     Some((usage as usize).saturating_add(trailing))
+}
+
+fn has_compaction_boundary(messages: &[messages::Message]) -> bool {
+    latest_compaction_boundary(messages).is_some()
+}
+
+fn latest_compaction_boundary(messages: &[messages::Message]) -> Option<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| message_is_compaction_summary(message).then_some(index))
+}
+
+fn message_is_compaction_summary(message: &messages::Message) -> bool {
+    matches!(message.role, messages::Role::System)
+        && message.content.iter().any(|block| match block {
+            messages::ContentBlock::Text { text } => {
+                text.starts_with("The conversation history before this point was compacted into the following summary:")
+                    || text.starts_with("Conversation summary from previous compaction:")
+            }
+            _ => false,
+        })
 }
 
 fn estimated_tokens_for_message(message: &messages::Message) -> usize {
@@ -3711,6 +3859,7 @@ fn command_exists(command: &str) -> bool {
 enum ContextTokenSource {
     UsagePlusEstimate,
     Estimate,
+    EstimateAfterCompaction,
 }
 
 impl ContextTokenSource {
@@ -3718,6 +3867,7 @@ impl ContextTokenSource {
         match self {
             Self::UsagePlusEstimate => "usage+estimate",
             Self::Estimate => "estimate",
+            Self::EstimateAfterCompaction => "estimate_after_compaction",
         }
     }
 }
