@@ -64,7 +64,7 @@ Ferrum is a new project, not a compatibility port.
 - MCP stdio bridge.
 - Image input.
 - Agent Skills-style instruction packages.
-- Native tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`.
+- Native tools: `read`, `write`, `edit`, `bash`, `wait`, `grep`, `find`, `ls`.
 
 ## Non-goals for v1
 - Cross-platform support beyond Linux.

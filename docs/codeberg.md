@@ -88,7 +88,7 @@ tea releases ls --repo ominiverdi/ferrum
 Create a release entry and upload assets in one command:
 
 ```bash
-version=v0.4.19
+version=v0.5.0
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 
@@ -104,7 +104,7 @@ tea releases create "$version" \
 If the release already exists and only missing assets need to be uploaded:
 
 ```bash
-version=v0.4.19
+version=v0.5.0
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 
