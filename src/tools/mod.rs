@@ -5,15 +5,21 @@ pub mod grep;
 pub mod ls;
 pub mod path;
 pub mod read;
+pub mod wait;
 pub mod write;
 
 use crate::agent::tools::ToolDefinition;
 use anyhow::Result;
 use serde_json::json;
-use std::{path::Path, time::Duration};
+use std::{
+    path::Path,
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 
 const DEFAULT_BASH_TIMEOUT_SECONDS: u64 = 30;
 const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
+const MAX_WAIT_SECONDS: u64 = 1800;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
@@ -56,6 +62,21 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": MAX_BASH_TIMEOUT_SECONDS }
                 },
                 "required": ["command"],
+                "additionalProperties": false
+            }),
+        },
+        ToolDefinition {
+            name: "wait".to_string(),
+            description: "Wait in the foreground, then run a bash command using the same permissions, timeout, output limits, and process cleanup as the bash tool. Use this for scheduled follow-up checks up to 30 minutes. Esc or Ctrl-C aborts the wait or command."
+                .to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "seconds": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS },
+                    "command": { "type": "string" },
+                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": MAX_BASH_TIMEOUT_SECONDS }
+                },
+                "required": ["seconds", "command"],
                 "additionalProperties": false
             }),
         },
@@ -135,6 +156,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
 }
 
 pub async fn execute(name: &str, input: &serde_json::Value, cwd: &Path) -> Result<String> {
+    execute_with_cancel(name, input, cwd, None, false).await
+}
+
+pub async fn execute_with_cancel(
+    name: &str,
+    input: &serde_json::Value,
+    cwd: &Path,
+    cancel: Option<Arc<AtomicBool>>,
+    progress: bool,
+) -> Result<String> {
     match name {
         "read" => {
             let path = required_str(input, "path")?;
@@ -164,11 +195,40 @@ pub async fn execute(name: &str, input: &serde_json::Value, cwd: &Path) -> Resul
                     "bash timeout_seconds must be <= {MAX_BASH_TIMEOUT_SECONDS}, got {timeout}"
                 );
             }
-            let output = bash::run(command, cwd, Duration::from_secs(timeout)).await?;
-            Ok(format!(
-                "status: {:?}\ntimed_out: {}\nstdout:\n{}\nstderr:\n{}",
-                output.status, output.timed_out, output.stdout, output.stderr
-            ))
+            let output =
+                bash::run_with_cancel(command, cwd, Duration::from_secs(timeout), cancel).await?;
+            Ok(render_bash_output(&output))
+        }
+        "wait" => {
+            let seconds = input
+                .get("seconds")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("missing required integer field: seconds"))?;
+            if seconds == 0 || seconds > MAX_WAIT_SECONDS {
+                anyhow::bail!(
+                    "wait seconds must be between 1 and {MAX_WAIT_SECONDS}, got {seconds}"
+                );
+            }
+            let command = required_str(input, "command")?;
+            let timeout = input
+                .get("timeout_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_BASH_TIMEOUT_SECONDS);
+            if timeout > MAX_BASH_TIMEOUT_SECONDS {
+                anyhow::bail!(
+                    "wait timeout_seconds must be <= {MAX_BASH_TIMEOUT_SECONDS}, got {timeout}"
+                );
+            }
+            let output = wait::run(
+                command,
+                cwd,
+                Duration::from_secs(seconds),
+                Duration::from_secs(timeout),
+                cancel,
+                progress,
+            )
+            .await?;
+            Ok(render_bash_output(&output))
         }
         "write" => {
             let path = required_str(input, "path")?;
@@ -225,6 +285,13 @@ pub async fn execute(name: &str, input: &serde_json::Value, cwd: &Path) -> Resul
     }
 }
 
+fn render_bash_output(output: &bash::BashOutput) -> String {
+    format!(
+        "status: {:?}\ntimed_out: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status, output.timed_out, output.stdout, output.stderr
+    )
+}
+
 fn required_str<'a>(input: &'a serde_json::Value, key: &str) -> Result<&'a str> {
     input
         .get(key)
@@ -247,6 +314,47 @@ mod tests {
             bash.input_schema["properties"]["timeout_seconds"]["maximum"],
             MAX_BASH_TIMEOUT_SECONDS
         );
+    }
+
+    #[test]
+    fn wait_schema_allows_thirty_minute_delay() {
+        let wait = definitions()
+            .into_iter()
+            .find(|tool| tool.name == "wait")
+            .unwrap();
+
+        assert_eq!(
+            wait.input_schema["properties"]["seconds"]["maximum"],
+            MAX_WAIT_SECONDS
+        );
+        assert_eq!(MAX_WAIT_SECONDS, 1800);
+    }
+
+    #[tokio::test]
+    async fn wait_rejects_delay_above_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = serde_json::json!({
+            "seconds": MAX_WAIT_SECONDS + 1,
+            "command": "true",
+        });
+
+        let error = execute("wait", &input, temp.path()).await.unwrap_err();
+
+        assert!(error.to_string().contains("wait seconds must be between"));
+    }
+
+    #[tokio::test]
+    async fn wait_runs_command_after_delay() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = serde_json::json!({
+            "seconds": 1,
+            "command": "printf done",
+            "timeout_seconds": 1,
+        });
+
+        let output = execute("wait", &input, temp.path()).await.unwrap();
+
+        assert!(output.contains("stdout:\ndone"));
     }
 
     #[tokio::test]

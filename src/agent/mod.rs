@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     terminal,
 };
 use rustyline::{
@@ -619,6 +619,7 @@ struct ExecutedToolUse {
     input: serde_json::Value,
     content: String,
     is_error: bool,
+    aborted: bool,
     duration_ms: u128,
 }
 
@@ -749,7 +750,11 @@ impl ActiveTurnAbort {
             while !watcher_stop.load(Ordering::Relaxed) {
                 if event::poll(Duration::from_millis(50)).unwrap_or(false) {
                     match event::read() {
-                        Ok(Event::Key(key)) if key.code == KeyCode::Esc => {
+                        Ok(Event::Key(key))
+                            if key.code == KeyCode::Esc
+                                || key.code == KeyCode::Char('c')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
+                        {
                             watcher_aborted.store(true, Ordering::Relaxed);
                             break;
                         }
@@ -958,13 +963,18 @@ fn resolve_available_tools(
         }
     }
 
-    Ok(tools
+    let mut available = tools
         .into_iter()
         .filter(|tool| {
             let name = tool.name.as_str();
             requested.as_ref().is_none_or(|set| set.contains(name)) && !deny.contains(name)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    let bash_available = available.iter().any(|tool| tool.name == "bash");
+    if !bash_available {
+        available.retain(|tool| tool.name != "wait");
+    }
+    Ok(available)
 }
 
 fn validate_known_tools(
@@ -1537,7 +1547,15 @@ impl AgentState {
                 return Ok(());
             }
 
-            let executed_tools = self.execute_tool_batch(tool_uses).await;
+            let mut tool_abort = ActiveTurnAbort::start(interactive);
+            let executed_tools = self
+                .execute_tool_batch(tool_uses, interactive, Some(tool_abort.token()))
+                .await;
+            tool_abort.stop();
+            if executed_tools.iter().any(|tool| tool.aborted) {
+                println!("aborted");
+                return Ok(());
+            }
             let mut observations = Vec::new();
             for executed in executed_tools {
                 observations.push(ToolObservation::new(
@@ -1729,6 +1747,8 @@ impl AgentState {
     async fn execute_tool_batch(
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
+        interactive: bool,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Vec<ExecutedToolUse> {
         let can_parallelize = tool_uses
             .iter()
@@ -1739,7 +1759,8 @@ impl AgentState {
                 .execute_parallel_builtin_tools(tool_uses, color_mode)
                 .await;
         }
-        self.execute_sequential_tools(tool_uses, color_mode).await
+        self.execute_sequential_tools(tool_uses, color_mode, interactive, cancel)
+            .await
     }
 
     fn is_parallel_safe_builtin_tool(&self, name: &str) -> bool {
@@ -1790,6 +1811,7 @@ impl AgentState {
                         input,
                         content,
                         is_error,
+                        aborted: false,
                         duration_ms: started.elapsed().as_millis(),
                     },
                 )
@@ -1808,6 +1830,7 @@ impl AgentState {
                         input: serde_json::Value::Null,
                         content: format!("parallel tool task failed: {error}"),
                         is_error: true,
+                        aborted: false,
                         duration_ms: 0,
                     },
                 )),
@@ -1827,16 +1850,25 @@ impl AgentState {
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
         color_mode: ColorMode,
+        interactive: bool,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Vec<ExecutedToolUse> {
         let mut results = Vec::new();
         for (id, name, input) in tool_uses {
             eprintln!();
             render_tool_call(&name, &input, self.diff_mode, color_mode);
             let started = Instant::now();
-            let (content, is_error) = match self.execute_tool(&name, &input).await {
-                Ok(output) => (output, false),
-                Err(error) => (error.to_string(), true),
+            let (content, is_error, aborted) = match self
+                .execute_tool(&name, &input, interactive, cancel.clone())
+                .await
+            {
+                Ok(output) => (output, false, false),
+                Err(error) if error.to_string() == "aborted" => ("aborted".to_string(), true, true),
+                Err(error) => (error.to_string(), true, false),
             };
+            if aborted {
+                eprintln!();
+            }
             render_tool_result(&name, &content, is_error);
             let result = ExecutedToolUse {
                 id,
@@ -1844,6 +1876,7 @@ impl AgentState {
                 input,
                 content,
                 is_error,
+                aborted,
                 duration_ms: started.elapsed().as_millis(),
             };
             emit_tool_metrics_if_enabled(&result);
@@ -1852,7 +1885,13 @@ impl AgentState {
         results
     }
 
-    async fn execute_tool(&mut self, name: &str, input: &serde_json::Value) -> Result<String> {
+    async fn execute_tool(
+        &mut self,
+        name: &str,
+        input: &serde_json::Value,
+        interactive: bool,
+        cancel: Option<Arc<AtomicBool>>,
+    ) -> Result<String> {
         if !self.active_tool_names.contains(name) {
             let message = if self.active_tool_names.is_empty() {
                 format!("Tool '{name}' is not available because tools are disabled (--no-tools)")
@@ -1868,7 +1907,7 @@ impl AgentState {
                 }
             }
         }
-        builtin_tools::execute(name, input, &self.cwd).await
+        builtin_tools::execute_with_cancel(name, input, &self.cwd, cancel, interactive).await
     }
 
     fn message_count(&self) -> usize {
@@ -2998,6 +3037,37 @@ mod context_pressure_tests {
         let (_start, candidates) = helper.complete("/title p", "/title p".len(), &ctx).unwrap();
 
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn wait_is_hidden_when_bash_is_denied() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.tools_deny = vec!["bash".to_string()];
+
+        let tools = resolve_available_tools(builtin_tools::definitions(), &config).unwrap();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(!names.contains(&"bash"));
+        assert!(!names.contains(&"wait"));
+    }
+
+    #[test]
+    fn explicit_wait_selection_requires_bash_availability() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.tool_selection = Some(ToolSelection::List(vec!["wait".to_string()]));
+
+        let tools = resolve_available_tools(builtin_tools::definitions(), &config).unwrap();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.is_empty());
     }
 
     #[test]

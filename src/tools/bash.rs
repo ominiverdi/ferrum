@@ -4,6 +4,10 @@ use std::{
     os::unix::process::CommandExt,
     path::Path,
     process::{Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -23,14 +27,28 @@ pub struct BashOutput {
 }
 
 pub async fn run(command: &str, cwd: &Path, timeout: Duration) -> Result<BashOutput> {
+    run_with_cancel(command, cwd, timeout, None).await
+}
+
+pub async fn run_with_cancel(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<BashOutput> {
     let command = command.to_string();
     let cwd = cwd.to_path_buf();
-    task::spawn_blocking(move || run_blocking(&command, &cwd, timeout))
+    task::spawn_blocking(move || run_blocking(&command, &cwd, timeout, cancel))
         .await
         .context("bash worker panicked")?
 }
 
-fn run_blocking(command: &str, cwd: &Path, timeout: Duration) -> Result<BashOutput> {
+fn run_blocking(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<BashOutput> {
     let mut child = Command::new("bash")
         .arg("-lc")
         .arg(command)
@@ -64,41 +82,64 @@ fn run_blocking(command: &str, cwd: &Path, timeout: Duration) -> Result<BashOutp
             });
         }
 
+        if cancel
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
+            return finish_interrupted_child(pid, child, stdout_reader, stderr_reader, "aborted");
+        }
+
         if Instant::now() >= deadline {
-            terminate_process_group(pid);
-            let grace_deadline = Instant::now() + TERMINATE_GRACE;
-            while Instant::now() < grace_deadline {
-                if child
-                    .try_wait()
-                    .context("failed to wait for timed out bash command")?
-                    .is_some()
-                {
-                    break;
-                }
-                thread::sleep(POLL_INTERVAL);
-            }
-            kill_process_group(pid);
-            let _ = child.wait();
-            let stdout = join_reader(stdout_reader)?;
-            let stderr = join_reader(stderr_reader)?;
-            let mut rendered_stderr = String::from_utf8_lossy(&stderr).into_owned();
-            if !rendered_stderr.is_empty() && !rendered_stderr.ends_with('\n') {
-                rendered_stderr.push('\n');
-            }
-            rendered_stderr.push_str(&format!(
-                "command timed out after {}s; killed process group {pid}",
-                timeout.as_secs()
-            ));
-            return Ok(BashOutput {
-                status: None,
-                stdout: truncate_tail("stdout", &String::from_utf8_lossy(&stdout))?,
-                stderr: truncate_tail("stderr", &rendered_stderr)?,
-                timed_out: true,
-            });
+            return finish_interrupted_child(
+                pid,
+                child,
+                stdout_reader,
+                stderr_reader,
+                &format!(
+                    "command timed out after {}s; killed process group {pid}",
+                    timeout.as_secs()
+                ),
+            );
         }
 
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn finish_interrupted_child(
+    pid: u32,
+    mut child: std::process::Child,
+    stdout_reader: thread::JoinHandle<Result<Vec<u8>>>,
+    stderr_reader: thread::JoinHandle<Result<Vec<u8>>>,
+    message: &str,
+) -> Result<BashOutput> {
+    terminate_process_group(pid);
+    let grace_deadline = Instant::now() + TERMINATE_GRACE;
+    while Instant::now() < grace_deadline {
+        if child
+            .try_wait()
+            .context("failed to wait for interrupted bash command")?
+            .is_some()
+        {
+            break;
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    kill_process_group(pid);
+    let _ = child.wait();
+    let stdout = join_reader(stdout_reader)?;
+    let stderr = join_reader(stderr_reader)?;
+    let mut rendered_stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if !rendered_stderr.is_empty() && !rendered_stderr.ends_with('\n') {
+        rendered_stderr.push('\n');
+    }
+    rendered_stderr.push_str(message);
+    Ok(BashOutput {
+        status: None,
+        stdout: truncate_tail("stdout", &String::from_utf8_lossy(&stdout))?,
+        stderr: truncate_tail("stderr", &rendered_stderr)?,
+        timed_out: !message.eq("aborted"),
+    })
 }
 
 fn spawn_reader(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Result<Vec<u8>>> {
@@ -191,6 +232,34 @@ mod tests {
 
         thread::sleep(Duration::from_millis(3500));
         assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_child_process_group() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("child-finished");
+        let command = format!(
+            "sh -c 'sleep 3; touch {}' & wait",
+            shell_quote(marker.to_string_lossy().as_ref())
+        );
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_for_task = Arc::clone(&cancel);
+        let handle = tokio::spawn(async move {
+            run_with_cancel(
+                &command,
+                temp.path(),
+                Duration::from_secs(5),
+                Some(cancel_for_task),
+            )
+            .await
+            .unwrap()
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.store(true, Ordering::Relaxed);
+        let output = handle.await.unwrap();
+        assert!(!output.timed_out);
+        assert!(output.stderr.contains("aborted"));
     }
 
     #[tokio::test]
