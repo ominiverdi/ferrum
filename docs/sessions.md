@@ -82,7 +82,7 @@ Color mode is stored in session metadata too. `/colors <auto|on|off>` appends an
 
 Interactive input supports completion and hints for slash commands, selected command arguments, `/skill:`, and `/image` paths.
 
-The resolved tool list is stored in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
+The resolved tool list is stored in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
 `/session` shows:
 

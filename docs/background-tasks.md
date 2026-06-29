@@ -9,11 +9,12 @@ Ferrum may eventually need a first-class way to run independent agentic work in 
 Today Ferrum has two rough options:
 
 - run a foreground `bash` command with a timeout
+- run a foreground delayed `wait` check, capped at 30 minutes
 - ask the model to create detached `nohup` or system-level automation
 
 Both are useful, but neither is a good long-term model-owned task abstraction.
 
-Foreground commands block the turn and eventually time out. Detached shell scripts survive, but Ferrum does not own their state, logs, lifecycle, permissions, or event delivery. The model can inspect them later only by remembering ad-hoc paths and commands.
+Foreground commands and `wait` calls block the turn and eventually time out or complete. Detached shell scripts survive, but Ferrum does not own their state, logs, lifecycle, permissions, or event delivery. The model can inspect them later only by remembering ad-hoc paths and commands.
 
 ## Goal
 

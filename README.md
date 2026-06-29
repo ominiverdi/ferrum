@@ -29,7 +29,7 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 - OpenAI-compatible providers for remote APIs and local servers
 - Config-backed provider registry
 - Live model listing for supported providers
-- Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`
+- Built-in tools: `read`, `write`, `edit`, `bash`, `wait`, `grep`, `find`, `ls`
 - Tool exposure control with `--tools` and config allow/deny lists
 - Edit diff coloring with `/colors auto|on|off`
 - Interactive completion and hints for slash commands, selected command arguments, `/image` paths, and `/skill:` names
@@ -130,7 +130,7 @@ thinking = "off"
 max_context_tokens = 256000
 
 [tools]
-allow = ["read", "grep", "find", "bash"]
+allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
 
 [providers.openai-codex]
@@ -185,7 +185,7 @@ Supported placeholders:
 
 Do not put secrets in `system.md`. If you override the prompt, keep any runtime metadata and tool guidance you want Ferrum to preserve.
 
-In active interactive turns, `Esc` aborts the current model/tool turn and returns to the prompt.
+In active interactive turns, `Esc` aborts the current model/tool turn and returns to the prompt. `Ctrl-C` also aborts foreground tool execution such as `wait`.
 
 ## Interactive commands
 

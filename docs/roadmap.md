@@ -9,7 +9,7 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 - Print mode with provider-neutral tool loop.
 - JSONL sessions and resume.
 - AGENTS.md context loading.
-- Built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`.
+- Built-in tools: `read`, `write`, `edit`, `bash`, `wait`, `grep`, `find`, `ls`.
 - Safer file/tool behavior: path normalization, exact edit validation, output truncation.
 
 ### v0.3: Interactive, MCP, images
@@ -34,12 +34,13 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 - Plain multiline tool rendering, bounded tool-result previews, session-aware colors, and unified diff-style `edit` rendering.
 - Final no-tools synthesis when the adaptive loop guard or an explicit tool-round cap stops tool use.
 - Lowercase `agents.md` context loading alongside `AGENTS.md`.
-- Core tool hardening for `find`, `grep`, `ls`, and `bash`:
+- Core tool hardening for `find`, `grep`, `ls`, `bash`, and `wait`:
   - `find`: glob patterns, limits, hidden config directories, ignore files, relative paths, noisy-directory skips.
   - `grep`: glob filters, ignore-case, literal search, context lines, limits, hidden files, noisy-directory skips.
   - `ls`: dotfiles, case-insensitive sorting, directory suffixes, entry limits, limit notices.
-  - `bash`: bounded previews with full stdout/stderr saved to temp files when truncated.
-- Tool exposure policy with `--tools`, `[tools] allow`/`deny`, no-tools mode, and session-persistent resolved tool lists.
+  - `bash`: bounded previews with full stdout/stderr saved to temp files when truncated; isolated process groups with whole-tree cleanup on timeout/abort.
+  - `wait`: foreground delayed bash checks up to 30 minutes, with interactive progress and Esc/Ctrl-C abort.
+- Tool exposure policy with `--tools`, `[tools] allow`/`deny`, no-tools mode, and session-visible resolved tool lists that update under the current policy.
 - Model aliases with per-model context budgets, provider model mapping, context-pressure warnings, and 95% automatic compaction.
 - Harness loop hardening:
   - adaptive loop guard for repeated identical tool calls and consecutive tool errors.

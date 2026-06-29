@@ -37,7 +37,7 @@ mcp_enabled = true
 diff_mode = "unified"
 
 [tools]
-allow = ["read", "grep", "find", "bash"]
+allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
 
 [providers.openai-codex]
@@ -260,13 +260,13 @@ Config policy:
 
 ```toml
 [tools]
-allow = ["read", "grep", "find", "bash"]
+allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
 ```
 
-`allow` is optional. When present, it is the maximum allowed tool set. `deny` removes tools from the default or requested set. If `--tools` requests an unknown, denied, or not-allowed tool, Ferrum fails before the model request.
+`allow` is optional. When present, it is the maximum allowed tool set. `deny` removes tools from the default or requested set. If `--tools` requests an unknown, denied, or not-allowed tool, Ferrum fails before the model request. `wait` is available only when `bash` is available.
 
-Ferrum stores the resolved tool list in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
+Ferrum stores the resolved tool list in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
 ### Colors
 

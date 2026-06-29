@@ -6,7 +6,7 @@ Native tools are available by default, then narrowed by `--tools` and `[tools]` 
 
 Interactive mode renders tool calls in a readable multiline format and prints a bounded preview of tool results. Full tool results remain in the model/session context unless the underlying tool output itself was bounded.
 
-For providers that support streaming, Ferrum streams provider events live. If thinking is enabled and the provider returns displayable reasoning text, Ferrum streams that provider-supplied thinking before the assistant answer; it does not synthesize thinking or expose hidden chain-of-thought. Press `Esc` during an active interactive turn to abort the current model/tool turn and return to the prompt.
+For providers that support streaming, Ferrum streams provider events live. If thinking is enabled and the provider returns displayable reasoning text, Ferrum streams that provider-supplied thinking before the assistant answer; it does not synthesize thinking or expose hidden chain-of-thought. Press `Esc` during an active interactive turn to abort the current model/tool turn and return to the prompt. `Ctrl-C` also aborts foreground tool execution such as `wait`.
 
 When a turn continues after tool execution, Ferrum prints a simple separator before the post-tool assistant response.
 
@@ -31,13 +31,13 @@ Config:
 
 ```toml
 [tools]
-allow = ["read", "grep", "find", "bash"]
+allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
 ```
 
 `allow` is optional. When present, it is the maximum allowed tool set. `deny` removes tools from the default or requested set. Ferrum fails before the model request if `--tools` requests an unknown, denied, or not-allowed tool.
 
-Ferrum stores the resolved tool list in session metadata. Resuming or switching sessions restores that session's tool list unless the process was started with an explicit `--tools` override.
+Ferrum stores the resolved tool list in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
 If a provider emits a call for a non-exposed tool, Ferrum returns a tool error such as `Tool 'write' is not available` instead of executing it.
 
@@ -136,7 +136,25 @@ Run a focused bash command in cwd with timeout.
 
 Output includes status, timeout flag, stdout, and stderr. Large output is truncated to a bounded tail. When output is truncated, Ferrum saves the full stream to a temporary file and includes its path in the result.
 
+`bash` runs with stdin closed, stdout/stderr piped, and its own process group. On timeout or abort, Ferrum terminates the whole process group so child processes such as `ssh` or `cloudflared` do not keep consuming the terminal.
+
 For broad filesystem exploration, prefer the native `find`, `grep`, and `ls` tools. If shell `find`/`grep` is necessary, prune noisy directories such as `.git`, `target`, and `node_modules`.
+
+## wait
+
+Wait in the foreground, then run a bash command in cwd using the same execution path as `bash`.
+
+```json
+{
+  "seconds": 240,
+  "command": "date",
+  "timeout_seconds": 30
+}
+```
+
+`seconds` is capped at 30 minutes. `timeout_seconds` has the same cap as `bash`. Interactive mode shows a lightweight progress line during the wait. Press `Esc` or `Ctrl-C` to abort the wait or the command and return to the prompt.
+
+`wait` is foreground-only. It blocks the current Ferrum session while waiting and running, but the result is persisted like any other tool result. It is exposed only when `bash` is available, because it is delayed bash rather than a separate execution capability.
 
 ## grep
 
@@ -217,6 +235,7 @@ Ferrum runs safe read-only built-in tool batches in parallel when all tool calls
 Results are appended in the original model-requested order. Mixed or mutating batches stay sequential, including:
 
 - `bash`
+- `wait`
 - `write`
 - `edit`
 - MCP tools
@@ -224,7 +243,7 @@ Results are appended in the original model-requested order. Mixed or mutating ba
 ## Safety
 
 - Tools run with local user permissions.
-- `write`, `edit`, and `bash` can mutate files.
+- `write`, `edit`, `bash`, and `wait` can mutate files.
 - Ferrum has no per-tool confirmation prompts. Exposed tool calls execute directly in both print and interactive mode.
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 - Secrets must not be written, printed, logged, or committed.

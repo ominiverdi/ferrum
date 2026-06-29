@@ -133,7 +133,7 @@ max_context_tokens = 256000
 thinking = "off"
 
 [tools]
-allow = ["read", "grep", "find", "bash"]
+allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
 
 [providers.openai-codex]
@@ -316,11 +316,11 @@ Config policy:
 
 ```toml
 [tools]
-allow = ["read", "grep", "find", "bash"]
+allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
 ```
 
-`allow` is optional and caps the available tool set. `deny` removes tools. Invalid requested tools fail before the model request. Resolved tool lists are stored in session metadata and restored on resume unless `--tools` is explicitly provided.
+`allow` is optional and caps the available tool set. `deny` removes tools. Invalid requested tools fail before the model request. Resolved tool lists are stored in session metadata for visibility and audit, but resume uses the current process/config policy so new default tools can appear automatically unless limited by policy.
 
 ### `read`
 
@@ -336,7 +336,11 @@ Exact text replacement. Each old text must match exactly once. Multiple non-over
 
 ### `bash`
 
-Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail.
+Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes.
+
+### `wait`
+
+Wait in the foreground, then run a bash command using the same bash execution and cleanup path. The wait duration is capped at 30 minutes. Interactive users can abort with `Esc` or `Ctrl-C`. Exposed only when `bash` is available.
 
 ### `grep`
 
