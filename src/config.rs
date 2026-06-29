@@ -428,13 +428,6 @@ impl Config {
         self.config_dir.join("auth.json")
     }
 
-    pub fn set_tool_selection_from_session(&mut self, tools: Vec<String>) -> Result<()> {
-        let mut tools = validate_tool_name_list(tools)?;
-        upgrade_restored_tool_selection(&mut tools);
-        self.tool_selection = Some(ToolSelection::List(tools));
-        Ok(())
-    }
-
     fn set_mcp_server_allow(&mut self, servers: Vec<String>) -> Result<()> {
         let servers = validate_mcp_server_name_list(servers)?;
         let configured = self
@@ -489,12 +482,6 @@ fn validate_tool_name_list(values: Vec<String>) -> Result<Vec<String>> {
         normalized.push(name.to_string());
     }
     Ok(normalized)
-}
-
-fn upgrade_restored_tool_selection(tools: &mut Vec<String>) {
-    if tools.iter().any(|tool| tool == "bash") && !tools.iter().any(|tool| tool == "wait") {
-        tools.push("wait".to_string());
-    }
 }
 
 fn default_true() -> bool {
@@ -637,43 +624,6 @@ deny = ["bash"]
             Some(ToolSelection::List(vec![
                 "read".to_string(),
                 "grep".to_string()
-            ]))
-        );
-    }
-
-    #[test]
-    fn session_tool_restore_adds_wait_when_bash_was_available() {
-        let dir = TempDir::new().unwrap();
-        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
-
-        config
-            .set_tool_selection_from_session(vec!["read".to_string(), "bash".to_string()])
-            .unwrap();
-
-        assert_eq!(
-            config.tool_selection,
-            Some(ToolSelection::List(vec![
-                "read".to_string(),
-                "bash".to_string(),
-                "wait".to_string(),
-            ]))
-        );
-    }
-
-    #[test]
-    fn session_tool_restore_does_not_add_wait_without_bash() {
-        let dir = TempDir::new().unwrap();
-        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
-
-        config
-            .set_tool_selection_from_session(vec!["read".to_string(), "grep".to_string()])
-            .unwrap();
-
-        assert_eq!(
-            config.tool_selection,
-            Some(ToolSelection::List(vec![
-                "read".to_string(),
-                "grep".to_string(),
             ]))
         );
     }

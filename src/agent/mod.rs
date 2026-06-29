@@ -544,9 +544,9 @@ fn restore_session_preferences(
     path: &Path,
     restore_thinking: bool,
     restore_tools: bool,
-) -> Result<()> {
+) -> Result<Option<Vec<String>>> {
     let Some(info) = session::jsonl::session_info(path)? else {
-        return Ok(());
+        return Ok(None);
     };
     if restore_thinking {
         if let Some(provider) = info.provider.as_deref() {
@@ -565,12 +565,7 @@ fn restore_session_preferences(
     if let Some(color_mode) = info.color_mode.as_deref() {
         config.color_mode = ColorMode::parse(color_mode)?;
     }
-    if restore_tools {
-        if let Some(tools) = info.tools {
-            config.set_tool_selection_from_session(tools)?;
-        }
-    }
-    Ok(())
+    Ok(restore_tools.then_some(info.tools).flatten())
 }
 
 fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
@@ -1249,7 +1244,8 @@ impl AgentState {
                 }
             },
         };
-        restore_session_preferences(config, &path, restore_thinking, restore_tools)?;
+        let _restored_tools =
+            restore_session_preferences(config, &path, restore_thinking, restore_tools)?;
         Self::open_session(config, path)
     }
 
@@ -2024,7 +2020,7 @@ impl AgentState {
             return Ok(());
         }
         self.remove_empty_session()?;
-        restore_session_preferences(config, &path, true, true)?;
+        let _restored_tools = restore_session_preferences(config, &path, true, true)?;
         let next = Self::open_session(config, path)?;
         *self = next;
         print_current_session_header(self)?;
@@ -3037,6 +3033,38 @@ mod context_pressure_tests {
         let (_start, candidates) = helper.complete("/title p", "/title p".len(), &ctx).unwrap();
 
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn restored_session_tools_do_not_limit_new_default_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = session::JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            Some(vec!["read".to_string(), "bash".to_string()]),
+        )
+        .unwrap();
+        session
+            .append_tools(&["read".to_string(), "bash".to_string()])
+            .unwrap();
+        let path = session.path().clone();
+        drop(session);
+        let mut config = test_config(temp.path().to_path_buf());
+
+        let restored = restore_session_preferences(&mut config, &path, true, true).unwrap();
+        let tools = resolve_available_tools(builtin_tools::definitions(), &config).unwrap();
+        let names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(restored, Some(vec!["read".to_string(), "bash".to_string()]));
+        assert_eq!(config.tool_selection, None);
+        assert!(names.contains(&"bash"));
+        assert!(names.contains(&"wait"));
     }
 
     #[test]
