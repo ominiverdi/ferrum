@@ -37,7 +37,7 @@ pub async fn run(
     }
     if progress {
         render_progress(wait, wait);
-        eprintln!();
+        eprint!("\r\n");
     }
     bash::run_with_cancel(command, cwd, timeout, cancel).await
 }

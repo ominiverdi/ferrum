@@ -1543,15 +1543,8 @@ impl AgentState {
                 return Ok(());
             }
 
-            let mut tool_abort = ActiveTurnAbort::start(interactive);
-            let executed_tools = self
-                .execute_tool_batch(tool_uses, interactive, Some(tool_abort.token()))
-                .await;
-            tool_abort.stop();
-            if executed_tools.iter().any(|tool| tool.aborted) {
-                println!("aborted");
-                return Ok(());
-            }
+            let executed_tools = self.execute_tool_batch(tool_uses, interactive).await;
+            let aborted = executed_tools.iter().any(|tool| tool.aborted);
             let mut observations = Vec::new();
             for executed in executed_tools {
                 observations.push(ToolObservation::new(
@@ -1570,6 +1563,10 @@ impl AgentState {
                 };
                 self.session.append_message(&result)?;
                 self.messages.push(result);
+            }
+            if aborted {
+                println!("aborted");
+                return Ok(());
             }
 
             match loop_guard.observe_round(&observations) {
@@ -1744,7 +1741,6 @@ impl AgentState {
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
         interactive: bool,
-        cancel: Option<Arc<AtomicBool>>,
     ) -> Vec<ExecutedToolUse> {
         let can_parallelize = tool_uses
             .iter()
@@ -1755,7 +1751,7 @@ impl AgentState {
                 .execute_parallel_builtin_tools(tool_uses, color_mode)
                 .await;
         }
-        self.execute_sequential_tools(tool_uses, color_mode, interactive, cancel)
+        self.execute_sequential_tools(tool_uses, color_mode, interactive)
             .await
     }
 
@@ -1847,21 +1843,23 @@ impl AgentState {
         tool_uses: Vec<(String, String, serde_json::Value)>,
         color_mode: ColorMode,
         interactive: bool,
-        cancel: Option<Arc<AtomicBool>>,
     ) -> Vec<ExecutedToolUse> {
         let mut results = Vec::new();
         for (id, name, input) in tool_uses {
             eprintln!();
             render_tool_call(&name, &input, self.diff_mode, color_mode);
             let started = Instant::now();
+            let mut abort = ActiveTurnAbort::start(interactive);
+            let token = abort.token();
             let (content, is_error, aborted) = match self
-                .execute_tool(&name, &input, interactive, cancel.clone())
+                .execute_tool(&name, &input, interactive, Some(token))
                 .await
             {
                 Ok(output) => (output, false, false),
                 Err(error) if error.to_string() == "aborted" => ("aborted".to_string(), true, true),
                 Err(error) => (error.to_string(), true, false),
             };
+            abort.stop();
             if aborted {
                 eprintln!();
             }

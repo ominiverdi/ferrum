@@ -926,6 +926,21 @@ fn codex_message_content(message: &Message) -> serde_json::Value {
 }
 
 fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
+    let completed_tool_call_ids = messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(
+                tool_use_id
+                    .split('|')
+                    .next()
+                    .unwrap_or(tool_use_id)
+                    .to_string(),
+            ),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+
     let mut inputs = Vec::new();
     for message in messages {
         if matches!(message.role, Role::System) {
@@ -961,26 +976,28 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     let call_id = id.split('|').next().unwrap_or(id).to_string();
-                    let item_id = id
-                        .split('|')
-                        .nth(1)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("fc_{call_id}"));
-                    inputs.push(ResponsesInput::FunctionCall {
-                        kind: "function_call",
-                        id: item_id,
-                        call_id,
-                        name: name.clone(),
-                        arguments: input.to_string(),
-                    });
-                    emitted_special = true;
+                    if completed_tool_call_ids.contains(&call_id) {
+                        let item_id = id
+                            .split('|')
+                            .nth(1)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("fc_{call_id}"));
+                        inputs.push(ResponsesInput::FunctionCall {
+                            kind: "function_call",
+                            id: item_id,
+                            call_id,
+                            name: name.clone(),
+                            arguments: input.to_string(),
+                        });
+                        emitted_special = true;
+                    }
                 }
                 ContentBlock::Text { .. }
                 | ContentBlock::Image { .. }
                 | ContentBlock::Thinking { .. } => {}
             }
         }
-        if !emitted_special {
+        if !emitted_special && has_codex_message_content(message) {
             let role = match message.role {
                 Role::System => "system",
                 Role::User => "user",
@@ -994,6 +1011,14 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
         }
     }
     inputs
+}
+
+fn has_codex_message_content(message: &Message) -> bool {
+    message.content.iter().any(|block| match block {
+        ContentBlock::Text { text } => !text.is_empty(),
+        ContentBlock::Image { .. } => true,
+        _ => false,
+    })
 }
 
 #[derive(Default)]
@@ -1551,6 +1576,52 @@ mod tests {
             .count();
 
         assert_eq!(tool_calls, 1);
+    }
+
+    #[test]
+    fn skips_codex_tool_call_without_output() {
+        let orphan_call = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1|fc_1".to_string(),
+                name: "wait".to_string(),
+                input: serde_json::json!({"command": "date"}),
+            }],
+            usage: None,
+        };
+        let inputs = codex_inputs(&[orphan_call]);
+
+        assert!(inputs.is_empty());
+    }
+
+    #[test]
+    fn replays_codex_tool_call_with_output() {
+        let tool_call = Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1|fc_1".to_string(),
+                name: "wait".to_string(),
+                input: serde_json::json!({"command": "date"}),
+            }],
+            usage: None,
+        };
+        let tool_result = Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1|fc_1".to_string(),
+                content: "aborted".to_string(),
+                is_error: true,
+            }],
+            usage: None,
+        };
+        let inputs = codex_inputs(&[tool_call, tool_result]);
+        let json = serde_json::to_value(&inputs).unwrap();
+
+        assert_eq!(json[0]["type"], "function_call");
+        assert_eq!(json[0]["call_id"], "call_1");
+        assert_eq!(json[1]["type"], "function_call_output");
+        assert_eq!(json[1]["call_id"], "call_1");
+        assert_eq!(json[1]["output"], "aborted");
     }
 
     #[test]
