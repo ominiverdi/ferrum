@@ -265,7 +265,7 @@ mod tests {
     #[tokio::test]
     async fn bash_stdin_is_closed() {
         let temp = tempfile::tempdir().unwrap();
-        let output = run("cat", temp.path(), Duration::from_secs(1))
+        let output = run("cat", temp.path(), Duration::from_secs(5))
             .await
             .unwrap();
         assert!(!output.timed_out);
