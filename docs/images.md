@@ -63,8 +63,13 @@ If your terminal sends Ctrl+V as a key sequence instead of text, Ferrum attempts
 Ferrum previews images when attaching them:
 
 1. If `chafa` is installed, Ferrum renders a terminal preview.
-2. For pasted data URIs, Ferrum creates a temporary image file for the preview and deletes it afterwards.
-3. If preview rendering is unavailable, Ferrum prints fallback metadata:
+2. On terminals with known pixel-graphics support, Ferrum asks `chafa` for a high-resolution preview first:
+   - Kitty/Ghostty: Kitty graphics protocol
+   - iTerm2: iTerm inline image protocol
+   - foot/mlterm/WezTerm or sixel-marked terminals: sixel output
+3. If high-resolution rendering is unavailable or fails, Ferrum falls back to `chafa` symbol rendering.
+4. For pasted data URIs, Ferrum creates a temporary image file for the preview and deletes it afterwards.
+5. If preview rendering is unavailable, Ferrum prints fallback metadata:
 
 ```text
 [image] ./screenshot.png (image/png, ~12345 bytes, sha256:abc123...)

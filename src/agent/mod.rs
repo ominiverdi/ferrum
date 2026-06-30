@@ -2963,6 +2963,30 @@ mod context_pressure_tests {
     use super::*;
 
     #[test]
+    fn detects_chafa_pixel_formats_for_common_terminals() {
+        assert_eq!(
+            chafa_pixel_format_for_env(Some("xterm-ghostty"), Some("ghostty"), false, false),
+            Some("kitty")
+        );
+        assert_eq!(
+            chafa_pixel_format_for_env(Some("xterm-kitty"), None, true, false),
+            Some("kitty")
+        );
+        assert_eq!(
+            chafa_pixel_format_for_env(None, Some("iTerm.app"), false, false),
+            Some("iterm")
+        );
+        assert_eq!(
+            chafa_pixel_format_for_env(Some("foot"), None, false, false),
+            Some("sixels")
+        );
+        assert_eq!(
+            chafa_pixel_format_for_env(Some("xterm-256color"), None, false, false),
+            None
+        );
+    }
+
+    #[test]
     fn completes_sessions_subcommands() {
         let temp = tempfile::tempdir().unwrap();
         let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
@@ -3900,18 +3924,30 @@ fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
     };
 
     if let Some(path) = preview_path.as_deref() {
-        match Command::new("chafa")
-            .args(["--size", "80x24"])
-            .arg(path)
-            .status()
-        {
-            Ok(status) if status.success() => {
+        if let Some(format) = chafa_pixel_format() {
+            let args = vec![
+                format!("--format={format}"),
+                "--passthrough=auto".to_string(),
+                format!("--size={}", chafa_preview_size(true)),
+                "--scale=max".to_string(),
+            ];
+            if render_chafa_preview(path, &args) {
                 if let Some(path) = temp_path {
                     let _ = fs::remove_file(path);
                 }
                 return;
             }
-            _ => {}
+        }
+
+        let args = vec![
+            "--format=symbols".to_string(),
+            format!("--size={}", chafa_preview_size(false)),
+        ];
+        if render_chafa_preview(path, &args) {
+            if let Some(path) = temp_path {
+                let _ = fs::remove_file(path);
+            }
+            return;
         }
     }
 
@@ -3926,6 +3962,60 @@ fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
         _ => "image",
     };
     eprintln!("[image] {source} ({mime_type}, ~{approx_bytes} bytes, sha256:{short_hash})");
+}
+
+fn render_chafa_preview(path: &Path, args: &[String]) -> bool {
+    Command::new("chafa")
+        .args(args)
+        .arg(path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn chafa_preview_size(pixel_graphics: bool) -> String {
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let max_cols = if pixel_graphics { 120 } else { 80 };
+    let max_rows = if pixel_graphics { 40 } else { 24 };
+    let cols = cols.clamp(40, max_cols);
+    let rows = rows.saturating_sub(6).clamp(12, max_rows);
+    format!("{cols}x{rows}")
+}
+
+fn chafa_pixel_format() -> Option<&'static str> {
+    chafa_pixel_format_for_env(
+        std::env::var("TERM").ok().as_deref(),
+        std::env::var("TERM_PROGRAM").ok().as_deref(),
+        std::env::var_os("KITTY_WINDOW_ID").is_some(),
+        std::env::var_os("WEZTERM_EXECUTABLE").is_some(),
+    )
+}
+
+fn chafa_pixel_format_for_env(
+    term: Option<&str>,
+    term_program: Option<&str>,
+    has_kitty_window_id: bool,
+    has_wezterm: bool,
+) -> Option<&'static str> {
+    let term = term.unwrap_or_default().to_ascii_lowercase();
+    let term_program = term_program.unwrap_or_default().to_ascii_lowercase();
+
+    if has_kitty_window_id
+        || term.contains("kitty")
+        || term.contains("ghostty")
+        || term_program.contains("ghostty")
+    {
+        return Some("kitty");
+    }
+
+    if term_program.contains("iterm") {
+        return Some("iterm");
+    }
+
+    if has_wezterm || term.contains("sixel") || term.contains("foot") || term.contains("mlterm") {
+        return Some("sixels");
+    }
+
+    None
 }
 
 fn write_temp_image(image: &messages::ContentBlock) -> Result<PathBuf> {
