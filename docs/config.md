@@ -323,19 +323,22 @@ diff_meta = "dim"
 
 Missing `colors.toml` uses the defaults above. Invalid or unknown entries are ignored with a warning.
 
-Supported color values:
+Supported color values include ANSI-style names, bright ANSI-style names, xterm 256-color table names, xterm 256-color indexes, RGB hex values, and simple styles:
 
 ```text
 red, green, yellow, blue, magenta, cyan, white, black, gray
 bright-red, bright-green, bright-blue, ...
+Orange3, DeepSkyBlue1, LightSkyBlue3, SpringGreen1, Grey70, ...
 bold, dim, italic, underline
-bold cyan, dim gray
+bold cyan, bold LightSkyBlue3
 #ffaa00
 0..255
 default|normal|none|off
 ```
 
-The palette colors UI chrome and interactive display only. Tool outputs stored in context remain unmodified.
+Xterm names are matched case-insensitively. Spaces, dashes, and underscores are ignored, and `gray`/`grey` are equivalent. Duplicate xterm names map to the first matching xterm index; use `0..255` for exact selection.
+
+The palette colors UI chrome and interactive display only. Tool outputs stored in context remain unmodified. See [`docs/colors.md`](colors.md) for all palette keys and supported color values.
 
 ### diff_mode
 

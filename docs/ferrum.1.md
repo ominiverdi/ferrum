@@ -238,10 +238,40 @@ api_key_env = "EXAMPLE_API_KEY"
 default_model = "example-model"
 ```
 
+Ferrum supports a small semantic UI color palette. Set the color mode in
+**config.toml**:
+
+```toml
+color = "auto"
+```
+
+Supported modes are **auto**, **on**, and **off**. Override palette entries in
+**~/.config/ferrum/colors.toml**:
+
+```toml
+prompt = "DeepSkyBlue1"
+tool = "bold LightSkyBlue3"
+error = "OrangeRed1"
+diff_added = "SpringGreen1"
+diff_removed = "DeepPink1"
+```
+
+Supported color values include ANSI-style names such as **red**, **green**, and
+**cyan**, bright names such as **bright-red**, xterm 256-color table names such
+as **Orange3** and **DeepSkyBlue1**, styles such as **bold** and **dim**, RGB
+hex values such as **#ffaa00**, and xterm 256-color indexes such as **245**.
+Xterm names are matched case-insensitively. Spaces, dashes, and underscores are
+ignored, and **gray**/**grey** are equivalent. Duplicate xterm names map to the
+first matching xterm index; use numeric indexes for exact selection. See
+**docs/colors.md** for all palette keys and color values.
+
 # FILES
 
 **~/.config/ferrum/config.toml**
 : User configuration.
+
+**~/.config/ferrum/colors.toml**
+: Optional semantic UI color palette.
 
 **~/.local/share/ferrum/sessions/**
 : JSONL session store, unless data directory is overridden by XDG variables.

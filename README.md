@@ -31,7 +31,7 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 - Live model listing for supported providers
 - Built-in tools: `read`, `write`, `edit`, `bash`, `wait`, `grep`, `find`, `ls`
 - Tool exposure control with `--tools` and config allow/deny lists
-- Edit diff coloring with `/colors auto|on|off`
+- Semantic UI color palette with `~/.config/ferrum/colors.toml` and `/colors auto|on|off`
 - Interactive completion and hints for slash commands, selected command arguments, `/image` paths, and `/skill:` names
 
 ## Install
@@ -157,6 +157,20 @@ ferrum login openai
 
 OpenAI-compatible providers use environment-backed keys. Do not put secret values in `config.toml`.
 
+## Colors
+
+Ferrum supports a small semantic UI color palette. Use `color = "auto"` in `config.toml` to colorize only on terminals, and override palette entries in `~/.config/ferrum/colors.toml`:
+
+```toml
+prompt = "DeepSkyBlue1"
+tool = "bold LightSkyBlue3"
+error = "OrangeRed1"
+diff_added = "SpringGreen1"
+diff_removed = "DeepPink1"
+```
+
+See [`docs/colors.md`](docs/colors.md) for all palette keys and supported color values. Ferrum accepts xterm 256-color table names such as `DeepSkyBlue1`, `Orange3`, and `SpringGreen1`.
+
 ## System prompt override
 
 Ferrum has an embedded default system prompt. To fully override it, create:
@@ -233,6 +247,7 @@ Shell shortcuts:
 
 - Architecture/spec: [`docs/spec.md`](docs/spec.md)
 - Configuration: [`docs/config.md`](docs/config.md)
+- Colors: [`docs/colors.md`](docs/colors.md)
 - Providers: [`docs/providers.md`](docs/providers.md)
 - Tools: [`docs/tools.md`](docs/tools.md)
 - Sessions: [`docs/sessions.md`](docs/sessions.md)

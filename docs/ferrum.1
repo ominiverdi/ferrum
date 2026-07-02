@@ -25,11 +25,11 @@ ferrum - small Rust-native coding agent for Linux
 .PP
 \f[B]ferrum\f[R] \f[B]-p\f[R] PROMPT OPTIONS
 .PP
-\f[B]ferrum\f[R] \f[B]--resume\f[R] [REF] OPTIONS
+\f[B]ferrum\f[R] \f[B]\[en]resume\f[R] [REF] OPTIONS
 .PP
-\f[B]ferrum\f[R] \f[B]--continue\f[R] OPTIONS
+\f[B]ferrum\f[R] \f[B]\[en]continue\f[R] OPTIONS
 .PP
-\f[B]ferrum\f[R] \f[B]--session\f[R] REF OPTIONS
+\f[B]ferrum\f[R] \f[B]\[en]session\f[R] REF OPTIONS
 .PP
 \f[B]ferrum\f[R] \f[B]login\f[R] PROVIDER
 .SH DESCRIPTION
@@ -53,73 +53,73 @@ Run \f[B]ferrum\f[R] without \f[B]-p\f[R] to start an interactive
 session.
 .TP
 \f[B]Print mode\f[R]
-Use \f[B]-p\f[R], \f[B]--print\f[R] to run one prompt and print the
+Use \f[B]-p\f[R], \f[B]\[en]print\f[R] to run one prompt and print the
 answer.
 .TP
 \f[B]Resume mode\f[R]
-Use \f[B]--resume\f[R] to resume the latest session for the current
+Use \f[B]\[en]resume\f[R] to resume the latest session for the current
 directory.
 If no matching session exists, Ferrum starts a new session.
 .TP
 \f[B]Continue mode\f[R]
-Use \f[B]--continue\f[R] as an alias for continuing the latest session
-for the current directory.
+Use \f[B]\[en]continue\f[R] as an alias for continuing the latest
+session for the current directory.
 .TP
 \f[B]Named or explicit session mode\f[R]
-Use \f[B]--session\f[R] REF or \f[B]--resume\f[R] REF to open a session
-by JSONL path or id prefix.
+Use \f[B]\[en]session\f[R] REF or \f[B]\[en]resume\f[R] REF to open a
+session by JSONL path or id prefix.
 .SH OPTIONS
 .TP
-\f[B]-p\f[R], \f[B]--print\f[R] PROMPT
+\f[B]-p\f[R], \f[B]\[en]print\f[R] PROMPT
 Run a single prompt and print the answer.
 If stdin is piped, Ferrum appends it to the prompt.
 .TP
-\f[B]--provider\f[R] PROVIDER
+\f[B]\[en]provider\f[R] PROVIDER
 Override the provider configured in config.toml.
 .TP
-\f[B]--model\f[R] MODEL
+\f[B]\[en]model\f[R] MODEL
 Override the model configured in config.toml.
 .TP
-\f[B]--thinking\f[R] LEVEL
+\f[B]\[en]thinking\f[R] LEVEL
 Override thinking level.
 Supported values are \f[B]off\f[R], \f[B]minimal\f[R], \f[B]low\f[R],
 \f[B]medium\f[R], \f[B]high\f[R], and \f[B]xhigh\f[R].
 .TP
-\f[B]--title\f[R] TITLE
+\f[B]\[en]title\f[R] TITLE
 Set the session title.
 .TP
-\f[B]--image\f[R] PATH
+\f[B]\[en]image\f[R] PATH
 Attach a local image file.
 Repeatable.
 Supported formats are png, jpg, jpeg, and webp.
 .TP
-\f[B]--mcp\f[R] [SERVER ...]
+\f[B]\[en]mcp\f[R] [SERVER \&...]
 Enable configured MCP servers for this process.
 If server names are provided, only those servers are enabled.
 .TP
-\f[B]--no-mcp\f[R]
+\f[B]\[en]no-mcp\f[R]
 Disable MCP servers for this process.
 .TP
-\f[B]--no-tools\f[R]
+\f[B]\[en]no-tools\f[R]
 Disable all tools for this process.
 .TP
-\f[B]--tools\f[R] TOOL ...
+\f[B]\[en]tools\f[R] TOOL \&...
 Expose only the listed tools to the model.
 .TP
-\f[B]--resume\f[R] [REF]
+\f[B]\[en]resume\f[R] [REF]
 Resume the latest session for the current directory, or resume a
 specific session by JSONL path or id prefix.
 .TP
-\f[B]--continue\f[R]
+\f[B]\[en]continue\f[R]
 Continue the latest session for the current directory.
 .TP
-\f[B]--session\f[R] REF
+\f[B]\[en]session\f[R] REF
 Open a specific session by JSONL path or id prefix.
 .TP
-\f[B]-h\f[R], \f[B]--help\f[R]
+\f[B]-h\f[R], \f[B]\[en]help\f[R]
 Print command help.
 .TP
-\f[B]-V\f[R], \f[B]--version\f[R]
+\f[B]-V\f[R], \f[B]\[en]version\f[R]
 Print version.
 .SH INTERACTIVE COMMANDS
 .PP
@@ -251,10 +251,48 @@ api_key_env = \[dq]EXAMPLE_API_KEY\[dq]
 default_model = \[dq]example-model\[dq]
 \f[R]
 .fi
+.PP
+Ferrum supports a small semantic UI color palette.
+Set the color mode in \f[B]config.toml\f[R]:
+.IP
+.nf
+\f[C]
+color = \[dq]auto\[dq]
+\f[R]
+.fi
+.PP
+Supported modes are \f[B]auto\f[R], \f[B]on\f[R], and \f[B]off\f[R].
+Override palette entries in \f[B]\[ti]/.config/ferrum/colors.toml\f[R]:
+.IP
+.nf
+\f[C]
+prompt = \[dq]DeepSkyBlue1\[dq]
+tool = \[dq]bold LightSkyBlue3\[dq]
+error = \[dq]OrangeRed1\[dq]
+diff_added = \[dq]SpringGreen1\[dq]
+diff_removed = \[dq]DeepPink1\[dq]
+\f[R]
+.fi
+.PP
+Supported color values include ANSI-style names such as \f[B]red\f[R],
+\f[B]green\f[R], and \f[B]cyan\f[R], bright names such as
+\f[B]bright-red\f[R], xterm 256-color table names such as
+\f[B]Orange3\f[R] and \f[B]DeepSkyBlue1\f[R], styles such as
+\f[B]bold\f[R] and \f[B]dim\f[R], RGB hex values such as
+\f[B]#ffaa00\f[R], and xterm 256-color indexes such as \f[B]245\f[R].
+Xterm names are matched case-insensitively.
+Spaces, dashes, and underscores are ignored, and
+\f[B]gray\f[R]/\f[B]grey\f[R] are equivalent.
+Duplicate xterm names map to the first matching xterm index; use numeric
+indexes for exact selection.
+See \f[B]docs/colors.md\f[R] for all palette keys and color values.
 .SH FILES
 .TP
 \f[B]\[ti]/.config/ferrum/config.toml\f[R]
 User configuration.
+.TP
+\f[B]\[ti]/.config/ferrum/colors.toml\f[R]
+Optional semantic UI color palette.
 .TP
 \f[B]\[ti]/.local/share/ferrum/sessions/\f[R]
 JSONL session store, unless data directory is overridden by XDG
