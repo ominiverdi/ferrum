@@ -1,3 +1,4 @@
+use crate::ui_colors::ColorPalette;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf};
@@ -19,6 +20,7 @@ pub struct Config {
     pub mcp_enabled: bool,
     pub mcp_server_allow: Option<Vec<String>>,
     pub color_mode: ColorMode,
+    pub colors: ColorPalette,
     pub diff_mode: DiffMode,
     pub tools_allow: Option<Vec<String>>,
     pub tools_deny: Vec<String>,
@@ -298,6 +300,8 @@ impl Config {
             .transpose()?;
         let tools_deny = validate_tool_name_list(tools_config.deny)?;
 
+        let colors = ColorPalette::load(&config_dir)?;
+
         Ok(Self {
             config_dir,
             data_dir,
@@ -329,6 +333,7 @@ impl Config {
                 .map(ColorMode::parse)
                 .transpose()?
                 .unwrap_or(ColorMode::Auto),
+            colors,
             diff_mode: file_config
                 .diff_mode
                 .as_deref()

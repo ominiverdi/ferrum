@@ -3,7 +3,7 @@ pub mod tools;
 
 use crate::{
     config::{ColorMode, Config, DiffMode, ToolSelection},
-    context, mcp, providers, session, skills, tools as builtin_tools, usage,
+    context, mcp, providers, session, skills, tools as builtin_tools, ui_colors, usage,
 };
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -34,6 +34,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime},
 };
+use ui_colors::{ColorPalette, ColorToken};
 
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 2_000;
@@ -44,11 +45,6 @@ const CONTEXT_WARNING_PERCENT: usize = 85;
 const CONTEXT_CRITICAL_PERCENT: usize = 92;
 const CONTEXT_AUTO_COMPACT_PERCENT: usize = 95;
 const CONTEXT_RESERVE_TOKENS: usize = 16_384;
-const ANSI_RED: &str = "\x1b[31m";
-const ANSI_GREEN: &str = "\x1b[32m";
-const ANSI_CYAN: &str = "\x1b[36m";
-const ANSI_DIM: &str = "\x1b[2m";
-const ANSI_RESET: &str = "\x1b[0m";
 const HARD_TOOL_ROUND_LIMIT: usize = 256;
 const REPEATED_TOOL_NUDGE_LIMIT: usize = 4;
 const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
@@ -409,7 +405,10 @@ pub async fn run_interactive(
 
     let mut last_ctrl_c: Option<Instant> = None;
     loop {
-        match rl.readline("ferrum> ") {
+        let prompt = state
+            .colors
+            .paint(ColorToken::Prompt, state.color_mode, "ferrum> ");
+        match rl.readline(&prompt) {
             Ok(line) => {
                 let input = line.trim();
                 if input.is_empty() {
@@ -438,7 +437,7 @@ pub async fn run_interactive(
                 if let Some((name, args)) = parse_skill_invocation(input) {
                     match state.expand_skill_prompt(name, args.as_deref()) {
                         Ok(prompt) => match state.run_turn(prompt, config, true).await {
-                            Ok(()) => render_prompt_separator(),
+                            Ok(()) => render_prompt_separator(state.color_mode, &state.colors),
                             Err(error) => eprintln!("Error: {error}"),
                         },
                         Err(error) => eprintln!("Error: {error}"),
@@ -507,7 +506,7 @@ pub async fn run_interactive(
                     }
                 }
                 match state.run_turn(prompt, config, true).await {
-                    Ok(()) => render_prompt_separator(),
+                    Ok(()) => render_prompt_separator(state.color_mode, &state.colors),
                     Err(error) => {
                         eprintln!("Error: {error}");
                         continue;
@@ -790,32 +789,63 @@ impl Drop for ActiveTurnAbort {
     }
 }
 
-#[derive(Default)]
 struct LiveRenderState {
+    color_mode: ColorMode,
+    colors: ColorPalette,
     thinking_started: bool,
     text_started: bool,
     text_ended_with_newline: bool,
 }
 
 impl LiveRenderState {
+    fn new(color_mode: ColorMode, colors: ColorPalette) -> Self {
+        Self {
+            color_mode,
+            colors,
+            thinking_started: false,
+            text_started: false,
+            text_ended_with_newline: false,
+        }
+    }
+
     fn render_event(&mut self, event: providers::StreamEvent) -> Result<()> {
         match event {
             providers::StreamEvent::ThinkingDelta(delta) => {
                 if !self.thinking_started {
                     self.thinking_started = true;
-                    print!("thinking:\r\n");
+                    print_raw_mode_text_styled(
+                        "thinking:\n",
+                        ColorToken::Thinking,
+                        self.color_mode,
+                        &self.colors,
+                    );
                 }
-                print_raw_mode_text(&delta);
+                print_raw_mode_text_styled(
+                    &delta,
+                    ColorToken::Thinking,
+                    self.color_mode,
+                    &self.colors,
+                );
             }
             providers::StreamEvent::TextDelta(delta) => {
                 if !self.text_started {
                     self.text_started = true;
                     if self.thinking_started {
-                        print!("\r\n\r\n------\r\n");
+                        print_raw_mode_text_styled(
+                            "\r\n------\r\n",
+                            ColorToken::Hr,
+                            self.color_mode,
+                            &self.colors,
+                        );
                     }
                 }
                 self.text_ended_with_newline = delta.ends_with('\n');
-                print_raw_mode_text(&delta);
+                print_raw_mode_text_styled(
+                    &delta,
+                    ColorToken::Assistant,
+                    self.color_mode,
+                    &self.colors,
+                );
             }
         }
         io::stdout().flush()?;
@@ -831,37 +861,67 @@ impl LiveRenderState {
     }
 }
 
-fn print_raw_mode_text(text: &str) {
-    print!("{}", text.replace('\n', "\r\n"));
+fn print_raw_mode_text_styled(
+    text: &str,
+    token: ColorToken,
+    color_mode: ColorMode,
+    colors: &ColorPalette,
+) {
+    let text = text.replace('\n', "\r\n");
+    let (prefix, suffix) = colors.prefix_suffix(token, color_mode);
+    print!("{prefix}{text}{suffix}");
 }
 
-fn render_turn_separator() {
+fn render_hr(color_mode: ColorMode, colors: &ColorPalette) {
+    println!("{}", colors.paint(ColorToken::Hr, color_mode, "------"));
+}
+
+fn render_turn_separator(color_mode: ColorMode, colors: &ColorPalette) {
     println!();
-    println!("------");
+    render_hr(color_mode, colors);
 }
 
-fn render_status_notice(message: &str) {
+fn render_status_notice(message: &str, color_mode: ColorMode, colors: &ColorPalette) {
     println!();
-    println!("------");
-    println!("{message}");
-    println!("------");
+    render_hr(color_mode, colors);
+    println!("{}", colors.paint(ColorToken::Status, color_mode, message));
+    render_hr(color_mode, colors);
 }
 
-fn render_prompt_separator() {
+fn render_prompt_separator(color_mode: ColorMode, colors: &ColorPalette) {
     println!();
-    println!("------");
+    render_hr(color_mode, colors);
 }
 
-fn render_assistant_response(response: &messages::Message, interactive: bool) -> Result<()> {
+fn render_assistant_response(
+    response: &messages::Message,
+    interactive: bool,
+    color_mode: ColorMode,
+    colors: &ColorPalette,
+) -> Result<()> {
+    let output_color_mode = if interactive {
+        color_mode
+    } else {
+        ColorMode::Off
+    };
     let summary = response.thinking_text();
     if interactive && !summary.trim().is_empty() {
-        println!("thinking:");
-        println!("{}", summary.trim());
+        println!(
+            "{}",
+            colors.paint(ColorToken::Thinking, output_color_mode, "thinking:")
+        );
+        println!(
+            "{}",
+            colors.paint(ColorToken::Thinking, output_color_mode, summary.trim())
+        );
         println!();
-        println!("------");
+        render_hr(output_color_mode, colors);
     }
     let text = response.display_text();
-    print!("{text}");
+    print!(
+        "{}",
+        colors.paint(ColorToken::Assistant, output_color_mode, &text)
+    );
     if !text.ends_with('\n') {
         println!();
     }
@@ -1169,6 +1229,7 @@ struct AgentState {
     mcp: Option<mcp::McpManager>,
     mcp_enabled: bool,
     color_mode: ColorMode,
+    colors: ColorPalette,
     diff_mode: DiffMode,
     pending_images: Vec<messages::ContentBlock>,
     last_session_list: Vec<session::jsonl::SessionInfo>,
@@ -1213,6 +1274,7 @@ impl AgentState {
             mcp: None,
             mcp_enabled: config.mcp_enabled,
             color_mode: config.color_mode,
+            colors: config.colors.clone(),
             diff_mode: config.diff_mode,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
@@ -1320,6 +1382,7 @@ impl AgentState {
             mcp: None,
             mcp_enabled: config.mcp_enabled,
             color_mode: config.color_mode,
+            colors: config.colors.clone(),
             diff_mode: config.diff_mode,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
@@ -1390,7 +1453,7 @@ impl AgentState {
         self.messages.push(user);
 
         if interactive {
-            render_turn_separator();
+            render_turn_separator(self.color_mode, &self.colors);
             io::stdout().flush()?;
         }
 
@@ -1420,7 +1483,7 @@ impl AgentState {
         let force_final_reason = loop {
             model_request_index += 1;
             if interactive && model_request_index > 1 {
-                render_turn_separator();
+                render_turn_separator(self.color_mode, &self.colors);
                 io::stdout().flush()?;
             }
             let mut abort = ActiveTurnAbort::start(interactive);
@@ -1428,7 +1491,7 @@ impl AgentState {
                 emit_model_metrics_start(model_request_index, &self.messages, &tools);
             }
             let started = Instant::now();
-            let mut live_render = LiveRenderState::default();
+            let mut live_render = LiveRenderState::new(self.color_mode, self.colors.clone());
             let mut on_event = |event| {
                 let _ = live_render.render_event(event);
             };
@@ -1514,7 +1577,7 @@ impl AgentState {
                 live_render.finish()?;
             }
             if !interactive || !live_render.text_started {
-                render_assistant_response(&response, interactive)?;
+                render_assistant_response(&response, interactive, self.color_mode, &self.colors)?;
             }
             self.session.append_message(&response)?;
 
@@ -1635,7 +1698,7 @@ impl AgentState {
         if metrics_enabled {
             emit_model_metrics_end(model_request_index, started.elapsed(), &final_response);
         }
-        render_assistant_response(&final_response, interactive)?;
+        render_assistant_response(&final_response, interactive, self.color_mode, &self.colors)?;
         self.session.append_message(&final_response)?;
         self.messages.push(final_response);
         self.maybe_warn_context_pressure(
@@ -1748,10 +1811,10 @@ impl AgentState {
         let color_mode = self.color_mode;
         if can_parallelize && tool_uses.len() > 1 {
             return self
-                .execute_parallel_builtin_tools(tool_uses, color_mode)
+                .execute_parallel_builtin_tools(tool_uses, color_mode, self.colors.clone())
                 .await;
         }
-        self.execute_sequential_tools(tool_uses, color_mode, interactive)
+        self.execute_sequential_tools(tool_uses, color_mode, self.colors.clone(), interactive)
             .await
     }
 
@@ -1766,10 +1829,11 @@ impl AgentState {
         &self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
         color_mode: ColorMode,
+        colors: ColorPalette,
     ) -> Vec<ExecutedToolUse> {
         for (_, name, input) in &tool_uses {
             eprintln!();
-            render_tool_call(name, input, self.diff_mode, color_mode);
+            render_tool_call(name, input, self.diff_mode, color_mode, &colors);
         }
 
         let cwd = self.cwd.clone();
@@ -1831,7 +1895,13 @@ impl AgentState {
         results.sort_by_key(|(index, _)| *index);
         let mut executed = Vec::new();
         for (_, result) in results {
-            render_tool_result(&result.name, &result.content, result.is_error);
+            render_tool_result(
+                &result.name,
+                &result.content,
+                result.is_error,
+                color_mode,
+                &colors,
+            );
             emit_tool_metrics_if_enabled(&result);
             executed.push(result);
         }
@@ -1842,12 +1912,13 @@ impl AgentState {
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
         color_mode: ColorMode,
+        colors: ColorPalette,
         interactive: bool,
     ) -> Vec<ExecutedToolUse> {
         let mut results = Vec::new();
         for (id, name, input) in tool_uses {
             eprintln!();
-            render_tool_call(&name, &input, self.diff_mode, color_mode);
+            render_tool_call(&name, &input, self.diff_mode, color_mode, &colors);
             let started = Instant::now();
             let mut abort = ActiveTurnAbort::start(interactive);
             let token = abort.token();
@@ -1863,7 +1934,7 @@ impl AgentState {
             if aborted {
                 eprintln!();
             }
-            render_tool_result(&name, &content, is_error);
+            render_tool_result(&name, &content, is_error, color_mode, &colors);
             let result = ExecutedToolUse {
                 id,
                 name,
@@ -1956,7 +2027,7 @@ impl AgentState {
 
         let message = context_pressure_message(percent, estimated_tokens, max_context_tokens);
         if interactive {
-            render_status_notice(&message);
+            render_status_notice(&message, self.color_mode, &self.colors);
         } else {
             eprintln!("{message}");
         }
@@ -2224,21 +2295,17 @@ impl AgentState {
     }
 }
 
-fn color_enabled(mode: ColorMode) -> bool {
-    match mode {
-        ColorMode::Auto => io::stderr().is_terminal(),
-        ColorMode::On => true,
-        ColorMode::Off => false,
-    }
-}
-
 fn render_tool_call(
     name: &str,
     input: &serde_json::Value,
     diff_mode: DiffMode,
     color_mode: ColorMode,
+    colors: &ColorPalette,
 ) {
-    eprintln!("[tool:{name}]");
+    eprintln!(
+        "{}",
+        colors.paint(ColorToken::Tool, color_mode, format!("[tool:{name}]"))
+    );
     match name {
         "bash" => {
             if let Some(command) = input.get("command").and_then(|value| value.as_str()) {
@@ -2323,7 +2390,7 @@ fn render_tool_call(
                 }
             }
         }
-        "edit" => render_edit_call(input, diff_mode, color_mode),
+        "edit" => render_edit_call(input, diff_mode, color_mode, colors),
         _ => {
             let rendered =
                 serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
@@ -2332,7 +2399,12 @@ fn render_tool_call(
     }
 }
 
-fn render_edit_call(input: &serde_json::Value, diff_mode: DiffMode, color_mode: ColorMode) {
+fn render_edit_call(
+    input: &serde_json::Value,
+    diff_mode: DiffMode,
+    color_mode: ColorMode,
+    colors: &ColorPalette,
+) {
     eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
     eprintln!("diff: {}", diff_mode.as_str());
     let Some(edits) = input.get("edits").and_then(|value| value.as_array()) else {
@@ -2348,24 +2420,32 @@ fn render_edit_call(input: &serde_json::Value, diff_mode: DiffMode, color_mode: 
         eprintln!();
         eprintln!("edit {}:", index + 1);
         match diff_mode {
-            DiffMode::Unified => render_unified_diff(old_text, new_text, 3, color_mode),
-            DiffMode::Compact => render_unified_diff(old_text, new_text, 1, color_mode),
-            DiffMode::Full => render_full_diff(old_text, new_text, color_mode),
-            DiffMode::Words => render_word_diff(old_text, new_text, color_mode),
-            DiffMode::SideBySide => render_side_by_side_diff(old_text, new_text, color_mode),
+            DiffMode::Unified => render_unified_diff(old_text, new_text, 3, color_mode, colors),
+            DiffMode::Compact => render_unified_diff(old_text, new_text, 1, color_mode, colors),
+            DiffMode::Full => render_full_diff(old_text, new_text, color_mode, colors),
+            DiffMode::Words => render_word_diff(old_text, new_text, color_mode, colors),
+            DiffMode::SideBySide => {
+                render_side_by_side_diff(old_text, new_text, color_mode, colors)
+            }
         }
     }
 }
 
-fn render_unified_diff(old_text: &str, new_text: &str, context: usize, color_mode: ColorMode) {
-    let use_color = color_enabled(color_mode);
-    if use_color {
-        eprintln!("{}--- old{}", ANSI_DIM, ANSI_RESET);
-        eprintln!("{}+++ new{}", ANSI_DIM, ANSI_RESET);
-    } else {
-        eprintln!("--- old");
-        eprintln!("+++ new");
-    }
+fn render_unified_diff(
+    old_text: &str,
+    new_text: &str,
+    context: usize,
+    color_mode: ColorMode,
+    colors: &ColorPalette,
+) {
+    eprintln!(
+        "{}",
+        colors.paint(ColorToken::DiffMeta, color_mode, "--- old")
+    );
+    eprintln!(
+        "{}",
+        colors.paint(ColorToken::DiffMeta, color_mode, "+++ new")
+    );
     let diff = TextDiff::from_lines(old_text, new_text);
     for group in diff.grouped_ops(context) {
         let old_start = group
@@ -2376,32 +2456,37 @@ fn render_unified_diff(old_text: &str, new_text: &str, context: usize, color_mod
             .first()
             .map(|op| op.new_range().start + 1)
             .unwrap_or(1);
-        if use_color {
-            eprintln!("{}@@ -{old_start} +{new_start} @@{}", ANSI_CYAN, ANSI_RESET);
-        } else {
-            eprintln!("@@ -{old_start} +{new_start} @@");
-        }
+        eprintln!(
+            "{}",
+            colors.paint(
+                ColorToken::DiffHunk,
+                color_mode,
+                format!("@@ -{old_start} +{new_start} @@")
+            )
+        );
         for op in group {
             for change in diff.iter_changes(&op) {
-                let (prefix, color) = match change.tag() {
-                    ChangeTag::Delete => ("-", ANSI_RED),
-                    ChangeTag::Insert => ("+", ANSI_GREEN),
-                    ChangeTag::Equal => (" ", ""),
+                let (prefix, token) = match change.tag() {
+                    ChangeTag::Delete => ("-", Some(ColorToken::DiffRemoved)),
+                    ChangeTag::Insert => ("+", Some(ColorToken::DiffAdded)),
+                    ChangeTag::Equal => (" ", None),
                 };
                 let text = change.to_string();
                 if text.ends_with('\n') {
-                    if use_color && !color.is_empty() {
-                        for line in text.split_inclusive('\n') {
-                            eprint!("{color}{prefix}{line}{ANSI_RESET}");
+                    for line in text.split_inclusive('\n') {
+                        let rendered = format!("{prefix}{line}");
+                        if let Some(token) = token {
+                            eprint!("{}", colors.paint(token, color_mode, rendered));
+                        } else {
+                            eprint!("{rendered}");
                         }
-                    } else {
-                        eprint!("{prefix}{text}");
                     }
                 } else {
-                    if use_color && !color.is_empty() {
-                        eprintln!("{color}{prefix}{text}{ANSI_RESET}");
+                    let rendered = format!("{prefix}{text}");
+                    if let Some(token) = token {
+                        eprintln!("{}", colors.paint(token, color_mode, rendered));
                     } else {
-                        eprintln!("{prefix}{text}");
+                        eprintln!("{rendered}");
                     }
                     eprintln!("\\ No newline at end of line");
                 }
@@ -2410,47 +2495,38 @@ fn render_unified_diff(old_text: &str, new_text: &str, context: usize, color_mod
     }
 }
 
-fn render_full_diff(old_text: &str, new_text: &str, color_mode: ColorMode) {
-    let use_color = color_enabled(color_mode);
-    if use_color {
-        eprintln!("{}--- old{}", ANSI_RED, ANSI_RESET);
-    } else {
-        eprintln!("--- old");
-    }
+fn render_full_diff(old_text: &str, new_text: &str, color_mode: ColorMode, colors: &ColorPalette) {
+    eprintln!(
+        "{}",
+        colors.paint(ColorToken::DiffRemoved, color_mode, "--- old")
+    );
     if old_text.is_empty() {
         eprintln!("  [empty]");
     } else {
         let block = indent_block(old_text.trim_end_matches('\n'));
-        if use_color {
-            for line in block.lines() {
-                eprintln!("{}{}{}", ANSI_RED, line, ANSI_RESET);
-            }
-        } else {
-            eprintln!("{block}");
+        for line in block.lines() {
+            eprintln!(
+                "{}",
+                colors.paint(ColorToken::DiffRemoved, color_mode, line)
+            );
         }
     }
-    if use_color {
-        eprintln!("{}+++ new{}", ANSI_GREEN, ANSI_RESET);
-    } else {
-        eprintln!("+++ new");
-    }
+    eprintln!(
+        "{}",
+        colors.paint(ColorToken::DiffAdded, color_mode, "+++ new")
+    );
     if new_text.is_empty() {
         eprintln!("  [empty]");
     } else {
         let block = indent_block(new_text.trim_end_matches('\n'));
-        if use_color {
-            for line in block.lines() {
-                eprintln!("{}{}{}", ANSI_GREEN, line, ANSI_RESET);
-            }
-        } else {
-            eprintln!("{block}");
+        for line in block.lines() {
+            eprintln!("{}", colors.paint(ColorToken::DiffAdded, color_mode, line));
         }
     }
 }
 
-fn render_word_diff(old_text: &str, new_text: &str, color_mode: ColorMode) {
+fn render_word_diff(old_text: &str, new_text: &str, color_mode: ColorMode, colors: &ColorPalette) {
     eprintln!("words:");
-    let use_color = color_enabled(color_mode);
     let old_lines = old_text.lines().collect::<Vec<_>>();
     let new_lines = new_text.lines().collect::<Vec<_>>();
     let max_len = old_lines.len().max(new_lines.len());
@@ -2467,18 +2543,18 @@ fn render_word_diff(old_text: &str, new_text: &str, color_mode: ColorMode) {
             let token = change.to_string().replace(['\r', '\n'], "");
             match change.tag() {
                 ChangeTag::Delete => {
-                    if use_color {
-                        let _ = write!(rendered, "{ANSI_RED}[-{token}-]{ANSI_RESET}");
-                    } else {
-                        let _ = write!(rendered, "[-{token}-]");
-                    }
+                    let _ = write!(
+                        rendered,
+                        "{}",
+                        colors.paint(ColorToken::DiffRemoved, color_mode, format!("[-{token}-]"))
+                    );
                 }
                 ChangeTag::Insert => {
-                    if use_color {
-                        let _ = write!(rendered, "{ANSI_GREEN}{{+{token}+}}{ANSI_RESET}");
-                    } else {
-                        let _ = write!(rendered, "{{+{token}+}}");
-                    }
+                    let _ = write!(
+                        rendered,
+                        "{}",
+                        colors.paint(ColorToken::DiffAdded, color_mode, format!("{{+{token}+}}"))
+                    );
                 }
                 ChangeTag::Equal => rendered.push_str(&token),
             }
@@ -2487,43 +2563,43 @@ fn render_word_diff(old_text: &str, new_text: &str, color_mode: ColorMode) {
     }
 }
 
-fn render_side_by_side_diff(old_text: &str, new_text: &str, color_mode: ColorMode) {
-    let use_color = color_enabled(color_mode);
+fn render_side_by_side_diff(
+    old_text: &str,
+    new_text: &str,
+    color_mode: ColorMode,
+    colors: &ColorPalette,
+) {
     let terminal_width = std::env::var("COLUMNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(100)
         .clamp(60, 200);
     let column_width = (terminal_width.saturating_sub(9) / 2).max(20);
-    if use_color {
-        eprintln!(
-            "{}{:<width$} | {:<width$}{}",
-            ANSI_DIM,
-            "old",
-            "new",
-            ANSI_RESET,
-            width = column_width
-        );
-        eprintln!(
-            "{}{}-+-{}{}",
-            ANSI_DIM,
-            "-".repeat(column_width),
-            "-".repeat(column_width),
-            ANSI_RESET
-        );
-    } else {
-        eprintln!(
-            "{:<width$} | {:<width$}",
-            "old",
-            "new",
-            width = column_width
-        );
-        eprintln!(
-            "{}-+-{}",
-            "-".repeat(column_width),
-            "-".repeat(column_width)
-        );
-    }
+    eprintln!(
+        "{}",
+        colors.paint(
+            ColorToken::DiffMeta,
+            color_mode,
+            format!(
+                "{:<width$} | {:<width$}",
+                "old",
+                "new",
+                width = column_width
+            )
+        )
+    );
+    eprintln!(
+        "{}",
+        colors.paint(
+            ColorToken::DiffMeta,
+            color_mode,
+            format!(
+                "{}-+-{}",
+                "-".repeat(column_width),
+                "-".repeat(column_width)
+            )
+        )
+    );
 
     for row in side_by_side_rows(old_text, new_text) {
         let left = format!(
@@ -2538,13 +2614,13 @@ fn render_side_by_side_diff(old_text: &str, new_text: &str, color_mode: ColorMod
             truncate_display(&row.right, column_width),
             width = column_width
         );
-        let left_colored = if use_color && row.left_marker == "-" {
-            format!("{ANSI_RED}{left}{ANSI_RESET}")
+        let left_colored = if row.left_marker == "-" {
+            colors.paint(ColorToken::DiffRemoved, color_mode, left)
         } else {
             left
         };
-        let right_colored = if use_color && row.right_marker == "+" {
-            format!("{ANSI_GREEN}{right}{ANSI_RESET}")
+        let right_colored = if row.right_marker == "+" {
+            colors.paint(ColorToken::DiffAdded, color_mode, right)
         } else {
             right
         };
@@ -2623,23 +2699,91 @@ fn truncate_display(value: &str, width: usize) -> String {
     output
 }
 
-fn render_tool_result(name: &str, content: &str, is_error: bool) {
-    let status = if is_error { "error" } else { "ok" };
+fn render_tool_result(
+    name: &str,
+    content: &str,
+    is_error: bool,
+    color_mode: ColorMode,
+    colors: &ColorPalette,
+) {
+    let display_error = is_error || bash_preview_indicates_failure(name, content);
+    let status = if display_error { "error" } else { "ok" };
     let line_count = content.lines().count();
     let bytes = content.len();
     if is_error {
         if let Some(reason) = blocked_tool_reason(name, content) {
-            eprintln!("[tool:{name} blocked] {reason}");
+            eprintln!(
+                "{}",
+                colors.paint(
+                    ColorToken::Warning,
+                    color_mode,
+                    format!("[tool:{name} blocked] {reason}")
+                )
+            );
         }
     }
-    eprintln!("[result:{name} {status}, {line_count} lines, {bytes} bytes]");
+    let result_token = if display_error {
+        ColorToken::Error
+    } else {
+        ColorToken::Success
+    };
+    eprintln!(
+        "{}",
+        colors.paint(
+            result_token,
+            color_mode,
+            format!("[result:{name} {status}, {line_count} lines, {bytes} bytes]")
+        )
+    );
     let preview = truncate_chars(content.trim(), TOOL_PREVIEW_MAX_CHARS);
     if !preview.is_empty() {
-        eprintln!("{}", indent_block(&preview));
+        render_tool_preview(name, &preview, color_mode, colors);
         if content.chars().count() > TOOL_PREVIEW_MAX_CHARS {
-            eprintln!("  [result truncated for display; full result kept in context]");
+            eprintln!(
+                "{}",
+                colors.paint(
+                    ColorToken::Status,
+                    color_mode,
+                    "  [result truncated for display; full result kept in context]"
+                )
+            );
         }
     }
+}
+
+fn bash_preview_indicates_failure(name: &str, content: &str) -> bool {
+    if !matches!(name, "bash" | "wait") {
+        return false;
+    }
+    content.lines().any(|line| {
+        line.strip_prefix("status: Some(")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .and_then(|code| code.parse::<i32>().ok())
+            .is_some_and(|code| code != 0)
+    }) || content.lines().any(|line| line == "timed_out: true")
+}
+
+fn render_tool_preview(name: &str, preview: &str, color_mode: ColorMode, colors: &ColorPalette) {
+    if matches!(name, "bash" | "wait") && preview.contains("\nstderr:\n") {
+        let mut in_stderr = false;
+        for line in preview.lines() {
+            if line == "stderr:" {
+                in_stderr = true;
+            }
+            let token = if in_stderr {
+                ColorToken::Error
+            } else {
+                ColorToken::ToolOutput
+            };
+            eprintln!("{}", colors.paint(token, color_mode, format!("  {line}")));
+        }
+        return;
+    }
+
+    eprintln!(
+        "{}",
+        colors.paint(ColorToken::ToolOutput, color_mode, indent_block(preview))
+    );
 }
 
 fn blocked_tool_reason<'a>(name: &str, content: &'a str) -> Option<&'a str> {
@@ -2672,10 +2816,13 @@ fn indent_block(text: &str) -> String {
         .join("\n")
 }
 
-fn print_session_title(title: &str) {
+fn print_session_title(title: &str, color_mode: ColorMode, colors: &ColorPalette) {
     println!();
-    println!("title: {title}");
-    println!("---");
+    println!(
+        "{} {title}",
+        colors.paint(ColorToken::Highlight, color_mode, "title:")
+    );
+    render_hr(color_mode, colors);
 }
 
 fn set_terminal_title(title: &str) -> Result<()> {
@@ -2689,7 +2836,7 @@ fn print_current_session_header(state: &AgentState) -> Result<()> {
     let info = session::jsonl::session_info(state.session.path())?
         .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
     set_terminal_title(&info.title)?;
-    print_session_title(&info.title);
+    print_session_title(&info.title, state.color_mode, &state.colors);
     Ok(())
 }
 
@@ -2961,6 +3108,22 @@ fn context_pressure_message(
 #[cfg(test)]
 mod context_pressure_tests {
     use super::*;
+
+    #[test]
+    fn detects_failed_bash_preview_status() {
+        assert!(bash_preview_indicates_failure(
+            "bash",
+            "status: Some(1)\ntimed_out: false\nstdout:\n\nstderr:\nnope"
+        ));
+        assert!(!bash_preview_indicates_failure(
+            "bash",
+            "status: Some(0)\ntimed_out: false\nstdout:\nok\nstderr:\n"
+        ));
+        assert!(!bash_preview_indicates_failure(
+            "grep",
+            "status: Some(1)\ntimed_out: false"
+        ));
+    }
 
     #[test]
     fn detects_chafa_pixel_formats_for_common_terminals() {
@@ -3453,6 +3616,7 @@ mod context_pressure_tests {
             mcp_enabled: true,
             mcp_server_allow: None,
             color_mode: crate::config::ColorMode::Auto,
+            colors: ColorPalette::default(),
             diff_mode: crate::config::DiffMode::Unified,
             tools_allow: None,
             tools_deny: Vec::new(),

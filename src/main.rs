@@ -8,6 +8,7 @@ mod providers;
 mod session;
 mod skills;
 mod tools;
+mod ui_colors;
 mod usage;
 
 use anyhow::Result;

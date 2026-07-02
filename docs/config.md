@@ -270,15 +270,15 @@ Ferrum stores the resolved tool list in session metadata for visibility and audi
 
 ### Colors
 
-Ferrum supports terminal color control for interactive diff rendering.
+Ferrum supports a global color mode plus a small semantic palette.
 
-Config:
+Mode in `~/.config/ferrum/config.toml`:
 
 ```toml
 color = "auto"
 ```
 
-Supported values:
+Supported mode values:
 
 ```text
 auto|on|off
@@ -299,6 +299,43 @@ Semantics:
 - `off`: disable color output
 
 Color mode is stored in session metadata and restored on resume or session switch.
+
+Palette in `~/.config/ferrum/colors.toml`:
+
+```toml
+prompt = "cyan"
+hr = "dim"
+assistant = "default"
+thinking = "dim"
+tool = "cyan"
+tool_output = "dim"
+status = "dim"
+highlight = "yellow"
+success = "green"
+warning = "yellow"
+error = "red"
+
+diff_added = "green"
+diff_removed = "red"
+diff_hunk = "cyan"
+diff_meta = "dim"
+```
+
+Missing `colors.toml` uses the defaults above. Invalid or unknown entries are ignored with a warning.
+
+Supported color values:
+
+```text
+red, green, yellow, blue, magenta, cyan, white, black, gray
+bright-red, bright-green, bright-blue, ...
+bold, dim, italic, underline
+bold cyan, dim gray
+#ffaa00
+0..255
+default|normal|none|off
+```
+
+The palette colors UI chrome and interactive display only. Tool outputs stored in context remain unmodified.
 
 ### diff_mode
 
