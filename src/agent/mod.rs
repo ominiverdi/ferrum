@@ -57,6 +57,7 @@ struct FerrumLineHelper {
     skill_names: Vec<String>,
     model_names: Vec<String>,
     provider_names: Vec<String>,
+    palette_names: Vec<String>,
 }
 
 impl Helper for FerrumLineHelper {}
@@ -70,10 +71,28 @@ impl Hinter for FerrumLineHelper {
         if pos != line.len() {
             return None;
         }
+        let command = line.trim_start();
+        if command == "/palette" {
+            return Some(" <name>  (/palettes to list)".to_string());
+        }
+        if let Some(prefix) = command.strip_prefix("/palette ") {
+            if prefix.split_whitespace().count() > 1 {
+                return None;
+            }
+            if prefix.is_empty() {
+                return Some(palette_list_hint(&self.palette_names));
+            }
+            return self
+                .palette_names
+                .iter()
+                .find(|name| name.starts_with(prefix))
+                .and_then(|name| name.strip_prefix(prefix))
+                .filter(|rest| !rest.is_empty())
+                .map(str::to_string);
+        }
         if line.chars().last().is_some_and(char::is_whitespace) {
             return None;
         }
-        let command = line.trim_start();
         self.command_hints
             .iter()
             .find_map(|(prefix, hint)| command.eq(*prefix).then(|| (*hint).to_string()))
@@ -143,6 +162,13 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, color_words())));
         }
+        if let Some(prefix) = command_before.strip_prefix("/palette ") {
+            let start = pos - prefix.len();
+            return Ok((
+                start,
+                complete_from_owned_words(prefix, &self.palette_names),
+            ));
+        }
         if let Some(prefix) = command_before.strip_prefix("/usage ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, usage_words())));
@@ -168,6 +194,8 @@ impl FerrumLineHelper {
         command_hints.insert("/history", " search <pattern>");
         command_hints.insert("/sessions", " pick | del | new");
         command_hints.insert("/colors", " auto|on|off");
+        command_hints.insert("/palette", " <name>  (/palettes to list)");
+        command_hints.insert("/palettes", "");
         command_hints.insert("/model", " <name>");
         command_hints.insert("/provider", " <name>");
         command_hints.insert("/thinking", " off|minimal|low|medium|high|xhigh");
@@ -177,11 +205,13 @@ impl FerrumLineHelper {
         let skill_names = skill_command_words(skills);
         let model_names = model_command_words(config);
         let provider_names = provider_command_words(config);
+        let palette_names = palette_command_words(config);
         Self {
             command_hints,
             skill_names,
             model_names,
             provider_names,
+            palette_names,
         }
     }
 }
@@ -205,6 +235,8 @@ fn slash_command_words() -> &'static [&'static str] {
         "/thinking",
         "/mcp",
         "/colors",
+        "/palette",
+        "/palettes",
         "/diff",
         "/image",
         "/image-paste",
@@ -238,6 +270,22 @@ fn provider_command_words(config: &Config) -> Vec<String> {
     names
 }
 
+fn palette_list_hint(names: &[String]) -> String {
+    if names.is_empty() {
+        return " <name>".to_string();
+    }
+    let joined = names.iter().take(8).cloned().collect::<Vec<_>>().join("|");
+    if names.len() > 8 {
+        format!(" {joined}|...")
+    } else {
+        format!(" {joined}")
+    }
+}
+
+fn palette_command_words(config: &Config) -> Vec<String> {
+    list_palette_names(&config.config_dir).unwrap_or_default()
+}
+
 fn session_words() -> &'static [&'static str] {
     &["tail"]
 }
@@ -268,6 +316,93 @@ fn mcp_words() -> &'static [&'static str] {
 
 fn usage_words() -> &'static [&'static str] {
     &["day", "week", "month"]
+}
+
+fn list_palette_names(config_dir: &Path) -> Result<Vec<String>> {
+    let palette_dir = config_dir.join("color-palettes");
+    let Ok(entries) = fs::read_dir(&palette_dir) else {
+        return Ok(Vec::new());
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("failed to read {}", palette_dir.display()))?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
+            continue;
+        }
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            names.push(stem.to_string());
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn palette_file_path(config_dir: &Path, name: &str) -> Result<PathBuf> {
+    let name = name.trim().strip_suffix(".toml").unwrap_or(name.trim());
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        anyhow::bail!("invalid palette name: {name}");
+    }
+    Ok(config_dir
+        .join("color-palettes")
+        .join(format!("{name}.toml")))
+}
+
+fn print_palette_list(config_dir: &Path) -> Result<()> {
+    let names = list_palette_names(config_dir)?;
+    if names.is_empty() {
+        println!(
+            "no palettes found in {}",
+            config_dir.join("color-palettes").display()
+        );
+    } else {
+        for name in names {
+            println!("{name}");
+        }
+    }
+    Ok(())
+}
+
+fn current_palette_name(config_dir: &Path, colors: &ColorPalette) -> Result<String> {
+    let colors_path = config_dir.join("colors.toml");
+    if !colors_path.exists() {
+        return Ok("default".to_string());
+    }
+    for name in list_palette_names(config_dir)? {
+        let path = palette_file_path(config_dir, &name)?;
+        let Ok(palette) = ColorPalette::load_palette_file(&path) else {
+            continue;
+        };
+        if &palette == colors {
+            return Ok(name);
+        }
+    }
+    Ok("custom".to_string())
+}
+
+fn apply_palette(name: &str, config: &mut Config, state: &mut AgentState) -> Result<()> {
+    let path = palette_file_path(&config.config_dir, name)?;
+    if !path.exists() {
+        anyhow::bail!("unknown palette: {name}. Use /palettes to list available palettes");
+    }
+    let palette = ColorPalette::load_palette_file(&path)?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    fs::create_dir_all(&config.config_dir)
+        .with_context(|| format!("failed to create {}", config.config_dir.display()))?;
+    let colors_path = config.config_dir.join("colors.toml");
+    fs::write(&colors_path, text)
+        .with_context(|| format!("failed to write {}", colors_path.display()))?;
+    config.colors = palette.clone();
+    state.colors = palette;
+    println!(
+        "palette: {}",
+        path.file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(name)
+    );
+    Ok(())
 }
 
 fn complete_from_words(prefix: &str, words: &[&str]) -> Vec<Pair> {
@@ -579,7 +714,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /session tail [n]\n- /history search <regex>\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /session tail [n]\n- /history search <regex>\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -3167,13 +3302,26 @@ mod context_pressure_tests {
     #[test]
     fn completes_known_subcommands_and_modes() {
         let temp = tempfile::tempdir().unwrap();
+        let palette_dir = temp.path().join("color-palettes");
+        std::fs::create_dir_all(&palette_dir).unwrap();
+        std::fs::write(palette_dir.join("catppuccin.toml"), "prompt = \"blue\"\n").unwrap();
         let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
+
         let history = DefaultHistory::default();
         let ctx = rustyline::Context::new(&history);
 
         assert_completion(&helper, &ctx, "/session t", "tail");
         assert_completion(&helper, &ctx, "/history s", "search");
         assert_completion(&helper, &ctx, "/colors a", "auto");
+        assert_completion(&helper, &ctx, "/palette cat", "catppuccin");
+        let (_start, candidates) = helper
+            .complete("/palette ", "/palette ".len(), &ctx)
+            .unwrap();
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.replacement == "catppuccin")
+        );
         assert_completion(&helper, &ctx, "/mcp l", "list");
     }
 
@@ -3197,6 +3345,9 @@ mod context_pressure_tests {
     #[test]
     fn does_not_insert_command_hint_after_trailing_space() {
         let temp = tempfile::tempdir().unwrap();
+        let palette_dir = temp.path().join("color-palettes");
+        std::fs::create_dir_all(&palette_dir).unwrap();
+        std::fs::write(palette_dir.join("catppuccin.toml"), "prompt = \"blue\"\n").unwrap();
         let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
         let history = DefaultHistory::default();
         let ctx = rustyline::Context::new(&history);
@@ -3206,6 +3357,20 @@ mod context_pressure_tests {
             Some(" pick | del | new".to_string())
         );
         assert_eq!(helper.hint("/sessions ", "/sessions ".len(), &ctx), None);
+        assert_eq!(
+            helper.hint("/palette", "/palette".len(), &ctx),
+            Some(" <name>  (/palettes to list)".to_string())
+        );
+        assert!(
+            helper
+                .hint("/palette ", "/palette ".len(), &ctx)
+                .unwrap()
+                .contains("catppuccin")
+        );
+        assert_eq!(
+            helper.hint("/palette cat", "/palette cat".len(), &ctx),
+            Some("ppuccin".to_string())
+        );
     }
 
     #[test]
@@ -3298,6 +3463,8 @@ mod context_pressure_tests {
             "/usage [day|week|month]",
             "/mcp [on|off|status|list]",
             "/colors [auto|on|off]",
+            "/palette [name]",
+            "/palettes",
             "/image-paste",
             "/paste-image",
             "/exit",
@@ -4309,6 +4476,8 @@ fn handle_command(
             println!("  /providers            list configured providers");
             println!("  /mcp [on|off|status|list] show or toggle MCP tools");
             println!("  /colors [mode]        show or set colors: auto|on|off");
+            println!("  /palette [name]       show current palette or apply a palette");
+            println!("  /palettes             list palettes from color-palettes/");
             println!(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
@@ -4536,6 +4705,28 @@ fn handle_command(
                 state.session.append_color_mode(parsed.as_str())?;
             }
             println!("colors: {}", config.color_mode.as_str());
+            Ok(CommandAction::Continue)
+        }
+        "/palette" => {
+            match parts.next() {
+                None => println!(
+                    "palette: {}",
+                    current_palette_name(&config.config_dir, &state.colors)?
+                ),
+                Some(name) => {
+                    if let Some(extra) = parts.next() {
+                        anyhow::bail!("usage: /palette [name], got extra argument: {extra}");
+                    }
+                    apply_palette(name, config, state)?;
+                }
+            }
+            Ok(CommandAction::Continue)
+        }
+        "/palettes" => {
+            if let Some(extra) = parts.next() {
+                anyhow::bail!("usage: /palettes, got extra argument: {extra}");
+            }
+            print_palette_list(&config.config_dir)?;
             Ok(CommandAction::Continue)
         }
         "/thinking" => {

@@ -69,31 +69,67 @@ impl ColorPalette {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = fs::read_to_string(&path)
+        Self::load_file_lenient(&path)
+    }
+
+    pub fn load_palette_file(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path)
             .with_context(|| format!("failed to read {}", path.display()))?;
         let raw: BTreeMap<String, toml::Value> =
             toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
-        Ok(Self::from_entries(raw.into_iter().map(|(key, value)| {
-            let value = match value {
-                toml::Value::String(value) => Some(value),
-                toml::Value::Integer(value) if (0..=255).contains(&value) => {
-                    Some(value.to_string())
-                }
-                _ => None,
-            };
-            (key, value)
-        })))
+        Self::from_raw_entries(raw, true)
+            .with_context(|| format!("invalid palette {}", path.display()))
     }
 
+    fn load_file_lenient(path: &Path) -> Result<Self> {
+        let text = fs::read_to_string(path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let raw: BTreeMap<String, toml::Value> =
+            toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        Self::from_raw_entries(raw, false)
+    }
+
+    fn from_raw_entries(raw: BTreeMap<String, toml::Value>, strict: bool) -> Result<Self> {
+        Self::from_entries_impl(
+            raw.into_iter().map(|(key, value)| {
+                let value = match value {
+                    toml::Value::String(value) => Some(value),
+                    toml::Value::Integer(value) if (0..=255).contains(&value) => {
+                        Some(value.to_string())
+                    }
+                    _ => None,
+                };
+                (key, value)
+            }),
+            strict,
+        )
+    }
+
+    #[cfg(test)]
     fn from_entries(entries: impl IntoIterator<Item = (String, Option<String>)>) -> Self {
+        Self::from_entries_impl(entries, false).expect("lenient palette parsing cannot fail")
+    }
+
+    fn from_entries_impl(
+        entries: impl IntoIterator<Item = (String, Option<String>)>,
+        strict: bool,
+    ) -> Result<Self> {
         let mut palette = Self::default();
         for (key, value) in entries {
             let Some(value) = value else {
-                eprintln!("[colors] ignoring {key}: expected string or 0-255 integer");
+                let message = format!("{key}: expected string or 0-255 integer");
+                if strict {
+                    anyhow::bail!(message);
+                }
+                eprintln!("[colors] ignoring {message}");
                 continue;
             };
             if AnsiStyle::parse(&value).is_none() {
-                eprintln!("[colors] ignoring {key}: unsupported color spec '{value}'");
+                let message = format!("{key}: unsupported color spec '{value}'");
+                if strict {
+                    anyhow::bail!(message);
+                }
+                eprintln!("[colors] ignoring {message}");
                 continue;
             }
             match key.as_str() {
@@ -112,10 +148,16 @@ impl ColorPalette {
                 "diff_removed" | "diff_delete" | "diff_deleted" => palette.diff_removed = value,
                 "diff_hunk" => palette.diff_hunk = value,
                 "diff_meta" => palette.diff_meta = value,
-                _ => eprintln!("[colors] ignoring unknown color token '{key}'"),
+                _ => {
+                    let message = format!("unknown color token '{key}'");
+                    if strict {
+                        anyhow::bail!(message);
+                    }
+                    eprintln!("[colors] ignoring {message}");
+                }
             }
         }
-        palette
+        Ok(palette)
     }
 
     pub fn paint(&self, token: ColorToken, mode: ColorMode, text: impl AsRef<str>) -> String {
@@ -223,6 +265,15 @@ impl AnsiStyle {
                 }
             }
             let color_name = color_parts.join("");
+            if let Some(hex) = color_name.strip_prefix('#') {
+                let (r, g, b) = parse_hex_rgb(hex)?;
+                codes.push(format!("38;2;{r};{g};{b}"));
+                return Some(Self { codes });
+            }
+            if let Ok(index) = color_name.parse::<u8>() {
+                codes.push(format!("38;5;{index}"));
+                return Some(Self { codes });
+            }
             let index = xterm_color_index(&color_name)?;
             codes.push(format!("38;5;{index}"));
         }
@@ -515,6 +566,14 @@ mod tests {
             vec!["38;5;109"]
         );
         assert_eq!(AnsiStyle::parse("grey93").unwrap().codes, vec!["38;5;255"]);
+        assert_eq!(
+            AnsiStyle::parse("bold #ffaa00").unwrap().codes,
+            vec!["1", "38;2;255;170;0"]
+        );
+        assert_eq!(
+            AnsiStyle::parse("dim 245").unwrap().codes,
+            vec!["2", "38;5;245"]
+        );
         assert!(AnsiStyle::parse("not-a-color").is_none());
     }
 
@@ -529,5 +588,15 @@ mod tests {
         assert_eq!(palette.prompt, "magenta");
         assert_eq!(palette.hr, "245");
         assert_eq!(palette.error, ColorPalette::default().error);
+    }
+
+    #[test]
+    fn strict_palette_loading_rejects_invalid_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bad.toml");
+        fs::write(&path, "prompt = \"DeepSkyBlue1\"\nerror = \"bogus\"\n").unwrap();
+
+        let error = ColorPalette::load_palette_file(&path).unwrap_err();
+        assert!(error.to_string().contains("invalid palette"));
     }
 }

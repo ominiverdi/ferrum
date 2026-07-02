@@ -56,7 +56,17 @@ diff_meta = "Grey70"
 
 Restart Ferrum after editing `colors.toml`; the palette is loaded at startup.
 
-Missing entries use defaults. Unknown palette keys or invalid color values are ignored with a warning.
+You can also keep reusable palettes in `~/.config/ferrum/color-palettes/*.toml` and switch interactively:
+
+```text
+/palette
+/palettes
+/palette catppuccin
+```
+
+`/palette` shows the current palette, or `default`/`custom` if it does not match a named palette. `/palettes` lists available palette files. `/palette <name>` validates `color-palettes/<name>.toml`, applies it to the running session, and writes it to `~/.config/ferrum/colors.toml`.
+
+Missing entries use defaults. Unknown palette keys or invalid color values are ignored with a warning when Ferrum starts from `colors.toml`; `/palette <name>` rejects invalid palette files before writing them.
 
 ## Palette keys
 

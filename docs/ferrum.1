@@ -181,6 +181,13 @@ Set diff display mode.
 \f[B]/colors\f[R] MODE
 Set color mode.
 .TP
+\f[B]/palette\f[R] NAME
+Show the current palette, or validate, apply, and persist a palette to
+\f[B]\[ti]/.config/ferrum/colors.toml\f[R].
+.TP
+\f[B]/palettes\f[R]
+List palettes from \f[B]\[ti]/.config/ferrum/color-palettes/\f[R].
+.TP
 \f[B]/usage\f[R] [day|week|month]
 Show token usage summary.
 .TP
@@ -285,7 +292,11 @@ Spaces, dashes, and underscores are ignored, and
 \f[B]gray\f[R]/\f[B]grey\f[R] are equivalent.
 Duplicate xterm names map to the first matching xterm index; use numeric
 indexes for exact selection.
-See \f[B]docs/colors.md\f[R] for all palette keys and color values.
+Reusable palettes can live in
+**\[ti]/.config/ferrum/color-palettes/*.toml\f[B]; \f[R]/palette\f[B]
+shows the current palette, \f[R]/palettes\f[B] lists palette files, and
+\f[R]/palette NAME\f[B] validates and applies one live.
+See \f[R]docs/colors.md** for all palette keys and color values.
 .SH FILES
 .TP
 \f[B]\[ti]/.config/ferrum/config.toml\f[R]
@@ -293,6 +304,10 @@ User configuration.
 .TP
 \f[B]\[ti]/.config/ferrum/colors.toml\f[R]
 Optional semantic UI color palette.
+.TP
+**\[ti]/.config/ferrum/color-palettes/*.toml**
+Optional reusable UI palettes selectable with \f[B]/palette\f[R] and
+listed with \f[B]/palettes\f[R].
 .TP
 \f[B]\[ti]/.local/share/ferrum/sessions/\f[R]
 JSONL session store, unless data directory is overridden by XDG

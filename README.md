@@ -171,6 +171,8 @@ diff_removed = "DeepPink1"
 
 See [`docs/colors.md`](docs/colors.md) for all palette keys and supported color values. Ferrum accepts xterm 256-color table names such as `DeepSkyBlue1`, `Orange3`, and `SpringGreen1`.
 
+Reusable palettes can live in `~/.config/ferrum/color-palettes/*.toml`. In interactive mode, `/palette` shows the current palette, `/palettes` lists palette files, and `/palette <name>` validates and applies one live.
+
 ## System prompt override
 
 Ferrum has an embedded default system prompt. To fully override it, create:
@@ -223,6 +225,8 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /thinking [off|minimal|low|medium|high|xhigh]
 /diff [unified|compact|full|words|side_by_side]
 /colors [auto|on|off]
+/palette [name]
+/palettes
 /image <path>
 /image-paste
 /paste-image
@@ -234,7 +238,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /exit
 ```
 
-Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/skill:`, and `/image` paths.
+Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths.
 
 Shell shortcuts:
 

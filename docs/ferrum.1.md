@@ -170,6 +170,12 @@ Common slash commands:
 **/colors** MODE
 : Set color mode.
 
+**/palette** [NAME]
+: Show the current palette, or validate, apply, and persist a palette to **~/.config/ferrum/colors.toml**.
+
+**/palettes**
+: List palettes from **~/.config/ferrum/color-palettes/**.
+
 **/usage** [day|week|month]
 : Show token usage summary.
 
@@ -262,8 +268,11 @@ as **Orange3** and **DeepSkyBlue1**, styles such as **bold** and **dim**, RGB
 hex values such as **#ffaa00**, and xterm 256-color indexes such as **245**.
 Xterm names are matched case-insensitively. Spaces, dashes, and underscores are
 ignored, and **gray**/**grey** are equivalent. Duplicate xterm names map to the
-first matching xterm index; use numeric indexes for exact selection. See
-**docs/colors.md** for all palette keys and color values.
+first matching xterm index; use numeric indexes for exact selection. Reusable
+palettes can live in **~/.config/ferrum/color-palettes/*.toml**; **/palette**
+shows the current palette, **/palettes** lists palette files, and **/palette
+NAME** validates and applies one live. See **docs/colors.md** for all palette
+keys and color values.
 
 # FILES
 
@@ -272,6 +281,9 @@ first matching xterm index; use numeric indexes for exact selection. See
 
 **~/.config/ferrum/colors.toml**
 : Optional semantic UI color palette.
+
+**~/.config/ferrum/color-palettes/*.toml**
+: Optional reusable UI palettes selectable with **/palette** and listed with **/palettes**.
 
 **~/.local/share/ferrum/sessions/**
 : JSONL session store, unless data directory is overridden by XDG variables.

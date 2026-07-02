@@ -323,6 +323,8 @@ diff_meta = "dim"
 
 Missing `colors.toml` uses the defaults above. Invalid or unknown entries are ignored with a warning.
 
+Reusable palettes can live in `~/.config/ferrum/color-palettes/*.toml`. In interactive mode, `/palette` shows the current palette, `/palettes` lists palette files, and `/palette <name>` validates and applies one live by writing it to `colors.toml`.
+
 Supported color values include ANSI-style names, bright ANSI-style names, xterm 256-color table names, xterm 256-color indexes, RGB hex values, and simple styles:
 
 ```text
