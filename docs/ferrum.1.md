@@ -23,7 +23,8 @@ ferrum - small Rust-native coding agent for Linux
 # DESCRIPTION
 
 Ferrum is a Linux-native coding agent. It provides interactive and one-shot
-prompt modes, local file and shell tools, image input, JSONL sessions,
+prompt modes, local file and shell tools, model-facing session history lookup,
+image input, JSONL sessions,
 AGENTS.md context loading, configurable providers, OpenAI Codex / ChatGPT OAuth,
 OpenAI-compatible providers, Agent Skills-style instructions, and a minimal MCP
 stdio bridge.
@@ -99,6 +100,17 @@ only those servers are enabled.
 
 **--tools** TOOL ...
 : Expose only the listed tools to the model.
+
+# MODEL TOOLS
+
+Ferrum's default native tool set includes:
+
+**read**, **write**, **edit**, **bash**, **wait**, **grep**, **find**, **ls**,
+**history_search**, and **history_read**.
+
+The history tools are model-facing only. They search or read the current session
+JSONL, including entries archived before compaction, and return rendered text
+with JSONL line numbers. There is no slash command for these tools.
 
 **--resume** [REF]
 : Resume the latest session for the current directory, or resume a specific

@@ -45,7 +45,55 @@ fn scripted_response(script: &str, messages: &[Message]) -> Message {
         "missing_read" => missing_read_response(messages),
         "mixed_write_read" => mixed_write_read_response(messages),
         "edit_preview" => edit_preview_response(messages),
+        "history_search_read" => history_search_read_response(messages),
         _ => Message::text(Role::Assistant, format!("unknown fake script: {script}\n")),
+    }
+}
+
+fn history_search_read_response(messages: &[Message]) -> Message {
+    let tool_results = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    if tool_results.len() >= 2 {
+        let saw_marker = tool_results
+            .iter()
+            .any(|content| content.contains("unique-history-marker"));
+        return Message::text(
+            Role::Assistant,
+            if saw_marker {
+                "history tools observed marker\n"
+            } else {
+                "history tools did not observe marker\n"
+            },
+        );
+    }
+
+    if tool_results.len() == 1 {
+        return Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "fake-history-read".to_string(),
+                name: "history_read".to_string(),
+                input: serde_json::json!({"offset": 1, "limit": 20}),
+            }],
+            usage: None,
+        };
+    }
+
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "fake-history-search".to_string(),
+            name: "history_search".to_string(),
+            input: serde_json::json!({"query": "unique-history-marker", "literal": true}),
+        }],
+        usage: None,
     }
 }
 

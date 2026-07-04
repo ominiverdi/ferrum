@@ -264,7 +264,7 @@ allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
 ```
 
-`allow` is optional. When present, it is the maximum allowed tool set. `deny` removes tools from the default or requested set. If `--tools` requests an unknown, denied, or not-allowed tool, Ferrum fails before the model request. `wait` is available only when `bash` is available.
+`allow` is optional. When present, it is the maximum allowed tool set. `deny` removes tools from the default or requested set. If `--tools` requests an unknown, denied, or not-allowed tool, Ferrum fails before the model request. `wait` is available only when `bash` is available. Include `history_search` and `history_read` in `allow` if you want model-facing current-session history lookup while using an allow list.
 
 Ferrum stores the resolved tool list in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
@@ -434,7 +434,7 @@ FERRUM_FAKE_SCRIPT
 FERRUM_METRICS
 ```
 
-`FERRUM_FAKE_SCRIPT` is only used with the fake provider for deterministic local harness tests. Current scripts: `repeat_read`, `missing_read`, and `mixed_write_read`.
+`FERRUM_FAKE_SCRIPT` is only used with the fake provider for deterministic local harness tests. Current scripts: `repeat_read`, `missing_read`, `mixed_write_read`, `edit_preview`, and `history_search_read`.
 
 `FERRUM_METRICS=1` prints per-request model/tool metrics to stderr, including message bytes, tool schema bytes, estimated payload tokens, model latency, tool latency, and result bytes.
 

@@ -1,5 +1,6 @@
 use crate::agent::messages::{Message, Role};
 use anyhow::{Context, Result};
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -411,6 +412,255 @@ pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<Pa
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct HistorySearchOptions {
+    pub query: String,
+    pub literal: bool,
+    pub ignore_case: bool,
+    pub limit: usize,
+}
+
+const HISTORY_SNIPPET_CHARS: usize = 240;
+
+pub fn search_history(path: &Path, options: HistorySearchOptions) -> Result<String> {
+    let matcher = HistoryMatcher::new(&options.query, options.literal, options.ignore_case)?;
+    let limit = options.limit.max(1).min(50);
+    let entries = parsed_session_entries(path)?;
+    let archive_cutoff = latest_compaction_line(&entries).unwrap_or(0);
+    let mut out = String::new();
+    let mut count = 0usize;
+
+    for entry in entries {
+        let Some((role, text)) = searchable_entry_text(&entry.entry) else {
+            continue;
+        };
+        let Some((start, end)) = matcher.find(&text) else {
+            continue;
+        };
+        let status = if entry.line_number < archive_cutoff {
+            "archived"
+        } else {
+            "active"
+        };
+        let snippet = history_snippet(&text, start, end, HISTORY_SNIPPET_CHARS);
+        out.push_str(&format!(
+            "line {} {status} {role}: {snippet}\n",
+            entry.line_number
+        ));
+        count += 1;
+        if count >= limit {
+            break;
+        }
+    }
+
+    if out.is_empty() {
+        out.push_str("no history matches\n");
+    }
+    Ok(out)
+}
+
+pub fn read_history(path: &Path, offset: usize, limit: usize) -> Result<String> {
+    let offset = offset.max(1);
+    let limit = limit.max(1).min(100);
+    let entries = parsed_session_entries(path)?;
+    let archive_cutoff = latest_compaction_line(&entries).unwrap_or(0);
+    let mut out = String::new();
+    let mut count = 0usize;
+
+    for entry in entries
+        .into_iter()
+        .filter(|entry| entry.line_number >= offset)
+    {
+        let status = if entry.line_number < archive_cutoff {
+            "archived"
+        } else {
+            "active"
+        };
+        match render_history_entry(&entry.entry) {
+            Some((kind, text)) => {
+                out.push_str(&format!("line {} {status} {kind}:\n", entry.line_number));
+                for line in text.lines() {
+                    out.push_str("  ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            None => out.push_str(&format!("line {} {status}: metadata\n", entry.line_number)),
+        }
+        count += 1;
+        if count >= limit {
+            break;
+        }
+    }
+
+    if out.is_empty() {
+        out.push_str("no history lines\n");
+    }
+    Ok(out)
+}
+
+struct ParsedSessionEntry {
+    line_number: usize,
+    entry: SessionEntry,
+}
+
+fn parsed_session_entries(path: &Path) -> Result<Vec<ParsedSessionEntry>> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+    for (index, line) in reader.lines().enumerate() {
+        let line_number = index + 1;
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: SessionEntry = match serde_json::from_str(&line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        entries.push(ParsedSessionEntry { line_number, entry });
+    }
+    Ok(entries)
+}
+
+fn latest_compaction_line(entries: &[ParsedSessionEntry]) -> Option<usize> {
+    entries
+        .iter()
+        .filter(|entry| matches!(entry.entry, SessionEntry::Compaction { .. }))
+        .map(|entry| entry.line_number)
+        .last()
+}
+
+fn searchable_entry_text(entry: &SessionEntry) -> Option<(&'static str, String)> {
+    match entry {
+        SessionEntry::Message { message, .. } => {
+            let text = message_search_text(message);
+            (!text.trim().is_empty()).then_some((message_role_name(message), text))
+        }
+        SessionEntry::Compaction { summary, .. } => Some(("compaction", summary.clone())),
+        SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => None,
+    }
+}
+
+fn render_history_entry(entry: &SessionEntry) -> Option<(&'static str, String)> {
+    match entry {
+        SessionEntry::Message { message, .. } => {
+            Some((message_role_name(message), message_history_text(message)))
+        }
+        SessionEntry::Compaction { summary, .. } => Some(("compaction", summary.clone())),
+        SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => None,
+    }
+}
+
+fn message_role_name(message: &Message) -> &'static str {
+    match message.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+}
+
+fn message_search_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            crate::agent::messages::ContentBlock::Text { text } => Some(text.clone()),
+            crate::agent::messages::ContentBlock::Thinking { text, .. } => {
+                Some(format!("thinking: {text}"))
+            }
+            crate::agent::messages::ContentBlock::ToolResult {
+                content, is_error, ..
+            } => Some(format!("tool_result error={is_error}: {content}")),
+            crate::agent::messages::ContentBlock::Image { source, sha256, .. } => {
+                Some(format!("image {source} sha256={sha256}"))
+            }
+            crate::agent::messages::ContentBlock::ToolUse { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn message_history_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .map(|block| match block {
+            crate::agent::messages::ContentBlock::Text { text } => text.clone(),
+            crate::agent::messages::ContentBlock::Thinking { text, .. } => {
+                format!("thinking: {text}")
+            }
+            crate::agent::messages::ContentBlock::ToolUse { name, input, .. } => {
+                format!("tool_call {name}: {input}")
+            }
+            crate::agent::messages::ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                format!("tool_result error={is_error}: {content}")
+            }
+            crate::agent::messages::ContentBlock::Image { source, sha256, .. } => {
+                format!("image {source} sha256={sha256}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+struct HistoryMatcher(Regex);
+
+impl HistoryMatcher {
+    fn new(query: &str, literal: bool, ignore_case: bool) -> Result<Self> {
+        let pattern = if literal {
+            regex::escape(query)
+        } else {
+            query.to_string()
+        };
+        Ok(Self(
+            RegexBuilder::new(&pattern)
+                .case_insensitive(ignore_case)
+                .build()
+                .with_context(|| format!("invalid history search pattern: {query}"))?,
+        ))
+    }
+
+    fn find(&self, text: &str) -> Option<(usize, usize)> {
+        self.0.find(text).map(|found| (found.start(), found.end()))
+    }
+}
+
+fn history_snippet(text: &str, start: usize, end: usize, max_chars: usize) -> String {
+    let start = start.min(text.len());
+    let end = end.min(text.len()).max(start);
+    let before = max_chars / 3;
+    let after = max_chars.saturating_sub(before);
+    let snippet_start = text[..start]
+        .char_indices()
+        .rev()
+        .nth(before)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    let snippet_end = text[end..]
+        .char_indices()
+        .nth(after)
+        .map(|(index, _)| end + index)
+        .unwrap_or(text.len());
+    let mut snippet = String::new();
+    if snippet_start > 0 {
+        snippet.push_str("...");
+    }
+    snippet.push_str(
+        &text[snippet_start..snippet_end]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    if snippet_end < text.len() {
+        snippet.push_str("...");
+    }
+    snippet
+}
+
 pub enum SessionRefResolution {
     Existing(PathBuf),
     Created(PathBuf),
@@ -805,6 +1055,49 @@ mod tests {
         assert_eq!(info.archived_message_count, 1);
         assert_eq!(info.compaction_count, 1);
         assert!(info.last_compaction_timestamp_ms.is_some());
+    }
+
+    #[test]
+    fn history_search_and_read_render_archived_tool_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session =
+            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        session
+            .append_message(&Message::text(Role::User, "debug slurm job 42"))
+            .unwrap();
+        session
+            .append_message(&Message {
+                role: Role::Tool,
+                content: vec![crate::agent::messages::ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "sacct says OUT_OF_MEMORY on node n004".to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+            })
+            .unwrap();
+        session.append_compaction("summary checkpoint").unwrap();
+        session
+            .append_message(&Message::text(Role::Assistant, "raise --mem and retry"))
+            .unwrap();
+
+        let matches = search_history(
+            session.path(),
+            HistorySearchOptions {
+                query: "out_of_memory".to_string(),
+                literal: true,
+                ignore_case: true,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        assert!(matches.contains("archived tool"));
+        assert!(matches.contains("OUT_OF_MEMORY"));
+
+        let read = read_history(session.path(), 3, 2).unwrap();
+        assert!(read.contains("line 3 archived tool"));
+        assert!(read.contains("tool_result error=false"));
+        assert!(read.contains("line 4 active compaction"));
     }
 
     #[test]

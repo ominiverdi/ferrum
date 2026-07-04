@@ -30,6 +30,7 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 - Config-backed provider registry
 - Live model listing for supported providers
 - Built-in tools: `read`, `write`, `edit`, `bash`, `wait`, `grep`, `find`, `ls`
+- Model-facing session history tools: `history_search`, `history_read`
 - Tool exposure control with `--tools` and config allow/deny lists
 - Semantic UI color palette with `~/.config/ferrum/colors.toml` and `/colors auto|on|off`
 - Interactive completion and hints for slash commands, selected command arguments, `/image` paths, and `/skill:` names

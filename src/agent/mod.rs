@@ -1077,6 +1077,46 @@ fn tool_schema_bytes(tools: &[tools::ToolDefinition]) -> usize {
         .unwrap_or(0)
 }
 
+fn history_tool_definitions() -> Vec<tools::ToolDefinition> {
+    vec![
+        tools::ToolDefinition {
+            name: "history_search".to_string(),
+            description: "Search the current session history, including messages archived before compaction. Use when prior details from this conversation may matter. Returns matching snippets with JSONL line numbers for follow-up history_read calls.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Text or regex to search for" },
+                    "literal": { "type": "boolean", "description": "Treat query as literal text. Default true." },
+                    "ignore_case": { "type": "boolean", "description": "Case-insensitive search. Default true." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50, "description": "Maximum matches to return. Default 10." }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }),
+        },
+        tools::ToolDefinition {
+            name: "history_read".to_string(),
+            description: "Read rendered entries from the current session history by JSONL line number. Use line numbers returned by history_search to inspect surrounding context.".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "offset": { "type": "integer", "minimum": 1, "description": "1-based JSONL line number to start reading" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum JSONL lines to read. Default 20." }
+                },
+                "required": ["offset"],
+                "additionalProperties": false
+            }),
+        },
+    ]
+}
+
+fn required_history_str<'a>(input: &'a serde_json::Value, key: &str) -> Result<&'a str> {
+    input
+        .get(key)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing required string field: {key}"))
+}
+
 fn active_mcp_servers(config: &Config) -> Vec<crate::config::McpServerConfig> {
     config
         .mcp_servers
@@ -1588,6 +1628,7 @@ impl AgentState {
 
         let provider = providers::from_config(&config.provider);
         let mut tools = builtin_tools::definitions();
+        tools.extend(history_tool_definitions());
         if self.mcp_enabled {
             self.ensure_mcp(config).await?;
             if let Some(mcp) = &self.mcp {
@@ -1893,7 +1934,8 @@ impl AgentState {
     }
 
     fn print_mcp_status(&self, config: &Config) {
-        let native_tools = builtin_tools::definitions();
+        let mut native_tools = builtin_tools::definitions();
+        native_tools.extend(history_tool_definitions());
         let mcp_tools = if self.mcp_enabled {
             self.mcp
                 .as_ref()
@@ -2094,6 +2136,9 @@ impl AgentState {
             };
             anyhow::bail!(message);
         }
+        if matches!(name, "history_search" | "history_read") {
+            return self.execute_history_tool(name, input);
+        }
         if self.mcp_enabled {
             if let Some(mcp) = &mut self.mcp {
                 if mcp.has_tool(name) {
@@ -2102,6 +2147,52 @@ impl AgentState {
             }
         }
         builtin_tools::execute_with_cancel(name, input, &self.cwd, cancel, interactive).await
+    }
+
+    fn execute_history_tool(&self, name: &str, input: &serde_json::Value) -> Result<String> {
+        match name {
+            "history_search" => {
+                let query = required_history_str(input, "query")?.to_string();
+                let literal = input
+                    .get("literal")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true);
+                let ignore_case = input
+                    .get("ignore_case")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(true);
+                let limit = input
+                    .get("limit")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(10) as usize;
+                session::jsonl::search_history(
+                    self.session.path(),
+                    session::jsonl::HistorySearchOptions {
+                        query,
+                        literal,
+                        ignore_case,
+                        limit,
+                    },
+                )
+            }
+            "history_read" => {
+                let offset = input
+                    .get("offset")
+                    .and_then(|value| value.as_u64())
+                    .ok_or_else(|| anyhow::anyhow!("missing required integer field: offset"))?
+                    as usize;
+                let limit = input
+                    .get("limit")
+                    .and_then(|value| value.as_u64())
+                    .unwrap_or(20) as usize;
+                Ok(session::jsonl::read_history(
+                    self.session.path(),
+                    offset,
+                    limit,
+                )?)
+            }
+            _ => unreachable!("unknown history tool: {name}"),
+        }
     }
 
     fn message_count(&self) -> usize {

@@ -36,10 +36,10 @@ ferrum - small Rust-native coding agent for Linux
 .PP
 Ferrum is a Linux-native coding agent.
 It provides interactive and one-shot prompt modes, local file and shell
-tools, image input, JSONL sessions, AGENTS.md context loading,
-configurable providers, OpenAI Codex / ChatGPT OAuth, OpenAI-compatible
-providers, Agent Skills-style instructions, and a minimal MCP stdio
-bridge.
+tools, model-facing session history lookup, image input, JSONL sessions,
+AGENTS.md context loading, configurable providers, OpenAI Codex /
+ChatGPT OAuth, OpenAI-compatible providers, Agent Skills-style
+instructions, and a minimal MCP stdio bridge.
 .PP
 Ferrum stores sessions as JSONL files and restores context from previous
 sessions when requested.
@@ -111,6 +111,19 @@ Disable all tools for this process.
 .TP
 \f[B]\[en]tools\f[R] TOOL \&...
 Expose only the listed tools to the model.
+.SH MODEL TOOLS
+.PP
+Ferrum\[cq]s default native tool set includes:
+.PP
+\f[B]read\f[R], \f[B]write\f[R], \f[B]edit\f[R], \f[B]bash\f[R],
+\f[B]wait\f[R], \f[B]grep\f[R], \f[B]find\f[R], \f[B]ls\f[R],
+\f[B]history_search\f[R], and \f[B]history_read\f[R].
+.PP
+The history tools are model-facing only.
+They search or read the current session JSONL, including entries
+archived before compaction, and return rendered text with JSONL line
+numbers.
+There is no slash command for these tools.
 .TP
 \f[B]\[en]resume\f[R] [REF]
 Resume the latest session for the current directory, or resume a

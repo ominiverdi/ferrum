@@ -39,9 +39,67 @@ deny = ["write", "edit"]
 
 Ferrum stores the resolved tool list in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
+Ferrum also exposes lightweight session-history tools by default:
+
+- `history_search`: search the current session JSONL, including entries archived before compaction.
+- `history_read`: read rendered session entries by JSONL line number.
+
+These tools are model-facing only; there is no slash command for them. They are meant for cases where the model needs to recover prior details from the current conversation without keeping all old text in the active context window.
+
 If a provider emits a call for a non-exposed tool, Ferrum returns a tool error such as `Tool 'write' is not available` instead of executing it.
 
 Interactive shell shortcuts are separate from model tools: `!cmd` and `!!cmd` are user-invoked commands handled by Ferrum, not tools exposed to the model.
+
+## history_search
+
+Search the current session history. This includes active messages and messages archived before compaction.
+
+Input:
+
+```json
+{
+  "query": "OUT_OF_MEMORY",
+  "literal": true,
+  "ignore_case": true,
+  "limit": 10
+}
+```
+
+Notes:
+
+- `query` is required.
+- `literal` defaults to `true`; set it to `false` to treat `query` as a regular expression.
+- `ignore_case` defaults to `true`.
+- `limit` defaults to `10` and is capped at `50`.
+- Output includes JSONL line numbers, active/archived status, role, and a snippet.
+- Search is scoped to the current session file only, not all sessions.
+
+Example output:
+
+```text
+line 133 archived tool: sacct says OUT_OF_MEMORY on node n004
+line 188 active assistant: likely memory request issue...
+```
+
+## history_read
+
+Read rendered current-session history entries by JSONL line number. Use this after `history_search` when surrounding context is needed.
+
+Input:
+
+```json
+{
+  "offset": 120,
+  "limit": 30
+}
+```
+
+Notes:
+
+- `offset` is a 1-based JSONL line number.
+- `limit` defaults to `20` and is capped at `100`.
+- Output is rendered as role/content text, not raw JSONL.
+- Search/read line numbers are stable for the session file.
 
 ## read
 

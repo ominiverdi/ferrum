@@ -321,6 +321,14 @@ deny = ["write", "edit"]
 
 `allow` is optional and caps the available tool set. `deny` removes tools. Invalid requested tools fail before the model request. Resolved tool lists are stored in session metadata for visibility and audit, but resume uses the current process/config policy so new default tools can appear automatically unless limited by policy.
 
+Default native tools include file/shell tools plus model-facing session history tools:
+
+```text
+read write edit bash wait grep find ls history_search history_read
+```
+
+The history tools are current-session only and include archived pre-compaction JSONL entries. They are exposed to the model as tools, not as slash commands.
+
 ### `read`
 
 Read a text file with optional offset/limit. Output is truncated safely.
@@ -349,9 +357,13 @@ Search file contents.
 
 Find files by name/glob.
 
-### `ls`
+### `history_search`
 
-List directory contents.
+Search rendered current-session JSONL entries, including entries archived before compaction. Returns matching snippets with JSONL line numbers and active/archived status. Literal case-insensitive search is the default; regex search is available.
+
+### `history_read`
+
+Read rendered current-session entries by 1-based JSONL line number. Intended as follow-up after `history_search`. Output is role/content text, not raw JSONL.
 
 ## MCP
 
