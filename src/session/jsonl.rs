@@ -1,6 +1,5 @@
 use crate::agent::messages::{Message, Role};
 use anyhow::{Context, Result};
-use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -360,14 +359,6 @@ pub struct SessionInfo {
     pub modified: SystemTime,
 }
 
-#[derive(Debug, Clone)]
-pub struct HistorySearchMatch {
-    pub line_number: usize,
-    pub archived: bool,
-    pub role: String,
-    pub snippet: String,
-}
-
 pub fn latest_session_for_cwd(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
     Ok(list_sessions_for_cwd(dir, cwd)?
         .first()
@@ -418,85 +409,6 @@ pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<Pa
         [] => anyhow::bail!("no session matches '{reference}' in current directory"),
         _ => anyhow::bail!("session reference '{reference}' is ambiguous"),
     }
-}
-
-pub fn search_history(path: &Path, pattern: &str, limit: usize) -> Result<Vec<HistorySearchMatch>> {
-    let regex = RegexBuilder::new(pattern)
-        .case_insensitive(true)
-        .build()
-        .with_context(|| format!("invalid history search pattern: {pattern}"))?;
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut parsed = Vec::new();
-    let mut latest_compaction_line = None;
-    for (index, line) in reader.lines().enumerate() {
-        let line_number = index + 1;
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let entry: SessionEntry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        if matches!(entry, SessionEntry::Compaction { .. }) {
-            latest_compaction_line = Some(line_number);
-        }
-        parsed.push((line_number, entry));
-    }
-
-    let mut matches = Vec::new();
-    let archive_cutoff = latest_compaction_line.unwrap_or(0);
-    for (line_number, entry) in parsed {
-        let (role, text) = match entry {
-            SessionEntry::Message { message, .. } => (
-                format!("{:?}", message.role).to_lowercase(),
-                message.text_content(),
-            ),
-            SessionEntry::Compaction { summary, .. } => ("compaction".to_string(), summary),
-            SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => continue,
-        };
-        if !regex.is_match(&text) {
-            continue;
-        }
-        matches.push(HistorySearchMatch {
-            line_number,
-            archived: line_number < archive_cutoff,
-            role,
-            snippet: history_snippet(&text, &regex),
-        });
-        if matches.len() >= limit {
-            break;
-        }
-    }
-    Ok(matches)
-}
-
-fn history_snippet(text: &str, regex: &regex::Regex) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let Some(found) = regex.find(&compact) else {
-        return compact.chars().take(160).collect();
-    };
-    let start = compact[..found.start()]
-        .char_indices()
-        .rev()
-        .nth(60)
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    let end = compact[found.end()..]
-        .char_indices()
-        .nth(100)
-        .map(|(index, _)| found.end() + index)
-        .unwrap_or(compact.len());
-    let mut snippet = String::new();
-    if start > 0 {
-        snippet.push_str("...");
-    }
-    snippet.push_str(&compact[start..end]);
-    if end < compact.len() {
-        snippet.push_str("...");
-    }
-    snippet
 }
 
 pub enum SessionRefResolution {
@@ -893,26 +805,6 @@ mod tests {
         assert_eq!(info.archived_message_count, 1);
         assert_eq!(info.compaction_count, 1);
         assert!(info.last_compaction_timestamp_ms.is_some());
-    }
-
-    #[test]
-    fn history_search_finds_archived_messages() {
-        let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
-        session
-            .append_message(&Message::text(Role::User, "old token plan"))
-            .unwrap();
-        session.append_compaction("summary checkpoint").unwrap();
-        session
-            .append_message(&Message::text(Role::User, "new token plan"))
-            .unwrap();
-
-        let matches = search_history(session.path(), "token\\s+plan", 10).unwrap();
-
-        assert_eq!(matches.len(), 2);
-        assert!(matches[0].archived);
-        assert!(!matches[1].archived);
     }
 
     #[test]

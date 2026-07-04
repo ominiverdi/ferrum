@@ -61,13 +61,19 @@ Use \f[B]\[en]resume\f[R] to resume the latest session for the current
 directory.
 If no matching session exists, Ferrum starts a new session.
 .TP
+\f[B]Print-mode named session mode\f[R]
+Use \f[B]\[en]session\f[R] REF with \f[B]-p\f[R] to resume or create a
+named print-mode session.
+If REF is a valid session id and no matching session exists, Ferrum
+creates \f[B]REF.jsonl\f[R] in the session data directory.
+.TP
+\f[B]Interactive explicit session mode\f[R]
+Use \f[B]\[en]session\f[R] REF or \f[B]\[en]resume\f[R] REF in
+interactive mode to open an existing session by JSONL path or id prefix.
+.TP
 \f[B]Continue mode\f[R]
 Use \f[B]\[en]continue\f[R] as an alias for continuing the latest
 session for the current directory.
-.TP
-\f[B]Named or explicit session mode\f[R]
-Use \f[B]\[en]session\f[R] REF or \f[B]\[en]resume\f[R] REF to open a
-session by JSONL path or id prefix.
 .SH OPTIONS
 .TP
 \f[B]-p\f[R], \f[B]\[en]print\f[R] PROMPT
@@ -114,7 +120,11 @@ specific session by JSONL path or id prefix.
 Continue the latest session for the current directory.
 .TP
 \f[B]\[en]session\f[R] REF
-Open a specific session by JSONL path or id prefix.
+In print mode, resume or create a named session.
+In interactive mode, open an existing session by JSONL path or id
+prefix.
+Valid named session ids use 1-80 characters from A-Z, a-z, 0-9, `.',
+\[cq]_`, or'-`, and must not start with'.\[cq].
 .TP
 \f[B]-h\f[R], \f[B]\[en]help\f[R]
 Print command help.
@@ -135,12 +145,6 @@ Show Ferrum version.
 .TP
 \f[B]/session\f[R]
 Show current session information.
-.TP
-\f[B]/session tail\f[R] [N]
-Show recent user/assistant message previews.
-.TP
-\f[B]/history search\f[R] REGEX
-Search active and archived session history.
 .TP
 \f[B]/sessions\f[R]
 List recent sessions.

@@ -127,10 +127,6 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, session_words())));
         }
-        if let Some(prefix) = command_before.strip_prefix("/history ") {
-            let start = pos - prefix.len();
-            return Ok((start, complete_from_words(prefix, history_words())));
-        }
         if let Some(prefix) = command_before.strip_prefix("/sessions ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, sessions_words())));
@@ -190,8 +186,7 @@ impl FerrumLineHelper {
         command_hints.insert("/image", " <path>");
         command_hints.insert("/image-paste", "");
         command_hints.insert("/paste-image", "");
-        command_hints.insert("/session", " tail [n]");
-        command_hints.insert("/history", " search <pattern>");
+        command_hints.insert("/session", "");
         command_hints.insert("/sessions", " pick | del | new");
         command_hints.insert("/colors", " auto|on|off");
         command_hints.insert("/palette", " <name>  (/palettes to list)");
@@ -223,7 +218,6 @@ fn slash_command_words() -> &'static [&'static str] {
         "/exit",
         "/version",
         "/session",
-        "/history",
         "/sessions",
         "/title",
         "/skills",
@@ -287,11 +281,7 @@ fn palette_command_words(config: &Config) -> Vec<String> {
 }
 
 fn session_words() -> &'static [&'static str] {
-    &["tail"]
-}
-
-fn history_words() -> &'static [&'static str] {
-    &["search"]
+    &[]
 }
 
 fn sessions_words() -> &'static [&'static str] {
@@ -509,6 +499,7 @@ pub async fn run_interactive(
     thinking_overridden: bool,
     tools_overridden: bool,
 ) -> Result<()> {
+    let show_resume_tail = session_ref.is_some() || resume.is_some() || continue_latest;
     let mut state = match (session_ref, resume, continue_latest) {
         (Some(reference), _, _) => AgentState::resume_ref(
             config,
@@ -532,6 +523,9 @@ pub async fn run_interactive(
     }
     println!("Ferrum interactive. /help for commands.");
     print_current_session_header(&state)?;
+    if show_resume_tail {
+        print_recent_conversation_lines(&state.messages, 40, state.color_mode, &state.colors);
+    }
 
     let mut rl = Editor::<FerrumLineHelper, DefaultHistory>::new()?;
     rl.set_helper(Some(FerrumLineHelper::new(&state.skills, config)));
@@ -714,7 +708,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /session tail [n]\n- /history search <regex>\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -3068,6 +3062,52 @@ fn format_token_count(value: u64) -> String {
     out.chars().rev().collect()
 }
 
+fn print_recent_conversation_lines(
+    messages: &[messages::Message],
+    limit: usize,
+    color_mode: ColorMode,
+    colors: &ColorPalette,
+) {
+    let lines = recent_conversation_lines(messages, limit);
+    if lines.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "{}",
+        colors.paint(
+            ColorToken::Highlight,
+            color_mode,
+            format!("Recent conversation (last {} lines):", lines.len())
+        )
+    );
+    for line in lines {
+        println!("{line}");
+    }
+    render_hr(color_mode, colors);
+}
+
+fn recent_conversation_lines(messages: &[messages::Message], limit: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for message in messages {
+        let label = match message.role {
+            messages::Role::User => "user",
+            messages::Role::Assistant => "assistant",
+            messages::Role::Tool => "tool",
+            messages::Role::System => continue,
+        };
+        for line in message.display_text().lines() {
+            let line = line.trim_end();
+            if line.trim().is_empty() {
+                continue;
+            }
+            lines.push(format!("{label}: {line}"));
+        }
+    }
+    let skip = lines.len().saturating_sub(limit.max(1));
+    lines.into_iter().skip(skip).collect()
+}
+
 fn print_session_preview(messages: &[messages::Message], limit: usize) {
     let preview = session_preview_lines(messages, limit);
     if preview.is_empty() {
@@ -3310,8 +3350,6 @@ mod context_pressure_tests {
         let history = DefaultHistory::default();
         let ctx = rustyline::Context::new(&history);
 
-        assert_completion(&helper, &ctx, "/session t", "tail");
-        assert_completion(&helper, &ctx, "/history s", "search");
         assert_completion(&helper, &ctx, "/colors a", "auto");
         assert_completion(&helper, &ctx, "/palette cat", "catppuccin");
         let (_start, candidates) = helper
@@ -3386,6 +3424,25 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn recent_conversation_lines_include_user_assistant_and_tool() {
+        let messages = vec![
+            messages::Message::text(messages::Role::System, "runtime"),
+            messages::Message::text(messages::Role::User, "hello\nagain"),
+            messages::Message::text(messages::Role::Assistant, "answer"),
+            messages::Message::text(messages::Role::Tool, "tool line 1\ntool line 2"),
+        ];
+
+        assert_eq!(
+            recent_conversation_lines(&messages, 3),
+            vec![
+                "assistant: answer".to_string(),
+                "tool: tool line 1".to_string(),
+                "tool: tool line 2".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn restored_session_tools_do_not_limit_new_default_tools() {
         let temp = tempfile::tempdir().unwrap();
         let mut session = session::JsonlSession::create(
@@ -3454,8 +3511,7 @@ mod context_pressure_tests {
         for command in [
             "/help",
             "/version",
-            "/session tail [n]",
-            "/history search <regex>",
+            "/session",
             "/title [text]",
             "/sessions del",
             "/skill <name> [args]",
@@ -4457,10 +4513,6 @@ fn handle_command(
             println!("  /quit | /exit          exit");
             println!("  /version              show Ferrum version");
             println!("  /session              show session path/status/size");
-            println!(
-                "  /session tail [n]     show last n user/assistant messages from session UI-only"
-            );
-            println!("  /history search <re> search active and archived session history");
             println!("  /title [text]         show or set session title");
             println!("  /sessions             list recent sessions for current directory");
             println!("  /sessions pick        open session picker");
@@ -4498,15 +4550,6 @@ fn handle_command(
         }
         "/session" => {
             match parts.next() {
-                Some("tail") => {
-                    let count = parts
-                        .next()
-                        .map(str::parse::<usize>)
-                        .transpose()?
-                        .unwrap_or(8)
-                        .max(1);
-                    print_session_preview(&state.messages, count);
-                }
                 Some(other) => {
                     anyhow::bail!("unknown /session subcommand: {other}");
                 }
@@ -4545,36 +4588,6 @@ fn handle_command(
                     println!("thinking: {}", config.thinking.as_str());
                     println!("provider: {}", config.provider_name);
                 }
-            }
-            Ok(CommandAction::Continue)
-        }
-        "/history" => {
-            match parts.next() {
-                Some("search") => {
-                    let pattern = parts.collect::<Vec<_>>().join(" ");
-                    if pattern.trim().is_empty() {
-                        anyhow::bail!("usage: /history search <regex>");
-                    }
-                    let matches =
-                        session::jsonl::search_history(state.session.path(), &pattern, 25)?;
-                    if matches.is_empty() {
-                        println!("no history matches");
-                    } else {
-                        for matched in matches {
-                            let status = if matched.archived {
-                                "archived"
-                            } else {
-                                "active"
-                            };
-                            println!(
-                                "{}:{}:{}: {}",
-                                matched.line_number, status, matched.role, matched.snippet
-                            );
-                        }
-                    }
-                }
-                Some(other) => anyhow::bail!("unknown /history subcommand: {other}"),
-                None => anyhow::bail!("usage: /history search <regex>"),
             }
             Ok(CommandAction::Continue)
         }

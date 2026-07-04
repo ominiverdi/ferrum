@@ -17,7 +17,7 @@ Entry types:
 
 Sessions are append-oriented and human-inspectable.
 
-## Resume
+## Resume and named sessions
 
 Continue the latest session for the current directory in interactive mode:
 
@@ -31,21 +31,41 @@ Resume the latest session for the current directory in interactive mode:
 ferrum --resume
 ```
 
-Print mode can also resume or create a named session with `--session`:
-
-```bash
-ferrum --session mysession -p "first prompt"
-ferrum --session mysession -p "second prompt with prior context"
-```
-
-If `mysession` exists, Ferrum loads it before running the prompt. If it does not exist, Ferrum creates `mysession.jsonl` in the session data directory. User-defined session ids may contain only letters, digits, `.`, `_`, and `-`; they must not start with `.`.
-
-Resume a specific session by path or id prefix:
+Resume a specific existing session by JSONL path or id prefix:
 
 ```bash
 ferrum --resume ~/.local/share/ferrum/sessions/<file>.jsonl
 ferrum --session <id-prefix>
 ```
+
+### Print-mode named sessions
+
+Print mode can resume or create a named session with `--session`:
+
+```bash
+ferrum --session auth-scan -p "first prompt"
+ferrum --session auth-scan -p "second prompt with prior context"
+```
+
+If `auth-scan` exists, Ferrum loads it before running the prompt. If it does not exist, Ferrum creates `auth-scan.jsonl` in the session data directory. User-defined session ids may contain only letters, digits, `.`, `_`, and `-`; they must not start with `.`.
+
+This is useful for recurring jobs that need memory across runs:
+
+```bash
+ferrum --session port-audit --tools bash -p '
+Run ss -tulpen.
+Compare current listeners with prior observations in this session.
+Report added or removed externally exposed ports.
+'
+```
+
+`--session` behaves differently in interactive mode: it opens an existing session by path or id prefix. It does not create a new named session there. To create a named session for automation, use print mode once with `--session NAME -p ...`, or provide an explicit JSONL path.
+
+### Cron notes
+
+`--session NAME -p ...` is suitable for cron if the same Unix user runs each job and the session id is stable. Ferrum stores sessions under `$FERRUM_DATA_DIR/sessions` when `FERRUM_DATA_DIR` is set, otherwise `$XDG_DATA_HOME/ferrum/sessions`, otherwise `~/.local/share/ferrum/sessions`.
+
+For system crontabs, set `FERRUM_CONFIG_DIR` and `FERRUM_DATA_DIR` explicitly or run Ferrum as the intended user. Otherwise `~` may resolve to root's home and the job may use different config, auth, and session storage than your interactive shell.
 
 Set a title when starting or resuming a session:
 
@@ -66,7 +86,9 @@ ferrum --title "Quick check" -p "summarize this repo"
 /compact
 ```
 
-`/session` shows the current session status. `/session tail [n]` shows the last `n` user/assistant message previews without affecting model context.
+`/session` shows the current session status.
+
+When an interactive session is resumed with `--resume`, `--continue`, or `--session REF`, Ferrum prints the last 40 visible conversation lines before prompting. This is UI-only: it does not add anything to model context and does not create a new model turn.
 
 `/sessions` lists recent sessions for the current directory. `/sessions pick` opens a lightweight numbered picker where entering a number opens that session and entering text filters the list. `/sessions del` opens a deletion picker. `/sessions new` starts a fresh session.
 

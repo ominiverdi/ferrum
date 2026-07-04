@@ -64,9 +64,7 @@ Slash commands:
 - `/help`
 - `/version`
 - `/session`
-- `/session tail [n]`
-- `/history search <regex>`
-- `/title [text]`
+- `/title [text]``
 - `/sessions`
 - `/sessions pick`
 - `/sessions del`
@@ -95,11 +93,12 @@ Shell shortcuts:
 
 Session resume:
 
-- Resume flags apply to interactive mode. Print mode currently starts a fresh session.
 - `ferrum --continue` resumes the latest JSONL session for the current directory.
 - `ferrum --resume` resumes the latest JSONL session for the current directory.
 - `ferrum --resume <path|id-prefix>` resumes a specific JSONL session.
-- `ferrum --session <path|id-prefix>` opens a specific JSONL session.
+- `ferrum --session <name> -p <prompt>` resumes or creates a named print-mode session.
+- `ferrum --session <path|id-prefix>` opens a specific JSONL session in interactive mode.
+- Resumed interactive sessions show the last 40 visible conversation lines before prompting.
 - `/sessions` lists current-directory sessions.
 - `/sessions pick` provides a lightweight numbered picker with text filtering.
 - `/sessions del` provides a deletion picker.

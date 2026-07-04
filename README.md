@@ -117,6 +117,14 @@ ferrum --resume
 ferrum --continue
 ```
 
+Use a named print-mode session for recurring jobs that need prior context:
+
+```bash
+ferrum --session port-audit --tools bash -p "compare current open ports with prior observations"
+```
+
+`--session NAME -p ...` creates `NAME.jsonl` on first use and resumes it on later runs. In interactive mode, `--session REF` opens an existing session by JSONL path or id prefix. See [`docs/sessions.md`](docs/sessions.md).
+
 ## Minimal config
 
 Ferrum reads config from `~/.config/ferrum/config.toml`.
@@ -209,8 +217,6 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /help
 /version
 /session
-/session tail [n]
-/history search <regex>
 /title [text]
 /sessions
 /sessions pick

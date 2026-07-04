@@ -48,15 +48,21 @@ and the agent loop.
 : Use **--resume** to resume the latest session for the current directory. If no
 matching session exists, Ferrum starts a new session.
 
+**Print-mode named session mode**
+
+: Use **--session** REF with **-p** to resume or create a named print-mode
+session. If REF is a valid session id and no matching session exists, Ferrum
+creates **REF.jsonl** in the session data directory.
+
+**Interactive explicit session mode**
+
+: Use **--session** REF or **--resume** REF in interactive mode to open an
+existing session by JSONL path or id prefix.
+
 **Continue mode**
 
 : Use **--continue** as an alias for continuing the latest session for the
 current directory.
-
-**Named or explicit session mode**
-
-: Use **--session** REF or **--resume** REF to open a session by JSONL path or id
-prefix.
 
 # OPTIONS
 
@@ -102,7 +108,9 @@ session by JSONL path or id prefix.
 : Continue the latest session for the current directory.
 
 **--session** REF
-: Open a specific session by JSONL path or id prefix.
+: In print mode, resume or create a named session. In interactive mode, open an
+existing session by JSONL path or id prefix. Valid named session ids use 1-80
+characters from A-Z, a-z, 0-9, '.', '_', or '-', and must not start with '.'.
 
 **-h**, **--help**
 : Print command help.
@@ -124,12 +132,6 @@ Common slash commands:
 
 **/session**
 : Show current session information.
-
-**/session tail** [N]
-: Show recent user/assistant message previews.
-
-**/history search** REGEX
-: Search active and archived session history.
 
 **/sessions**
 : List recent sessions.
