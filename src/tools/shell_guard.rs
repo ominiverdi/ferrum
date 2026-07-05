@@ -717,4 +717,32 @@ mod tests {
         assert_denied("cp payload ~/.aws/credentials");
         assert_denied("mv payload /etc/hosts");
     }
+
+    #[test]
+    fn documented_security_examples_match_expected_tiers() {
+        for command in [
+            "r''m -r''f /",
+            "rm${IFS}-rf${IFS}/",
+            "echo \"$(rm /tmp/demo)\"",
+            "echo cm0gLXJmIC8= | base64 -d | sh",
+            "find /tmp/demo -delete",
+            "printf ok\nfind /tmp/demo -delete",
+        ] {
+            assert_denied_at(command, SafetyLevel::Low);
+            assert_denied_at(command, SafetyLevel::Medium);
+            assert_denied_at(command, SafetyLevel::High);
+        }
+
+        assert_allowed_at("echo \"$(date)\"", SafetyLevel::Low);
+        assert_denied_at("echo \"$(date)\"", SafetyLevel::Medium);
+        assert_denied_at("echo \"$(date)\"", SafetyLevel::High);
+
+        assert_allowed_at("python3 -c 'print(1)'", SafetyLevel::Low);
+        assert_allowed_at("python3 -c 'print(1)'", SafetyLevel::Medium);
+        assert_denied_at("python3 -c 'print(1)'", SafetyLevel::High);
+
+        assert_allowed_at("curl https://example.com", SafetyLevel::Low);
+        assert_allowed_at("curl https://example.com", SafetyLevel::Medium);
+        assert_denied_at("curl https://example.com", SafetyLevel::High);
+    }
 }
