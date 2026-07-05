@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
         args.provider.as_deref(),
         args.model.as_deref(),
         args.thinking.as_deref(),
+        args.safety.as_deref(),
         mcp_enabled,
         mcp_server_allow,
         tool_selection,
@@ -78,6 +79,7 @@ async fn main() -> Result<()> {
         args.session,
         args.title.as_deref(),
         args.thinking.is_some(),
+        args.safety.is_some(),
         tools_overridden,
     )
     .await

@@ -29,7 +29,7 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 - OpenAI-compatible providers for remote APIs and local servers
 - Config-backed provider registry
 - Live model listing for supported providers
-- Built-in tools: `read`, `write`, `edit`, `bash`, `wait`, `grep`, `find`, `ls`
+- Built-in tools: `read`, `write`, `edit`, safety-tiered `bash`, `wait`, `grep`, `find`, `ls`
 - Model-facing session history tools: `history_search`, `history_read`
 - Tool exposure control with `--tools` and config allow/deny lists
 - Semantic UI color palette with `~/.config/ferrum/colors.toml` and `/colors auto|on|off`
@@ -42,9 +42,9 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 Download the latest release asset from Codeberg.
 
 ```bash
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.5.2/ferrum-v0.5.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.5.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.5.2-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.0/ferrum-v0.6.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.6.0-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.6.0-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -53,9 +53,9 @@ man ferrum
 Optional checksum verification:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.5.2/ferrum-v0.5.2-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.5.2/ferrum-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.0/ferrum-v0.6.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.0/ferrum-v0.6.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.6.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### From source
@@ -136,6 +136,7 @@ An optional system prompt override can live at `~/.config/ferrum/system.md`.
 provider = "openai-codex"
 model = "gpt-5.5"
 thinking = "off"
+safety = "medium"
 max_context_tokens = 256000
 
 [tools]
@@ -261,6 +262,7 @@ Shell shortcuts:
 - Colors: [`docs/colors.md`](docs/colors.md)
 - Providers: [`docs/providers.md`](docs/providers.md)
 - Tools: [`docs/tools.md`](docs/tools.md)
+- Safety notes: [`docs/security.md`](docs/security.md)
 - Sessions: [`docs/sessions.md`](docs/sessions.md)
 - Usage accounting: [`docs/usage.md`](docs/usage.md)
 - Context accounting and compaction boundaries: [`docs/context-accounting.md`](docs/context-accounting.md)
@@ -280,7 +282,9 @@ Shell shortcuts:
 - Tools run with your local user permissions.
 - `bash`, `write`, and `edit` can mutate files.
 - Ferrum has no per-tool confirmation prompts. Exposed tool calls execute directly in both print and interactive mode.
+- Use `/safety low|medium|high` to choose shell guard strictness for `bash`, `wait`, and shell shortcuts.
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
+- See [`docs/security.md`](docs/security.md) for security research notes and Ferrum's current posture.
 
 ## Development
 

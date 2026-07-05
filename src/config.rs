@@ -22,6 +22,7 @@ pub struct Config {
     pub color_mode: ColorMode,
     pub colors: ColorPalette,
     pub diff_mode: DiffMode,
+    pub safety: SafetyLevel,
     pub tools_allow: Option<Vec<String>>,
     pub tools_deny: Vec<String>,
     pub tool_selection: Option<ToolSelection>,
@@ -90,6 +91,35 @@ pub enum DiffMode {
     Full,
     Words,
     SideBySide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SafetyLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl SafetyLevel {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" | "med" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            other => {
+                anyhow::bail!("unsupported safety level: {other}; expected low, medium, or high")
+            }
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
 }
 
 impl DiffMode {
@@ -205,6 +235,7 @@ struct FileConfig {
     mcp_enabled: Option<bool>,
     color: Option<String>,
     diff_mode: Option<String>,
+    safety: Option<String>,
     tools: Option<FileToolsConfig>,
     mcp: Option<FileMcpConfig>,
     #[serde(default)]
@@ -340,6 +371,12 @@ impl Config {
                 .map(DiffMode::parse)
                 .transpose()?
                 .unwrap_or(DiffMode::Unified),
+            safety: file_config
+                .safety
+                .as_deref()
+                .map(SafetyLevel::parse)
+                .transpose()?
+                .unwrap_or(SafetyLevel::Medium),
             tools_allow,
             tools_deny,
             tool_selection: None,
@@ -352,6 +389,7 @@ impl Config {
         provider: Option<&str>,
         model: Option<&str>,
         thinking: Option<&str>,
+        safety: Option<&str>,
         mcp_enabled: Option<bool>,
         mcp_server_allow: Option<Vec<String>>,
         tools: Option<ToolSelection>,
@@ -364,6 +402,9 @@ impl Config {
         }
         if let Some(thinking) = thinking {
             self.thinking = ThinkingLevel::parse(thinking)?;
+        }
+        if let Some(safety) = safety {
+            self.safety = SafetyLevel::parse(safety)?;
         }
         if let Some(mcp_enabled) = mcp_enabled {
             self.mcp_enabled = mcp_enabled;
@@ -583,13 +624,26 @@ mod tests {
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         assert!(!config.mcp_enabled);
         config
-            .apply_cli_overrides(None, None, None, Some(true), None, None)
+            .apply_cli_overrides(None, None, None, None, Some(true), None, None)
             .unwrap();
         assert!(config.mcp_enabled);
         config
-            .apply_cli_overrides(None, None, None, Some(false), None, None)
+            .apply_cli_overrides(None, None, None, None, Some(false), None, None)
             .unwrap();
         assert!(!config.mcp_enabled);
+    }
+
+    #[test]
+    fn parses_safety_config_and_cli_override() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("config.toml"), "safety = \"low\"\n").unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(config.safety, SafetyLevel::Low);
+
+        config
+            .apply_cli_overrides(None, None, None, Some("high"), None, None, None)
+            .unwrap();
+        assert_eq!(config.safety, SafetyLevel::High);
     }
 
     #[test]
@@ -618,6 +672,7 @@ deny = ["bash"]
                 None,
                 None,
                 None,
+                None,
                 Some(ToolSelection::List(vec![
                     "read".to_string(),
                     "grep".to_string(),
@@ -638,7 +693,15 @@ deny = ["bash"]
         let dir = TempDir::new().unwrap();
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         config
-            .apply_cli_overrides(None, None, None, None, None, Some(ToolSelection::None))
+            .apply_cli_overrides(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(ToolSelection::None),
+            )
             .unwrap();
         assert_eq!(config.tool_selection, Some(ToolSelection::None));
     }
@@ -665,6 +728,7 @@ command = "node"
                 None,
                 None,
                 None,
+                None,
                 Some(true),
                 Some(vec!["web-search".to_string()]),
                 None,
@@ -683,6 +747,7 @@ command = "node"
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         let error = config
             .apply_cli_overrides(
+                None,
                 None,
                 None,
                 None,

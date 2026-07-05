@@ -2,7 +2,7 @@ pub mod messages;
 pub mod tools;
 
 use crate::{
-    config::{ColorMode, Config, DiffMode, ToolSelection},
+    config::{ColorMode, Config, DiffMode, SafetyLevel, ToolSelection},
     context, mcp, providers, session, skills, tools as builtin_tools, ui_colors, usage,
 };
 use anyhow::{Context, Result};
@@ -146,6 +146,10 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, thinking_words())));
         }
+        if let Some(prefix) = command_before.strip_prefix("/safety ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, safety_words())));
+        }
         if let Some(prefix) = command_before.strip_prefix("/diff ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, diff_mode_words())));
@@ -194,6 +198,7 @@ impl FerrumLineHelper {
         command_hints.insert("/model", " <name>");
         command_hints.insert("/provider", " <name>");
         command_hints.insert("/thinking", " off|minimal|low|medium|high|xhigh");
+        command_hints.insert("/safety", " low|medium|high");
         command_hints.insert("/diff", " unified|compact|full|words|side_by_side");
         command_hints.insert("/mcp", " on|off|status|list");
         command_hints.insert("/usage", " day|week|month");
@@ -227,6 +232,7 @@ fn slash_command_words() -> &'static [&'static str] {
         "/provider",
         "/providers",
         "/thinking",
+        "/safety",
         "/mcp",
         "/colors",
         "/palette",
@@ -294,6 +300,10 @@ fn color_words() -> &'static [&'static str] {
 
 fn thinking_words() -> &'static [&'static str] {
     &["off", "minimal", "low", "medium", "high", "xhigh"]
+}
+
+fn safety_words() -> &'static [&'static str] {
+    &["low", "medium", "high"]
 }
 
 fn diff_mode_words() -> &'static [&'static str] {
@@ -497,6 +507,7 @@ pub async fn run_interactive(
     session_ref: Option<String>,
     title: Option<&str>,
     thinking_overridden: bool,
+    safety_overridden: bool,
     tools_overridden: bool,
 ) -> Result<()> {
     let show_resume_tail = session_ref.is_some() || resume.is_some() || continue_latest;
@@ -505,17 +516,23 @@ pub async fn run_interactive(
             config,
             Some(&reference),
             !thinking_overridden,
+            !safety_overridden,
             !tools_overridden,
         )?,
         (None, Some(Some(reference)), _) => AgentState::resume_ref(
             config,
             Some(&reference),
             !thinking_overridden,
+            !safety_overridden,
             !tools_overridden,
         )?,
-        (None, Some(None), _) | (None, None, true) => {
-            AgentState::resume_ref(config, None, !thinking_overridden, !tools_overridden)?
-        }
+        (None, Some(None), _) | (None, None, true) => AgentState::resume_ref(
+            config,
+            None,
+            !thinking_overridden,
+            !safety_overridden,
+            !tools_overridden,
+        )?,
         (None, None, false) => AgentState::new(config)?,
     };
     if let Some(title) = title {
@@ -671,6 +688,7 @@ fn restore_session_preferences(
     config: &mut Config,
     path: &Path,
     restore_thinking: bool,
+    restore_safety: bool,
     restore_tools: bool,
 ) -> Result<Option<Vec<String>>> {
     let Some(info) = session::jsonl::session_info(path)? else {
@@ -690,6 +708,11 @@ fn restore_session_preferences(
     if let Some(diff_mode) = info.diff_mode.as_deref() {
         config.diff_mode = DiffMode::parse(diff_mode)?;
     }
+    if restore_safety {
+        if let Some(safety) = info.safety.as_deref() {
+            config.safety = SafetyLevel::parse(safety)?;
+        }
+    }
     if let Some(color_mode) = info.color_mode.as_deref() {
         config.color_mode = ColorMode::parse(color_mode)?;
     }
@@ -708,7 +731,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -727,6 +750,7 @@ fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) ->
         ("{{max_tool_rounds}}", config.max_tool_rounds.to_string()),
         ("{{mcp_enabled}}", config.mcp_enabled.to_string()),
         ("{{diff_mode}}", config.diff_mode.as_str().to_string()),
+        ("{{safety}}", config.safety.as_str().to_string()),
     ];
     let mut rendered = template.to_string();
     for (placeholder, value) in replacements {
@@ -1400,6 +1424,7 @@ struct AgentState {
     color_mode: ColorMode,
     colors: ColorPalette,
     diff_mode: DiffMode,
+    safety: SafetyLevel,
     pending_images: Vec<messages::ContentBlock>,
     last_session_list: Vec<session::jsonl::SessionInfo>,
     active_tool_names: HashSet<String>,
@@ -1435,6 +1460,7 @@ impl AgentState {
                 Some(config.model.clone()),
                 Some(config.thinking.as_str().to_string()),
                 Some(config.diff_mode.as_str().to_string()),
+                Some(config.safety.as_str().to_string()),
                 None,
             )?,
             messages,
@@ -1445,6 +1471,7 @@ impl AgentState {
             color_mode: config.color_mode,
             colors: config.colors.clone(),
             diff_mode: config.diff_mode,
+            safety: config.safety,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
             active_tool_names: HashSet::new(),
@@ -1457,6 +1484,7 @@ impl AgentState {
         config: &mut Config,
         reference: Option<&str>,
         restore_thinking: bool,
+        restore_safety: bool,
         restore_tools: bool,
     ) -> Result<Self> {
         let cwd = std::env::current_dir()?;
@@ -1475,8 +1503,13 @@ impl AgentState {
                 }
             },
         };
-        let _restored_tools =
-            restore_session_preferences(config, &path, restore_thinking, restore_tools)?;
+        let _restored_tools = restore_session_preferences(
+            config,
+            &path,
+            restore_thinking,
+            restore_safety,
+            restore_tools,
+        )?;
         Self::open_session(config, path)
     }
 
@@ -1490,6 +1523,7 @@ impl AgentState {
             Some(config.model.clone()),
             Some(config.thinking.as_str().to_string()),
             Some(config.diff_mode.as_str().to_string()),
+            Some(config.safety.as_str().to_string()),
             None,
         )?;
         match resolution {
@@ -1553,6 +1587,7 @@ impl AgentState {
             color_mode: config.color_mode,
             colors: config.colors.clone(),
             diff_mode: config.diff_mode,
+            safety: config.safety,
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
             active_tool_names: HashSet::new(),
@@ -2146,7 +2181,15 @@ impl AgentState {
                 }
             }
         }
-        builtin_tools::execute_with_cancel(name, input, &self.cwd, cancel, interactive).await
+        builtin_tools::execute_with_cancel_and_safety(
+            name,
+            input,
+            &self.cwd,
+            cancel,
+            interactive,
+            self.safety,
+        )
+        .await
     }
 
     fn execute_history_tool(&self, name: &str, input: &serde_json::Value) -> Result<String> {
@@ -2309,7 +2352,7 @@ impl AgentState {
             return Ok(());
         }
         self.remove_empty_session()?;
-        let _restored_tools = restore_session_preferences(config, &path, true, true)?;
+        let _restored_tools = restore_session_preferences(config, &path, true, true, true)?;
         let next = Self::open_session(config, path)?;
         *self = next;
         print_current_session_header(self)?;
@@ -3542,6 +3585,7 @@ mod context_pressure_tests {
             None,
             None,
             None,
+            None,
             Some(vec!["read".to_string(), "bash".to_string()]),
         )
         .unwrap();
@@ -3552,7 +3596,7 @@ mod context_pressure_tests {
         drop(session);
         let mut config = test_config(temp.path().to_path_buf());
 
-        let restored = restore_session_preferences(&mut config, &path, true, true).unwrap();
+        let restored = restore_session_preferences(&mut config, &path, true, true, true).unwrap();
         let tools = resolve_available_tools(builtin_tools::definitions(), &config).unwrap();
         let names = tools
             .iter()
@@ -3877,7 +3921,7 @@ mod context_pressure_tests {
         let cwd = std::env::current_dir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
 
-        let state = AgentState::resume_ref(&mut config, None, true, true).unwrap();
+        let state = AgentState::resume_ref(&mut config, None, true, true, true).unwrap();
 
         assert_eq!(state.cwd, cwd);
         assert!(state.session.path().exists());
@@ -3932,6 +3976,7 @@ mod context_pressure_tests {
             color_mode: crate::config::ColorMode::Auto,
             colors: ColorPalette::default(),
             diff_mode: crate::config::DiffMode::Unified,
+            safety: SafetyLevel::Medium,
             tools_allow: None,
             tools_deny: Vec::new(),
             tool_selection: None,
@@ -4567,6 +4612,7 @@ async fn handle_bang_command(
     }
 
     eprintln!("[bash] {command}");
+    builtin_tools::shell_guard::validate(command, state.safety)?;
     let output = builtin_tools::bash::run(command, &state.cwd, Duration::from_secs(120)).await?;
     let rendered = render_bash_output(command, &output);
 
@@ -4624,6 +4670,7 @@ fn handle_command(
             println!(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
+            println!("  /safety [level]       show or set shell guard: low|medium|high");
             println!(
                 "  /diff [mode]          show or set edit diff: unified|compact|full|words|side_by_side"
             );
@@ -4672,6 +4719,7 @@ fn handle_command(
                     println!("mcp_enabled: {}", state.mcp_enabled);
                     println!("mcp_connected: {}", state.mcp.is_some());
                     println!("diff_mode: {}", state.diff_mode.as_str());
+                    println!("safety: {}", state.safety.as_str());
                     println!("model: {}", config.model);
                     if config.provider_model != config.model {
                         println!("provider_model: {}", config.provider_model);
@@ -4839,6 +4887,27 @@ fn handle_command(
                 state.session.append_thinking(config.thinking.as_str())?;
             }
             println!("thinking: {}", config.thinking.as_str());
+            Ok(CommandAction::Continue)
+        }
+        "/safety" => {
+            if let Some(level) = parts.next() {
+                let parsed = SafetyLevel::parse(level)?;
+                config.safety = parsed;
+                state.safety = parsed;
+                state.session.append_safety(parsed.as_str())?;
+            }
+            println!("safety: {}", state.safety.as_str());
+            match state.safety {
+                SafetyLevel::Low => println!(
+                    "shell guard: permissive. Allows common shell syntax; blocks destructive commands and obvious obfuscation."
+                ),
+                SafetyLevel::Medium => println!(
+                    "shell guard: balanced. Allows normal coding commands; blocks destructive commands and ambiguous shell tricks like command substitution."
+                ),
+                SafetyLevel::High => println!(
+                    "shell guard: strict. Allows simple inspection/build commands; also blocks network commands, inline interpreters, direct scripts, and broad disk writes."
+                ),
+            }
             Ok(CommandAction::Continue)
         }
         "/diff" => {

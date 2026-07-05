@@ -28,6 +28,7 @@ pub enum SessionEntry {
         model: Option<String>,
         thinking: Option<String>,
         diff_mode: Option<String>,
+        safety: Option<String>,
         tools: Option<Vec<String>>,
         cwd: Option<String>,
     },
@@ -53,6 +54,7 @@ pub enum SessionEntry {
         thinking: Option<String>,
         color_mode: Option<String>,
         diff_mode: Option<String>,
+        safety: Option<String>,
         tools: Option<Vec<String>>,
     },
 }
@@ -64,6 +66,7 @@ impl JsonlSession {
         model: Option<String>,
         thinking: Option<String>,
         diff_mode: Option<String>,
+        safety: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
         Self::create_with_header_id(
@@ -74,6 +77,7 @@ impl JsonlSession {
             model,
             thinking,
             diff_mode,
+            safety,
             tools,
         )
     }
@@ -85,6 +89,7 @@ impl JsonlSession {
         model: Option<String>,
         thinking: Option<String>,
         diff_mode: Option<String>,
+        safety: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
         validate_user_session_id(id)?;
@@ -96,6 +101,7 @@ impl JsonlSession {
             model,
             thinking,
             diff_mode,
+            safety,
             tools,
         )
     }
@@ -108,6 +114,7 @@ impl JsonlSession {
         model: Option<String>,
         thinking: Option<String>,
         diff_mode: Option<String>,
+        safety: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
@@ -127,6 +134,7 @@ impl JsonlSession {
             model,
             thinking,
             diff_mode,
+            safety,
             tools,
             cwd: std::env::current_dir()
                 .ok()
@@ -176,6 +184,7 @@ impl JsonlSession {
             thinking: None,
             color_mode: None,
             diff_mode: None,
+            safety: None,
             tools: None,
         })
     }
@@ -191,6 +200,7 @@ impl JsonlSession {
             thinking: Some(thinking.to_string()),
             color_mode: None,
             diff_mode: None,
+            safety: None,
             tools: None,
         })
     }
@@ -206,6 +216,23 @@ impl JsonlSession {
             thinking: None,
             color_mode: None,
             diff_mode: Some(diff_mode.to_string()),
+            safety: None,
+            tools: None,
+        })
+    }
+
+    pub fn append_safety(&mut self, safety: &str) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            provider: None,
+            model: None,
+            thinking: None,
+            color_mode: None,
+            diff_mode: None,
+            safety: Some(safety.to_string()),
             tools: None,
         })
     }
@@ -221,6 +248,7 @@ impl JsonlSession {
             thinking: None,
             color_mode: None,
             diff_mode: None,
+            safety: None,
             tools: Some(tools.to_vec()),
         })
     }
@@ -236,6 +264,7 @@ impl JsonlSession {
             thinking: None,
             color_mode: Some(color_mode.to_string()),
             diff_mode: None,
+            safety: None,
             tools: None,
         })
     }
@@ -251,6 +280,7 @@ impl JsonlSession {
             thinking: None,
             color_mode: None,
             diff_mode: None,
+            safety: None,
             tools: None,
         })
     }
@@ -266,6 +296,7 @@ impl JsonlSession {
             thinking: None,
             color_mode: None,
             diff_mode: None,
+            safety: None,
             tools: None,
         })
     }
@@ -351,6 +382,7 @@ pub struct SessionInfo {
     pub thinking: Option<String>,
     pub color_mode: Option<String>,
     pub diff_mode: Option<String>,
+    pub safety: Option<String>,
     pub tools: Option<Vec<String>>,
     pub title: String,
     pub message_count: usize,
@@ -674,6 +706,7 @@ pub fn resolve_or_create_session_ref(
     model: Option<String>,
     thinking: Option<String>,
     diff_mode: Option<String>,
+    safety: Option<String>,
     tools: Option<Vec<String>>,
 ) -> Result<SessionRefResolution> {
     match resolve_session_ref(dir, cwd, reference) {
@@ -690,6 +723,7 @@ pub fn resolve_or_create_session_ref(
                 model,
                 thinking,
                 diff_mode,
+                safety,
                 tools,
             )?;
             Ok(SessionRefResolution::Created(path))
@@ -715,6 +749,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut explicit_thinking = None;
     let mut explicit_color_mode = None;
     let mut explicit_diff_mode = None;
+    let mut explicit_safety = None;
     let mut explicit_tools = None;
     let mut total_message_count = 0usize;
     let mut visible_message_count = 0usize;
@@ -738,6 +773,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 model: header_model,
                 thinking: header_thinking,
                 diff_mode: header_diff_mode,
+                safety: header_safety,
                 tools: header_tools,
                 cwd: header_cwd,
                 ..
@@ -749,6 +785,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 model = header_model;
                 explicit_thinking = header_thinking;
                 explicit_diff_mode = header_diff_mode;
+                explicit_safety = header_safety;
                 explicit_tools = header_tools;
                 cwd = header_cwd;
             }
@@ -769,6 +806,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 thinking,
                 color_mode,
                 diff_mode,
+                safety,
                 tools,
                 ..
             } => {
@@ -802,6 +840,11 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                         explicit_diff_mode = Some(diff_mode);
                     }
                 }
+                if let Some(safety) = safety {
+                    if !safety.trim().is_empty() {
+                        explicit_safety = Some(safety);
+                    }
+                }
                 if let Some(tools) = tools {
                     explicit_tools = Some(tools);
                 }
@@ -829,6 +872,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
         thinking: explicit_thinking,
         color_mode: explicit_color_mode,
         diff_mode: explicit_diff_mode,
+        safety: explicit_safety,
         tools: explicit_tools,
         title: explicit_title
             .or(inferred_title)
@@ -900,6 +944,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(session.path(), &temp.path().join("mysession.jsonl"));
@@ -915,6 +960,7 @@ mod tests {
                 JsonlSession::create_named(
                     temp.path().to_path_buf(),
                     id,
+                    None,
                     None,
                     None,
                     None,
@@ -939,6 +985,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         match path {
@@ -958,6 +1005,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         match again {
@@ -971,8 +1019,16 @@ mod tests {
     #[test]
     fn writes_header_and_message_jsonl() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         session
             .append_message(&Message::text(Role::User, "hello"))
             .unwrap();
@@ -988,8 +1044,16 @@ mod tests {
     #[test]
     fn compaction_replaces_prior_messages_when_loading() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         session
             .append_message(&Message::text(Role::User, "old context"))
             .unwrap();
@@ -1014,8 +1078,16 @@ mod tests {
     #[test]
     fn latest_compaction_replaces_earlier_compaction_when_loading() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         session
             .append_message(&Message::text(Role::User, "old context"))
             .unwrap();
@@ -1039,8 +1111,16 @@ mod tests {
     #[test]
     fn session_info_counts_visible_messages_after_compaction() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         session
             .append_message(&Message::text(Role::User, "old context"))
             .unwrap();
@@ -1060,8 +1140,16 @@ mod tests {
     #[test]
     fn history_search_and_read_render_archived_tool_context() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         session
             .append_message(&Message::text(Role::User, "debug slurm job 42"))
             .unwrap();
@@ -1103,8 +1191,16 @@ mod tests {
     #[test]
     fn removes_empty_header_only_session() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let path = session.path().clone();
         assert!(path.exists());
         assert!(session.remove_if_empty().unwrap());
@@ -1114,8 +1210,16 @@ mod tests {
     #[test]
     fn keeps_session_with_message() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         session
             .append_message(&Message::text(Role::User, "hello"))
             .unwrap();
@@ -1127,8 +1231,16 @@ mod tests {
     #[test]
     fn explicit_title_overrides_inferred_title() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         session
             .append_message(&Message::text(Role::User, "inferred title"))
             .unwrap();
@@ -1140,8 +1252,16 @@ mod tests {
     #[test]
     fn latest_explicit_title_wins() {
         let temp = tempfile::tempdir().unwrap();
-        let mut session =
-            JsonlSession::create(temp.path().to_path_buf(), None, None, None, None, None).unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         session.append_title("first title").unwrap();
         session.append_title("second title").unwrap();
         let info = session_info(session.path()).unwrap().unwrap();
@@ -1158,6 +1278,7 @@ mod tests {
             Some("medium".to_string()),
             None,
             None,
+            None,
         )
         .unwrap();
         let info = session_info(session.path()).unwrap().unwrap();
@@ -1172,6 +1293,7 @@ mod tests {
             None,
             None,
             Some("low".to_string()),
+            None,
             None,
             None,
         )
@@ -1192,6 +1314,7 @@ mod tests {
             None,
             Some("words".to_string()),
             None,
+            None,
         )
         .unwrap();
         let info = session_info(session.path()).unwrap().unwrap();
@@ -1208,6 +1331,7 @@ mod tests {
             None,
             Some("unified".to_string()),
             None,
+            None,
         )
         .unwrap();
         session.append_diff_mode("full").unwrap();
@@ -1217,10 +1341,47 @@ mod tests {
     }
 
     #[test]
+    fn stores_initial_safety_in_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            Some("high".to_string()),
+            None,
+        )
+        .unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.safety.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn latest_safety_metadata_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            Some("medium".to_string()),
+            None,
+        )
+        .unwrap();
+        session.append_safety("low").unwrap();
+        session.append_safety("high").unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.safety.as_deref(), Some("high"));
+    }
+
+    #[test]
     fn latest_tools_metadata_wins() {
         let temp = tempfile::tempdir().unwrap();
         let mut session = JsonlSession::create(
             temp.path().to_path_buf(),
+            None,
             None,
             None,
             None,

@@ -23,7 +23,7 @@ ferrum - small Rust-native coding agent for Linux
 # DESCRIPTION
 
 Ferrum is a Linux-native coding agent. It provides interactive and one-shot
-prompt modes, local file and shell tools, model-facing session history lookup,
+prompt modes, local file and guarded shell tools, model-facing session history lookup,
 image input, JSONL sessions,
 AGENTS.md context loading, configurable providers, OpenAI Codex / ChatGPT OAuth,
 OpenAI-compatible providers, Agent Skills-style instructions, and a minimal MCP
@@ -81,6 +81,10 @@ to the prompt.
 : Override thinking level. Supported values are **off**, **minimal**, **low**,
 **medium**, **high**, and **xhigh**.
 
+**--safety** LEVEL
+: Override shell safety level for this process. Supported values are **low**,
+**medium**, and **high**.
+
 **--title** TITLE
 : Set the session title.
 
@@ -107,6 +111,12 @@ Ferrum's default native tool set includes:
 
 **read**, **write**, **edit**, **bash**, **wait**, **grep**, **find**, **ls**,
 **history_search**, and **history_read**.
+
+The `bash` and `wait` tools apply a safety-tiered shell guard before execution.
+Use **--safety low|medium|high** at startup or **/safety low|medium|high**
+interactively to choose the trade-off. The default **medium** tier rejects
+destructive patterns and rewriteable opaque shell syntax while allowing common
+coding commands such as Python one-liners and network tools.
 
 The history tools are model-facing only. They search or read the current session
 JSONL, including entries archived before compaction, and return rendered text
@@ -177,6 +187,9 @@ Common slash commands:
 
 **/thinking** LEVEL
 : Set thinking level.
+
+**/safety** LEVEL
+: Set shell safety level.
 
 **/diff** MODE
 : Set diff display mode.
@@ -313,9 +326,9 @@ configuration directory.
 Download the release tarball from Codeberg, extract it, and install the binary and man page:
 
 ```sh
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.5.2/ferrum-v0.5.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.5.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.5.2-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.0/ferrum-v0.6.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.6.0-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.6.0-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -324,9 +337,9 @@ man ferrum
 Optional checksum verification:
 
 ```sh
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.5.2/ferrum-v0.5.2-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.5.2/ferrum-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.5.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.0/ferrum-v0.6.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.0/ferrum-v0.6.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.6.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## From source

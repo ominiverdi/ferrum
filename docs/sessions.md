@@ -98,6 +98,8 @@ Empty interactive sessions are removed automatically when you quit, switch sessi
 
 Thinking level is stored in session metadata. New sessions record the current thinking level, and `/thinking <level>` appends an updated level. Resuming or switching sessions restores the session thinking level unless the process was started with an explicit `--thinking` override. Provider-supplied thinking content and replay signatures are stored in message history when the provider sends them.
 
+Safety level is stored in session metadata. New sessions record the current safety level, and `/safety <level>` appends an updated level. Resuming restores the session safety level unless the process was started with an explicit `--safety` override.
+
 Diff mode is also stored in session metadata. New sessions record the current `diff_mode`, and `/diff <mode>` appends an updated mode. Resuming or switching sessions restores that session's edit diff rendering mode.
 
 Color mode is stored in session metadata too. `/colors <auto|on|off>` appends an updated color mode, and resuming or switching sessions restores it.
@@ -121,6 +123,7 @@ Model-facing history tools, `history_search` and `history_read`, can search and 
 - provider model, when different from model
 - provider
 - thinking
+- safety
 
 ## Size tracking
 

@@ -20,6 +20,10 @@ pub struct Args {
     #[arg(long)]
     pub thinking: Option<String>,
 
+    /// Override shell safety level: low|medium|high
+    #[arg(long)]
+    pub safety: Option<String>,
+
     /// Set the session title
     #[arg(long)]
     pub title: Option<String>,
@@ -138,6 +142,12 @@ mod tests {
         let none = Args::try_parse_from(["ferrum", "--no-tools", "-p", "hi"]).unwrap();
         assert_eq!(none.tools, None);
         assert!(none.no_tools);
+    }
+
+    #[test]
+    fn parses_safety_flag() {
+        let args = Args::try_parse_from(["ferrum", "--safety", "high", "-p", "hi"]).unwrap();
+        assert_eq!(args.safety.as_deref(), Some("high"));
     }
 
     #[test]

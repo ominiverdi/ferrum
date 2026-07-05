@@ -366,6 +366,42 @@ Interactive:
 /diff side_by_side
 ```
 
+### safety
+
+Controls shell guard strictness for model-facing `bash`, `wait`, and interactive shell shortcuts.
+
+Supported values:
+
+```text
+low|medium|high
+```
+
+Default:
+
+```toml
+safety = "medium"
+```
+
+CLI override:
+
+```bash
+ferrum --safety high -p "inspect this untrusted repo"
+```
+
+Interactive:
+
+```text
+/safety
+/safety low
+/safety high
+```
+
+Tiers:
+
+- `low`: blocks destructive commands and clearly obfuscated shell patterns, while allowing common shell idioms such as command substitution.
+- `medium`: default. Also rejects rewriteable opaque shell syntax such as command substitution, so the model can retry with explicit commands.
+- `high`: strict GuardFall-oriented mode. Also rejects more network, inline interpreter, script execution, and broad `dd of=...` patterns.
+
 ### thinking
 
 Supported values:

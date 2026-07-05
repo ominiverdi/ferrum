@@ -35,7 +35,7 @@ Behavior:
 
 - Accept prompt args.
 - Accept stdin.
-- Accept provider/model/thinking/tool overrides from CLI.
+- Accept provider/model/thinking/safety/tool overrides from CLI.
 - Accept repeated `--image` attachments.
 - Print assistant output to stdout.
 - Return non-zero on unrecoverable errors.
@@ -77,6 +77,7 @@ Slash commands:
 - `/mcp [on|off|status|list]`
 - `/colors [auto|on|off]`
 - `/thinking [off|minimal|low|medium|high|xhigh]`
+- `/safety [low|medium|high]`
 - `/diff [unified|compact|full|words|side_by_side]`
 - `/skills`
 - `/skill:<name> [args]`
@@ -180,7 +181,7 @@ Ferrum loads context from `AGENTS.md` and `agents.md` files:
 
 Files are deduplicated, bounded, and included in the system prompt. More specific later files override earlier instructions when conflicts exist.
 
-Ferrum also injects runtime context describing current version, provider, provider model, thinking level, cwd, config dir, and supported interactive commands. The embedded default runtime system prompt can be fully overridden with `~/.config/ferrum/system.md`; Ferrum renders known `{{placeholder}}` values from current runtime config and leaves unknown placeholders unchanged.
+Ferrum also injects runtime context describing current version, provider, provider model, thinking level, safety level, cwd, config dir, and supported interactive commands. The embedded default runtime system prompt can be fully overridden with `~/.config/ferrum/system.md`; Ferrum renders known `{{placeholder}}` values from current runtime config and leaves unknown placeholders unchanged.
 
 ## Sessions
 
@@ -199,7 +200,7 @@ Current persisted entry types:
 - `metadata`
 - `compaction`
 
-Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, thinking level, diff mode, color mode, and resolved tool lists. Timestamps are `u64` milliseconds.
+Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, thinking level, safety level, diff mode, color mode, and resolved tool lists. Timestamps are `u64` milliseconds.
 
 Sessions should remain human-inspectable and append-oriented. Future branching/forking must preserve backward compatibility.
 
@@ -343,11 +344,11 @@ Exact text replacement. Each old text must match exactly once. Multiple non-over
 
 ### `bash`
 
-Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes.
+Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Commands pass through a safety-tiered shell guard controlled by `/safety low|medium|high`.
 
 ### `wait`
 
-Wait in the foreground, then run a bash command using the same bash execution and cleanup path. The wait duration is capped at 30 minutes. Interactive users can abort with `Esc` or `Ctrl-C`. Exposed only when `bash` is available.
+Wait in the foreground, then run a bash command using the same bash execution, safety guard, and cleanup path. The wait duration is capped at 30 minutes. Interactive users can abort with `Esc` or `Ctrl-C`. Exposed only when `bash` is available.
 
 ### `grep`
 

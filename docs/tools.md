@@ -183,7 +183,7 @@ Rules:
 
 ## bash
 
-Run a focused bash command in cwd with timeout.
+Run a focused bash command in cwd with timeout. Before execution, Ferrum applies a safety-tiered shell guard inspired by Continue's tokenize-and-check approach. The guard canonicalizes simple quote/backslash tricks and rejects destructive or opaque shell patterns according to `/safety low|medium|high`.
 
 ```json
 {
@@ -200,7 +200,7 @@ For broad filesystem exploration, prefer the native `find`, `grep`, and `ls` too
 
 ## wait
 
-Wait in the foreground, then run a bash command in cwd using the same execution path as `bash`.
+Wait in the foreground, then run a bash command in cwd using the same execution path and shell safety guard as `bash`.
 
 ```json
 {
