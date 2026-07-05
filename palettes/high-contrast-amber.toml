@@ -1,0 +1,17 @@
+# High contrast amber monitor. Warm, punchy, lower rainbow noise.
+prompt = "bold #ffbf00"
+hr = "#ff8700"
+assistant = "#fff8e1"
+thinking = "#d7af5f"
+tool = "bold #ffd700"
+tool_output = "#ffe7a3"
+status = "bold #ffbf00"
+highlight = "bold #ffff00"
+success = "bold #00ff7f"
+warning = "bold #ffbf00"
+error = "bold #ff3b30"
+
+diff_added = "bold #00ff7f"
+diff_removed = "bold #ff3b30"
+diff_hunk = "bold #ffff00"
+diff_meta = "#d7af5f"

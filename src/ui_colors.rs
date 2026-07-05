@@ -3,6 +3,82 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io::IsTerminal, path::Path};
 
+const PALETTE_FILES: &[(&str, &str)] = &[
+    ("ansi-dark.toml", include_str!("../palettes/ansi-dark.toml")),
+    (
+        "ansi-light.toml",
+        include_str!("../palettes/ansi-light.toml"),
+    ),
+    ("ayu.toml", include_str!("../palettes/ayu.toml")),
+    (
+        "catppuccin-macchiato.toml",
+        include_str!("../palettes/catppuccin-macchiato.toml"),
+    ),
+    (
+        "catppuccin.toml",
+        include_str!("../palettes/catppuccin.toml"),
+    ),
+    ("dracula.toml", include_str!("../palettes/dracula.toml")),
+    (
+        "everforest.toml",
+        include_str!("../palettes/everforest.toml"),
+    ),
+    ("flexoki.toml", include_str!("../palettes/flexoki.toml")),
+    ("gruvbox.toml", include_str!("../palettes/gruvbox.toml")),
+    (
+        "high-contrast-amber.toml",
+        include_str!("../palettes/high-contrast-amber.toml"),
+    ),
+    (
+        "high-contrast-cyberpunk.toml",
+        include_str!("../palettes/high-contrast-cyberpunk.toml"),
+    ),
+    (
+        "high-contrast-fire-ice.toml",
+        include_str!("../palettes/high-contrast-fire-ice.toml"),
+    ),
+    (
+        "high-contrast-matrix.toml",
+        include_str!("../palettes/high-contrast-matrix.toml"),
+    ),
+    (
+        "high-contrast-neon.toml",
+        include_str!("../palettes/high-contrast-neon.toml"),
+    ),
+    (
+        "high-contrast-terminal.toml",
+        include_str!("../palettes/high-contrast-terminal.toml"),
+    ),
+    ("kanagawa.toml", include_str!("../palettes/kanagawa.toml")),
+    ("monokai.toml", include_str!("../palettes/monokai.toml")),
+    ("nord.toml", include_str!("../palettes/nord.toml")),
+    ("one-dark.toml", include_str!("../palettes/one-dark.toml")),
+    ("opencode.toml", include_str!("../palettes/opencode.toml")),
+    ("pi-dark.toml", include_str!("../palettes/pi-dark.toml")),
+    ("rosepine.toml", include_str!("../palettes/rosepine.toml")),
+    ("solarized.toml", include_str!("../palettes/solarized.toml")),
+    (
+        "tokyonight.toml",
+        include_str!("../palettes/tokyonight.toml"),
+    ),
+];
+
+pub fn seed_palettes(config_dir: &Path) {
+    let palette_dir = config_dir.join("color-palettes");
+    if palette_dir.exists() {
+        return;
+    }
+    if fs::create_dir_all(&palette_dir).is_err() {
+        return;
+    }
+    for (name, content) in PALETTE_FILES {
+        let path = palette_dir.join(name);
+        if !path.exists() {
+            let _ = fs::write(&path, content);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ColorToken {
     Prompt,

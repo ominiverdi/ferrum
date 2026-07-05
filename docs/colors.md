@@ -56,7 +56,7 @@ diff_meta = "Grey70"
 
 Restart Ferrum after editing `colors.toml`; the palette is loaded at startup.
 
-You can also keep reusable palettes in `~/.config/ferrum/color-palettes/*.toml` and switch interactively:
+You can also keep reusable palettes in `~/.config/ferrum/color-palettes/*.toml` and switch interactively. Ferrum ships 24 built-in palettes and writes them to that directory on first run if it does not exist.
 
 ```text
 /palette
@@ -64,9 +64,27 @@ You can also keep reusable palettes in `~/.config/ferrum/color-palettes/*.toml` 
 /palette catppuccin
 ```
 
-`/palette` shows the current palette, or `default`/`custom` if it does not match a named palette. `/palettes` lists available palette files. `/palette <name>` validates `color-palettes/<name>.toml`, applies it to the running session, and writes it to `~/.config/ferrum/colors.toml`.
+### Palettes
 
-Missing entries use defaults. Unknown palette keys or invalid color values are ignored with a warning when Ferrum starts from `colors.toml`; `/palette <name>` rejects invalid palette files before writing them.
+Ferrum ships 24 built-in palettes embedded in the binary. On first run, if
+`~/.config/ferrum/color-palettes/` does not exist, Ferrum creates it and writes
+all palettes there. Users can edit, rename, or delete copies freely; existing
+directories are never overwritten.
+
+```text
+/palette
+/palettes
+/palette catppuccin
+```
+
+`/palette` shows the current palette, or `default`/`custom` if it does not match
+a named palette. `/palettes` lists available palette files. `/palette <name>`
+validates `color-palettes/<name>.toml`, applies it to the running session, and
+writes it to `~/.config/ferrum/colors.toml`.
+
+Missing entries use defaults. Unknown palette keys or invalid color values are
+ignored with a warning when Ferrum starts from `colors.toml`; `/palette <name>`
+rejects invalid palette files before writing them.
 
 ## Palette keys
 

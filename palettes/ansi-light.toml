@@ -1,0 +1,17 @@
+# Ferrum ANSI light palette. Uses terminal colors, tuned for light backgrounds.
+prompt = "bold blue"
+hr = "gray"
+assistant = "default"
+thinking = "gray"
+tool = "bold purple"
+tool_output = "gray"
+status = "cyan"
+highlight = "magenta"
+success = "green"
+warning = "yellow"
+error = "red"
+
+diff_added = "green"
+diff_removed = "red"
+diff_hunk = "purple"
+diff_meta = "gray"

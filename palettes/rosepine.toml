@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode rosepine
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/rosepine.json
+
+prompt = "bold #9ccfd8"
+hr = "#21202e"
+assistant = "#e0def4"
+thinking = "#6e6a86"
+tool = "bold #c4a7e7"
+tool_output = "#6e6a86"
+status = "#9ccfd8"
+highlight = "#ebbcba"
+success = "#31748f"
+warning = "#f6c177"
+error = "#eb6f92"
+
+diff_added = "#31748f"
+diff_removed = "#eb6f92"
+diff_hunk = "#c4a7e7"
+diff_meta = "#6e6a86"

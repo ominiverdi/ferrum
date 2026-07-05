@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode monokai
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/monokai.json
+
+prompt = "bold #66d9ef"
+hr = "#1e1f1c"
+assistant = "#f8f8f2"
+thinking = "#75715e"
+tool = "bold #ae81ff"
+tool_output = "#75715e"
+status = "#fd971f"
+highlight = "#a6e22e"
+success = "#a6e22e"
+warning = "#e6db74"
+error = "#f92672"
+
+diff_added = "#a6e22e"
+diff_removed = "#f92672"
+diff_hunk = "#75715e"
+diff_meta = "#75715e"

@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode ayu
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/ayu.json
+
+prompt = "bold #59C2FF"
+hr = "#11151C"
+assistant = "#BFBDB6"
+thinking = "#565B66"
+tool = "bold #D2A6FF"
+tool_output = "#565B66"
+status = "#39BAE6"
+highlight = "#E6B450"
+success = "#7FD962"
+warning = "#E6B673"
+error = "#D95757"
+
+diff_added = "#7FD962"
+diff_removed = "#F26D78"
+diff_hunk = "#ACB6BF"
+diff_meta = "#ACB6BF"

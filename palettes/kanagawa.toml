@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode kanagawa
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/kanagawa.json
+
+prompt = "bold #7E9CD8"
+hr = "#363646"
+assistant = "#DCD7BA"
+thinking = "#727169"
+tool = "bold #957FB8"
+tool_output = "#727169"
+status = "#76946A"
+highlight = "#D27E99"
+success = "#98BB6C"
+warning = "#D7A657"
+error = "#E82424"
+
+diff_added = "#98BB6C"
+diff_removed = "#E82424"
+diff_hunk = "#2D4F67"
+diff_meta = "#727169"

@@ -1,0 +1,17 @@
+# High contrast matrix. Green dominant, red only for errors/removals.
+prompt = "bold #00ff41"
+hr = "#008f11"
+assistant = "#eaffea"
+thinking = "#00aa33"
+tool = "bold #39ff14"
+tool_output = "#aaffaa"
+status = "bold #00ff41"
+highlight = "bold #ccff00"
+success = "bold #00ff41"
+warning = "bold #ffff00"
+error = "bold #ff3131"
+
+diff_added = "bold #00ff41"
+diff_removed = "bold #ff3131"
+diff_hunk = "bold #ccff00"
+diff_meta = "#00aa33"

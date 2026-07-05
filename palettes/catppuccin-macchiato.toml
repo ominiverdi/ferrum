@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode catppuccin-macchiato
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/catppuccin-macchiato.json
+
+prompt = "bold #8aadf4"
+hr = "#5b6078"
+assistant = "#cad3f5"
+thinking = "#939ab7"
+tool = "bold #c6a0f6"
+tool_output = "#939ab7"
+status = "#8bd5ca"
+highlight = "#f5bde6"
+success = "#a6da95"
+warning = "#eed49f"
+error = "#ed8796"
+
+diff_added = "#a6da95"
+diff_removed = "#ed8796"
+diff_hunk = "#f5a97f"
+diff_meta = "#939ab7"

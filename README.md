@@ -187,7 +187,7 @@ diff_removed = "DeepPink1"
 
 See [`docs/colors.md`](docs/colors.md) for all palette keys and supported color values. Ferrum accepts xterm 256-color table names such as `DeepSkyBlue1`, `Orange3`, and `SpringGreen1`.
 
-Reusable palettes can live in `~/.config/ferrum/color-palettes/*.toml`. In interactive mode, `/palette` shows the current palette, `/palettes` lists palette files, and `/palette <name>` validates and applies one live.
+Reusable palettes can live in `~/.config/ferrum/color-palettes/*.toml`. Ferrum ships 24 built-in palettes and writes them to that directory on first run if it does not exist. In interactive mode, `/palette` shows the current palette, `/palettes` lists palette files, and `/palette <name>` validates and applies one live.
 
 ## System prompt override
 

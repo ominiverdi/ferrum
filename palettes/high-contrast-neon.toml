@@ -1,0 +1,17 @@
+# High contrast neon. Cyan/magenta/yellow on dark terminals.
+prompt = "bold #00ffff"
+hr = "#5f5fff"
+assistant = "#ffffff"
+thinking = "#87afff"
+tool = "bold #ff00ff"
+tool_output = "#d7d7ff"
+status = "bold #00afff"
+highlight = "bold #ffff00"
+success = "bold #00ff00"
+warning = "bold #ffaf00"
+error = "bold #ff005f"
+
+diff_added = "bold #00ff87"
+diff_removed = "bold #ff005f"
+diff_hunk = "bold #ff00ff"
+diff_meta = "#87afff"

@@ -1,0 +1,17 @@
+# High contrast fire/ice. Blue chrome, orange/yellow alerts.
+prompt = "bold #00bfff"
+hr = "#4682b4"
+assistant = "#f8fbff"
+thinking = "#87cefa"
+tool = "bold #1e90ff"
+tool_output = "#b0e0e6"
+status = "bold #00ffff"
+highlight = "bold #ffd700"
+success = "bold #00ff7f"
+warning = "bold #ff8c00"
+error = "bold #ff2400"
+
+diff_added = "bold #00ff7f"
+diff_removed = "bold #ff2400"
+diff_hunk = "bold #ffd700"
+diff_meta = "#87cefa"

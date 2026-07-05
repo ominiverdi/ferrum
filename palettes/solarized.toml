@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode solarized
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/solarized.json
+
+prompt = "bold #268bd2"
+hr = "#073642"
+assistant = "#839496"
+thinking = "#586e75"
+tool = "bold #6c71c4"
+tool_output = "#586e75"
+status = "#cb4b16"
+highlight = "#2aa198"
+success = "#859900"
+warning = "#b58900"
+error = "#dc322f"
+
+diff_added = "#859900"
+diff_removed = "#dc322f"
+diff_hunk = "#586e75"
+diff_meta = "#586e75"

@@ -1,0 +1,17 @@
+# High contrast cyberpunk. Hot pink, acid yellow, electric cyan.
+prompt = "bold #00e5ff"
+hr = "#7c4dff"
+assistant = "#ffffff"
+thinking = "#b388ff"
+tool = "bold #ff2bd6"
+tool_output = "#e1bee7"
+status = "bold #00e5ff"
+highlight = "bold #ffff00"
+success = "bold #76ff03"
+warning = "bold #ffab00"
+error = "bold #ff1744"
+
+diff_added = "bold #76ff03"
+diff_removed = "bold #ff1744"
+diff_hunk = "bold #ff2bd6"
+diff_meta = "#b388ff"

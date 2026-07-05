@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode opencode
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/opencode.json
+
+prompt = "bold #fab283"
+hr = "#3c3c3c"
+assistant = "#eeeeee"
+thinking = "#808080"
+tool = "bold #5c9cf5"
+tool_output = "#808080"
+status = "#56b6c2"
+highlight = "#9d7cd8"
+success = "#7fd88f"
+warning = "#f5a742"
+error = "#e06c75"
+
+diff_added = "#4fd6be"
+diff_removed = "#c53b53"
+diff_hunk = "#828bb8"
+diff_meta = "#828bb8"

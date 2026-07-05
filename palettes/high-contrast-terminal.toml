@@ -1,0 +1,17 @@
+# High contrast terminal-native. Uses only bright ANSI colors.
+prompt = "bold bright-cyan"
+hr = "bright-blue"
+assistant = "bright-white"
+thinking = "bright-black"
+tool = "bold bright-magenta"
+tool_output = "bright-white"
+status = "bold bright-cyan"
+highlight = "bold bright-yellow"
+success = "bold bright-green"
+warning = "bold bright-yellow"
+error = "bold bright-red"
+
+diff_added = "bold bright-green"
+diff_removed = "bold bright-red"
+diff_hunk = "bold bright-magenta"
+diff_meta = "bright-blue"

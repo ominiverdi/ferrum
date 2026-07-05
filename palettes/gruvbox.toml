@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode gruvbox
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/gruvbox.json
+
+prompt = "bold #83a598"
+hr = "#504945"
+assistant = "#ebdbb2"
+thinking = "#928374"
+tool = "bold #d3869b"
+tool_output = "#928374"
+status = "#fabd2f"
+highlight = "#8ec07c"
+success = "#b8bb26"
+warning = "#fe8019"
+error = "#fb4934"
+
+diff_added = "#98971a"
+diff_removed = "#cc241d"
+diff_hunk = "#689d6a"
+diff_meta = "#928374"

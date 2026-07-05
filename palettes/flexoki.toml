@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode flexoki
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/flexoki.json
+
+prompt = "bold #DA702C"
+hr = "#403E3C"
+assistant = "#CECDC3"
+thinking = "#6F6E69"
+tool = "bold #4385BE"
+tool_output = "#6F6E69"
+status = "#3AA99F"
+highlight = "#8B7EC8"
+success = "#879A39"
+warning = "#DA702C"
+error = "#D14D41"
+
+diff_added = "#879A39"
+diff_removed = "#D14D41"
+diff_hunk = "#4385BE"
+diff_meta = "#6F6E69"

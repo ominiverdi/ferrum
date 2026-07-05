@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode tokyonight
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/tokyonight.json
+
+prompt = "bold #82aaff"
+hr = "#545c7e"
+assistant = "#c8d3f5"
+thinking = "#828bb8"
+tool = "bold #c099ff"
+tool_output = "#828bb8"
+status = "#82aaff"
+highlight = "#ff966c"
+success = "#c3e88d"
+warning = "#ff966c"
+error = "#ff757f"
+
+diff_added = "#4fd6be"
+diff_removed = "#c53b53"
+diff_hunk = "#828bb8"
+diff_meta = "#828bb8"

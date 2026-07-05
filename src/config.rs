@@ -333,6 +333,8 @@ impl Config {
 
         let colors = ColorPalette::load(&config_dir)?;
 
+        crate::ui_colors::seed_palettes(&config_dir);
+
         Ok(Self {
             config_dir,
             data_dir,

@@ -1,0 +1,17 @@
+# Ferrum ANSI dark palette. Uses terminal colors, not fixed RGB.
+prompt = "bold bright-cyan"
+hr = "gray"
+assistant = "default"
+thinking = "gray"
+tool = "bold bright-blue"
+tool_output = "gray"
+status = "bright-cyan"
+highlight = "bright-magenta"
+success = "bright-green"
+warning = "bright-yellow"
+error = "bright-red"
+
+diff_added = "bright-green"
+diff_removed = "bright-red"
+diff_hunk = "bright-magenta"
+diff_meta = "gray"

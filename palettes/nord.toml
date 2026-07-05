@@ -1,0 +1,19 @@
+# Ferrum palette adapted from OpenCode nord
+# Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/nord.json
+
+prompt = "bold #88C0D0"
+hr = "#434C5E"
+assistant = "#ECEFF4"
+thinking = "#8B95A7"
+tool = "bold #81A1C1"
+tool_output = "#8B95A7"
+status = "#88C0D0"
+highlight = "#8FBCBB"
+success = "#A3BE8C"
+warning = "#D08770"
+error = "#BF616A"
+
+diff_added = "#A3BE8C"
+diff_removed = "#BF616A"
+diff_hunk = "#8B95A7"
+diff_meta = "#8B95A7"
