@@ -67,9 +67,10 @@ current directory.
 
 # OPTIONS
 
-**-p**, **--print** PROMPT
-: Run a single prompt and print the answer. If stdin is piped, Ferrum appends it
-to the prompt.
+**-p**, **--print** [PROMPT]
+: Run a single prompt and print the answer. If PROMPT is omitted, Ferrum reads
+it from stdin. If stdin is piped with a PROMPT, Ferrum appends stdin to the
+prompt.
 
 **--provider** PROVIDER
 : Override the provider configured in config.toml.

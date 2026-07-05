@@ -76,9 +76,10 @@ Use \f[B]\[en]continue\f[R] as an alias for continuing the latest
 session for the current directory.
 .SH OPTIONS
 .TP
-\f[B]-p\f[R], \f[B]\[en]print\f[R] PROMPT
+\f[B]-p\f[R], \f[B]\[en]print\f[R] [PROMPT]
 Run a single prompt and print the answer.
-If stdin is piped, Ferrum appends it to the prompt.
+If PROMPT is omitted, Ferrum reads it from stdin.
+If stdin is piped with a PROMPT, Ferrum appends stdin to the prompt.
 .TP
 \f[B]\[en]provider\f[R] PROVIDER
 Override the provider configured in config.toml.

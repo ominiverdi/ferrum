@@ -86,7 +86,13 @@ Run a one-shot prompt:
 ferrum -p "summarize this repo"
 ```
 
-Pipe input:
+Pipe input as the prompt:
+
+```bash
+echo "summarize this repo" | ferrum -p
+```
+
+Pipe input plus extra instruction:
 
 ```bash
 cat src/main.rs | ferrum -p "review this file"

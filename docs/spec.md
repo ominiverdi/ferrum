@@ -26,6 +26,7 @@ Single-shot mode:
 
 ```bash
 ferrum -p "summarize this repo"
+echo "summarize this repo" | ferrum -p
 cat file.rs | ferrum -p "review"
 ferrum --provider openai-codex --model gpt-5.5 -p "review this repo"
 ferrum --image screenshot.png -p "describe this image"
@@ -34,7 +35,8 @@ ferrum --image screenshot.png -p "describe this image"
 Behavior:
 
 - Accept prompt args.
-- Accept stdin.
+- Accept stdin as the prompt when `-p`/`--print` is passed without a value.
+- Append piped stdin to an explicit print prompt.
 - Accept provider/model/thinking/safety/tool overrides from CLI.
 - Accept repeated `--image` attachments.
 - Print assistant output to stdout.

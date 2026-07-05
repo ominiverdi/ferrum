@@ -4,8 +4,8 @@ use std::io::{self, Read};
 #[derive(Debug, Parser)]
 #[command(name = "ferrum", version, about = "A small Rust-native coding agent")]
 pub struct Args {
-    /// Run a single prompt and print the answer
-    #[arg(short = 'p', long = "print")]
+    /// Run a single prompt and print the answer. If omitted, read prompt from stdin.
+    #[arg(short = 'p', long = "print", num_args = 0..=1, default_missing_value = "")]
     pub prompt: Option<String>,
 
     /// Override provider name from config.toml
@@ -71,8 +71,10 @@ pub enum Command {
 }
 
 impl Args {
-    pub fn print_prompt(&self) -> Option<String> {
-        let mut prompt = self.prompt.clone()?;
+    pub fn print_prompt(&self) -> anyhow::Result<Option<String>> {
+        let Some(mut prompt) = self.prompt.clone() else {
+            return Ok(None);
+        };
         let mut stdin = String::new();
         if !atty_stdin() {
             let _ = io::stdin().read_to_string(&mut stdin);
@@ -83,7 +85,10 @@ impl Args {
             }
             prompt.push_str(&stdin);
         }
-        Some(prompt)
+        if prompt.trim().is_empty() {
+            anyhow::bail!("print mode requires a prompt argument or stdin input");
+        }
+        Ok(Some(prompt))
     }
 }
 
@@ -148,6 +153,18 @@ mod tests {
     fn parses_safety_flag() {
         let args = Args::try_parse_from(["ferrum", "--safety", "high", "-p", "hi"]).unwrap();
         assert_eq!(args.safety.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn parses_print_without_prompt_value() {
+        let args = Args::try_parse_from(["ferrum", "-p"]).unwrap();
+        assert_eq!(args.prompt.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn parses_print_with_prompt_value() {
+        let args = Args::try_parse_from(["ferrum", "-p", "hi"]).unwrap();
+        assert_eq!(args.prompt.as_deref(), Some("hi"));
     }
 
     #[test]
