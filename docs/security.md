@@ -33,6 +33,9 @@ Ferrum risk mostly comes from which tools are exposed.
 - `write` and `edit` mutate files.
 - `bash` and `wait` run local commands.
 - MCP servers are external programs; their output becomes model context.
+- Fork PRs and third-party repositories are untrusted input.
+- Ferrum does not load repository-owned config to change tool policy.
+- Ferrum does not scan MCP tool descriptions or redact secrets before context.
 - `--safety` controls shell execution only. It does not sandbox `write`, `edit`,
   MCP servers, or the filesystem.
 
@@ -55,7 +58,7 @@ Tier differences:
 - `curl https://example.com`: allowed at `low` and `medium`, rejected at `high`.
 - `rm -rf /`: rejected at all tiers.
 
-## GuardFall reference
+## Related research
 
 GuardFall describes shell-injection classes for AI agents that pass model output
 to `bash -c`. Ferrum's guard is designed around those classes, while keeping the
@@ -63,6 +66,21 @@ normal coding workflow usable.
 
 Reference:
 <https://adversa.ai/blog/opensource-ai-coding-agents-shell-injection-vulnerability/>
+
+Other agent-security findings point to nearby risks:
+
+- **TrustFall**: repository trust prompts and repo-owned MCP config can start
+  attacker-controlled MCP servers. Ferrum does not load repository-owned MCP
+  config; MCP servers come from user config and process CLI choices.
+- **Deny-rule bypasses**: some agents degraded security checks for long compound
+  shell commands. Ferrum's shell guard does not use a subcommand-count fallback
+  that turns denial into approval.
+- **AutoJack**: a browsing agent can cross a localhost trust boundary and reach
+  a privileged local service. Ferrum does not expose a local web control plane,
+  but local services remain part of the user's host risk.
+- **Agentjacking**: trusted tool output can contain attacker-injected guidance.
+  Ferrum treats MCP output as model context; use MCP only with trusted servers
+  and reduce tool authority for untrusted workflows.
 
 ## What Ferrum blocks
 
@@ -298,5 +316,7 @@ Ferrum safety is strongest when these are combined:
 - Use `--safety high` for untrusted or unattended work when shell remains
   exposed.
 - Avoid exposing mutation tools unless needed.
+- Avoid shell/mutation tools on untrusted fork PRs.
+- Keep runtime policy in CLI/user config, not repository-owned files.
 - Treat repository and MCP text as data, not authority.
 - Use a temporary `$HOME` or external sandbox when host credentials matter.

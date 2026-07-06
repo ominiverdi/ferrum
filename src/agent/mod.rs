@@ -3026,15 +3026,24 @@ fn bash_preview_indicates_failure(name: &str, content: &str) -> bool {
     }) || content.lines().any(|line| line == "timed_out: true")
 }
 
+fn bash_preview_stderr_token(name: &str, preview: &str) -> ColorToken {
+    if bash_preview_indicates_failure(name, preview) {
+        ColorToken::Error
+    } else {
+        ColorToken::ToolOutput
+    }
+}
+
 fn render_tool_preview(name: &str, preview: &str, color_mode: ColorMode, colors: &ColorPalette) {
     if matches!(name, "bash" | "wait") && preview.contains("\nstderr:\n") {
         let mut in_stderr = false;
+        let stderr_token = bash_preview_stderr_token(name, preview);
         for line in preview.lines() {
             if line == "stderr:" {
                 in_stderr = true;
             }
             let token = if in_stderr {
-                ColorToken::Error
+                stderr_token
             } else {
                 ColorToken::ToolOutput
             };
@@ -3212,7 +3221,7 @@ fn print_recent_conversation_lines(
         colors.paint(
             ColorToken::Highlight,
             color_mode,
-            format!("Recent conversation (last {} lines):", lines.len())
+            format!("Recent conversation ({}):", current_preview_timestamp())
         )
     );
     for line in lines {
@@ -3221,8 +3230,30 @@ fn print_recent_conversation_lines(
     render_hr(color_mode, colors);
 }
 
+fn current_preview_timestamp() -> String {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    format_preview_timestamp_ms(now.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+fn format_preview_timestamp_ms(timestamp_ms: u64) -> String {
+    let seconds = (timestamp_ms / 1000).min(i64::MAX as u64) as i64;
+    let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(seconds) else {
+        return timestamp_ms.to_string();
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        datetime.year(),
+        u8::from(datetime.month()),
+        datetime.day(),
+        datetime.hour(),
+        datetime.minute()
+    )
+}
+
 fn recent_conversation_lines(messages: &[messages::Message], limit: usize) -> Vec<String> {
-    let mut lines = Vec::new();
+    let mut blocks: Vec<Vec<String>> = Vec::new();
     for message in messages {
         let label = match message.role {
             messages::Role::User => "user",
@@ -3230,16 +3261,52 @@ fn recent_conversation_lines(messages: &[messages::Message], limit: usize) -> Ve
             messages::Role::Tool => "tool",
             messages::Role::System => continue,
         };
-        for line in message.display_text().lines() {
-            let line = line.trim_end();
-            if line.trim().is_empty() {
-                continue;
-            }
-            lines.push(format!("{label}: {line}"));
+        let content = message
+            .display_text()
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>();
+        if content.is_empty() {
+            continue;
         }
+        let mut block = Vec::with_capacity(content.len() + 1);
+        block.push(format!("{label}:"));
+        block.extend(content);
+        blocks.push(block);
     }
-    let skip = lines.len().saturating_sub(limit.max(1));
-    lines.into_iter().skip(skip).collect()
+
+    let limit = limit.max(1);
+    let mut selected = Vec::new();
+    let mut used = 0usize;
+    for block in blocks.into_iter().rev() {
+        let block_len = block.len();
+        if selected.is_empty() && block_len > limit {
+            let mut truncated = Vec::with_capacity(limit);
+            truncated.push(block[0].clone());
+            let keep = limit.saturating_sub(1);
+            let start = block.len().saturating_sub(keep);
+            truncated.extend(block.into_iter().skip(start));
+            selected.push(truncated);
+            break;
+        }
+        if used + block_len > limit {
+            break;
+        }
+        used += block_len;
+        selected.push(block);
+    }
+    selected.reverse();
+
+    let mut lines = Vec::new();
+    for (index, block) in selected.into_iter().enumerate() {
+        if index > 0 {
+            lines.push(String::new());
+        }
+        lines.extend(block);
+    }
+    lines
 }
 
 fn print_session_preview(messages: &[messages::Message], limit: usize) {
@@ -3435,6 +3502,28 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn colors_bash_stderr_as_error_only_on_failure() {
+        assert_eq!(
+            bash_preview_stderr_token(
+                "bash",
+                "status: Some(0)\ntimed_out: false\nstdout:\nok\nstderr:\nFinished build\n"
+            ),
+            ColorToken::ToolOutput
+        );
+        assert_eq!(
+            bash_preview_stderr_token(
+                "bash",
+                "status: Some(1)\ntimed_out: false\nstdout:\n\nstderr:\nfailed\n"
+            ),
+            ColorToken::Error
+        );
+        assert_eq!(
+            bash_preview_stderr_token("bash", "status: Some(0)\ntimed_out: true\nstderr:\nkilled"),
+            ColorToken::Error
+        );
+    }
+
+    #[test]
     fn detects_chafa_pixel_formats_for_common_terminals() {
         assert_eq!(
             chafa_pixel_format_for_env(Some("xterm-ghostty"), Some("ghostty"), false, false),
@@ -3567,11 +3656,14 @@ mod context_pressure_tests {
         ];
 
         assert_eq!(
-            recent_conversation_lines(&messages, 3),
+            recent_conversation_lines(&messages, 6),
             vec![
-                "assistant: answer".to_string(),
-                "tool: tool line 1".to_string(),
-                "tool: tool line 2".to_string(),
+                "assistant:".to_string(),
+                "  answer".to_string(),
+                "".to_string(),
+                "tool:".to_string(),
+                "  tool line 1".to_string(),
+                "  tool line 2".to_string(),
             ]
         );
     }
