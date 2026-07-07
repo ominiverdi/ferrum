@@ -135,14 +135,27 @@ pub fn save(path: PathBuf, credential: &OpenAiCodexCredential) -> Result<()> {
     };
     json["openai-codex"] = serde_json::to_value(credential)?;
     let text = serde_json::to_string_pretty(&json)?;
+    let parent = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("auth.json");
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
     let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .write(true)
         .mode(0o600)
-        .open(&path)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+        .open(&temp_path)
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
     file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp_path, &path)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    tighten_file_permissions(&path);
     Ok(())
 }
 
@@ -358,15 +371,36 @@ mod tests {
         let path = temp.path().join("auth.json");
         fs::write(&path, "{}").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        let credential = OpenAiCodexCredential {
+        let credential = test_credential();
+        save(path.clone(), &credential).unwrap();
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn save_replaces_auth_file_without_leaving_temp_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        let credential = test_credential();
+        save(path.clone(), &credential).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("openai-codex"));
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let leftover_temp = fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".tmp"));
+        assert!(!leftover_temp);
+    }
+
+    fn test_credential() -> OpenAiCodexCredential {
+        OpenAiCodexCredential {
             r#type: "oauth".to_string(),
             access: "access".to_string(),
             refresh: "refresh".to_string(),
             expires: 1,
             account_id: "acct".to_string(),
-        };
-        save(path.clone(), &credential).unwrap();
-        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600);
+        }
     }
 }

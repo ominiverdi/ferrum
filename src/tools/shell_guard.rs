@@ -284,6 +284,17 @@ fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
         return Some("shell compound control syntax".to_string());
     }
 
+    if matches!(base.as_str(), "command" | "builtin")
+        && args.first().is_some_and(|arg| {
+            let command = command_name(arg);
+            is_dynamic_shell_builtin(command)
+                || is_shell_control_word(command)
+                || is_shell_interpreter(command)
+        })
+    {
+        return Some("shell builtin or wrapper bypass command".to_string());
+    }
+
     if is_command_wrapper(&base)
         && args
             .iter()
@@ -308,12 +319,8 @@ fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
         return Some("privilege escalation command".to_string());
     }
 
-    if matches!(base.as_str(), "eval" | "exec") {
+    if is_dynamic_shell_builtin(&base) {
         return Some("dynamic shell execution command".to_string());
-    }
-
-    if matches!(base.as_str(), "source" | ".") {
-        return Some("shell source command".to_string());
     }
 
     if base == "rm" && dangerous_rm(args) {
@@ -553,9 +560,14 @@ fn is_shell_control_word(word: &str) -> bool {
             | "select"
             | "function"
             | "time"
+            | "coproc"
             | "[["
             | "]]"
     )
+}
+
+fn is_dynamic_shell_builtin(command: &str) -> bool {
+    matches!(command, "eval" | "exec" | "source" | ".")
 }
 
 fn is_command_wrapper(command: &str) -> bool {
@@ -566,13 +578,9 @@ fn is_command_wrapper(command: &str) -> bool {
 }
 
 fn generated_code_execution(command: &str, args: &[String]) -> bool {
-    matches!(command, "cc" | "gcc" | "clang" | "rustc")
-        && args
-            .iter()
-            .any(|arg| arg == "-" || arg.starts_with("/tmp/") || arg.contains("/tmp/"))
+    matches!(command, "cc" | "gcc" | "clang" | "rustc" | "javac")
         || command == "go" && args.first().is_some_and(|arg| arg == "run")
         || command == "cargo" && args.first().is_some_and(|arg| arg == "run")
-        || matches!(command, "cc" | "gcc" | "clang" | "rustc" | "javac")
         || command == "java" && args.iter().any(|arg| arg.starts_with("/tmp/"))
 }
 
@@ -797,6 +805,20 @@ mod tests {
         assert_denied("sed -i 's/key=.*/key=attacker/' ~/.aws/credentials");
         assert_denied("cp payload ~/.aws/credentials");
         assert_denied("mv payload /etc/hosts");
+    }
+
+    #[test]
+    fn detects_dynamic_builtin_wrappers() {
+        for command in [
+            "eval 'printf eval-ok'",
+            "command eval 'printf eval-ok'",
+            "builtin eval 'printf eval-ok'",
+            "builtin source ./env.sh",
+            "command exec /bin/true",
+            "coproc printf ok",
+        ] {
+            assert_denied_at(command, SafetyLevel::Low);
+        }
     }
 
     #[test]

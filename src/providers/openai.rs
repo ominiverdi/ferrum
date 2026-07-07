@@ -68,6 +68,7 @@ impl Provider for OpenAiCompatProvider {
                 .as_ref()
                 .map(|name| env::var(name).with_context(|| format!("{name} is not set")))
                 .transpose()?;
+            let reasoning_effort = thinking.as_openai();
             let request = ChatRequest {
                 model,
                 messages: messages.iter().map(ChatMessage::from_message).collect(),
@@ -77,7 +78,7 @@ impl Provider for OpenAiCompatProvider {
                 } else {
                     Some("auto")
                 },
-                reasoning_effort: thinking.as_openai(),
+                reasoning_effort,
                 stream: false,
                 stream_options: None,
             };
@@ -85,7 +86,7 @@ impl Provider for OpenAiCompatProvider {
             let mut http_request = self
                 .client
                 .post(format!("{}/chat/completions", self.base_url));
-            if let Some(api_key) = api_key {
+            if let Some(api_key) = api_key.as_deref() {
                 http_request = http_request.bearer_auth(api_key);
             }
             let response = http_request
@@ -99,9 +100,40 @@ impl Provider for OpenAiCompatProvider {
                 .text()
                 .await
                 .context("failed to read provider response")?;
-            if !status.is_success() {
-                anyhow::bail!("OpenAI-compatible provider returned {status}: {text}");
-            }
+            let text = if !status.is_success() {
+                if reasoning_effort.is_some() && is_reasoning_effort_unsupported_error(&text) {
+                    let retry_request = ChatRequest {
+                        reasoning_effort: None,
+                        ..request
+                    };
+                    let mut retry_http_request = self
+                        .client
+                        .post(format!("{}/chat/completions", self.base_url));
+                    if let Some(api_key) = api_key.as_deref() {
+                        retry_http_request = retry_http_request.bearer_auth(api_key);
+                    }
+                    let retry_response = retry_http_request
+                        .json(&retry_request)
+                        .send()
+                        .await
+                        .context("OpenAI-compatible reasoning retry failed")?;
+                    let retry_status = retry_response.status();
+                    let retry_text = retry_response
+                        .text()
+                        .await
+                        .context("failed to read provider retry response")?;
+                    if !retry_status.is_success() {
+                        anyhow::bail!(
+                            "OpenAI-compatible provider returned {retry_status}: {retry_text}"
+                        );
+                    }
+                    retry_text
+                } else {
+                    anyhow::bail!("OpenAI-compatible provider returned {status}: {text}");
+                }
+            } else {
+                text
+            };
 
             let body: ChatResponse = serde_json::from_str(&text)
                 .with_context(|| format!("failed to parse provider response: {text}"))?;
@@ -165,6 +197,29 @@ impl Provider for OpenAiCompatProvider {
                             .text()
                             .await
                             .context("failed to read provider retry error response")?;
+                        anyhow::bail!(
+                            "OpenAI-compatible provider returned {retry_status}: {retry_text}"
+                        );
+                    }
+                } else if thinking.as_openai().is_some()
+                    && is_reasoning_effort_unsupported_error(&text)
+                {
+                    response = send_openai_compat_stream_request(
+                        self,
+                        api_key.as_deref(),
+                        model,
+                        messages,
+                        tools,
+                        ThinkingLevel::Off,
+                        self.stream_usage,
+                    )
+                    .await?;
+                    let retry_status = response.status();
+                    if !retry_status.is_success() {
+                        let retry_text = response
+                            .text()
+                            .await
+                            .context("failed to read provider reasoning retry error response")?;
                         anyhow::bail!(
                             "OpenAI-compatible provider returned {retry_status}: {retry_text}"
                         );
@@ -242,6 +297,17 @@ fn is_stream_usage_unsupported_error(text: &str) -> bool {
         || (lower.contains("include_usage") && lower.contains("unsupported"))
         || (lower.contains("include_usage") && lower.contains("unknown"))
         || (lower.contains("include_usage") && lower.contains("invalid"))
+}
+
+fn is_reasoning_effort_unsupported_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    (lower.contains("reasoning_effort") || lower.contains("reasoning effort"))
+        && (lower.contains("unsupported")
+            || lower.contains("unknown")
+            || lower.contains("unrecognized")
+            || lower.contains("invalid")
+            || lower.contains("extra")
+            || lower.contains("not permitted"))
 }
 
 pub struct OpenAiCodexProvider {
@@ -605,6 +671,8 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatChoiceMessage {
     content: Option<String>,
+    reasoning_content: Option<String>,
+    reasoning: Option<String>,
     tool_calls: Option<Vec<ChatResponseToolCall>>,
 }
 
@@ -653,6 +721,16 @@ fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Result<Messag
         return Ok(Message::text(Role::Assistant, ""));
     };
     let mut content = Vec::new();
+    if let Some(text) = message
+        .reasoning_content
+        .or(message.reasoning)
+        .filter(|text| !text.trim().is_empty())
+    {
+        content.push(ContentBlock::Thinking {
+            text,
+            signature: None,
+        });
+    }
     if let Some(text) = message.content.filter(|text| !text.is_empty()) {
         content.push(ContentBlock::Text { text });
     }
@@ -955,7 +1033,6 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
         if matches!(message.role, Role::System) {
             continue;
         }
-        let mut emitted_special = false;
         for block in &message.content {
             match block {
                 ContentBlock::Thinking {
@@ -964,7 +1041,6 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
                 } => {
                     if let Ok(value) = serde_json::from_str::<serde_json::Value>(signature) {
                         inputs.push(ResponsesInput::Raw(value));
-                        emitted_special = true;
                     }
                 }
                 ContentBlock::ToolResult {
@@ -981,7 +1057,6 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
                             .to_string(),
                         output: content.clone(),
                     });
-                    emitted_special = true;
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     let call_id = id.split('|').next().unwrap_or(id).to_string();
@@ -998,7 +1073,6 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
                             name: name.clone(),
                             arguments: input.to_string(),
                         });
-                        emitted_special = true;
                     }
                 }
                 ContentBlock::Text { .. }
@@ -1006,7 +1080,7 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
                 | ContentBlock::Thinking { .. } => {}
             }
         }
-        if !emitted_special && has_codex_message_content(message) {
+        if has_codex_message_content(message) {
             let role = match message.role {
                 Role::System => "system",
                 Role::User => "user",
@@ -1452,9 +1526,30 @@ mod tests {
     }
 
     #[test]
+    fn non_streaming_chat_response_preserves_reasoning() {
+        let message = ChatChoiceMessage {
+            content: Some("final".to_string()),
+            reasoning_content: Some("thought".to_string()),
+            reasoning: None,
+            tool_calls: None,
+        };
+        let message = chat_response_to_message(Some(message)).unwrap();
+        assert!(matches!(
+            &message.content[0],
+            ContentBlock::Thinking { text, .. } if text == "thought"
+        ));
+        assert!(matches!(
+            &message.content[1],
+            ContentBlock::Text { text } if text == "final"
+        ));
+    }
+
+    #[test]
     fn rejects_malformed_chat_tool_call_json() {
         let message = ChatChoiceMessage {
             content: None,
+            reasoning_content: None,
+            reasoning: None,
             tool_calls: Some(vec![ChatResponseToolCall {
                 id: "call_1".to_string(),
                 function: ChatResponseToolFunction {
@@ -1541,6 +1636,22 @@ mod tests {
             "invalid include_usage option"
         ));
         assert!(!is_stream_usage_unsupported_error("model is unavailable"));
+    }
+
+    #[test]
+    fn detects_reasoning_effort_unsupported_errors() {
+        assert!(is_reasoning_effort_unsupported_error(
+            "unknown field reasoning_effort"
+        ));
+        assert!(is_reasoning_effort_unsupported_error(
+            "reasoning effort is unsupported by this backend"
+        ));
+        assert!(is_reasoning_effort_unsupported_error(
+            "extra inputs are not permitted: reasoning_effort"
+        ));
+        assert!(!is_reasoning_effort_unsupported_error(
+            "reasoning_effort high exhausted quota"
+        ));
     }
 
     #[test]
@@ -1675,6 +1786,40 @@ mod tests {
         assert_eq!(json[1]["type"], "function_call_output");
         assert_eq!(json[1]["call_id"], "call_1");
         assert_eq!(json[1]["output"], "aborted");
+    }
+
+    #[test]
+    fn replays_codex_visible_text_from_mixed_message() {
+        let tool_call = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "Visible answer.".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_1|fc_1".to_string(),
+                    name: "wait".to_string(),
+                    input: serde_json::json!({"command": "date"}),
+                },
+            ],
+            usage: None,
+        };
+        let tool_result = Message {
+            role: Role::Tool,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1|fc_1".to_string(),
+                content: "done".to_string(),
+                is_error: false,
+            }],
+            usage: None,
+        };
+        let inputs = codex_inputs(&[tool_call, tool_result]);
+        let json = serde_json::to_value(&inputs).unwrap();
+
+        assert_eq!(json[0]["type"], "function_call");
+        assert_eq!(json[1]["role"], "assistant");
+        assert_eq!(json[1]["content"], "Visible answer.");
+        assert_eq!(json[2]["type"], "function_call_output");
     }
 
     #[test]

@@ -361,8 +361,10 @@ pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
         if line.trim().is_empty() {
             continue;
         }
-        let entry: SessionEntry =
-            serde_json::from_str(&line).context("failed to parse session entry")?;
+        let entry: SessionEntry = match serde_json::from_str(&line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
         match entry {
             SessionEntry::Message { message, .. } => messages.push(message),
             SessionEntry::Compaction { summary, .. } => {
@@ -915,7 +917,7 @@ fn is_valid_user_session_id(id: &str) -> bool {
 }
 
 fn sort_sessions_newest_first(sessions: &mut [SessionInfo]) {
-    sessions.sort_by(|a, b| b.modified.cmp(&a.modified));
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.modified));
 }
 
 fn one_line_title(text: &str) -> String {
@@ -1184,6 +1186,41 @@ mod tests {
         assert_eq!(info.archived_message_count, 1);
         assert_eq!(info.compaction_count, 1);
         assert!(info.last_compaction_timestamp_ms.is_some());
+    }
+
+    fn message_text(message: &Message) -> &str {
+        match message.content.first().unwrap() {
+            crate::agent::messages::ContentBlock::Text { text } => text,
+            _ => panic!("expected text message"),
+        }
+    }
+
+    #[test]
+    fn load_messages_skips_malformed_jsonl_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        session
+            .append_message(&Message::text(Role::User, "before"))
+            .unwrap();
+        use std::io::Write;
+        writeln!(session.file, "{{not json").unwrap();
+        session
+            .append_message(&Message::text(Role::Assistant, "after"))
+            .unwrap();
+
+        let messages = load_messages(session.path()).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(message_text(&messages[0]), "before");
+        assert_eq!(message_text(&messages[1]), "after");
     }
 
     #[test]

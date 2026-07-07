@@ -4,6 +4,7 @@ use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashMap, io, process::Stdio, time::Duration};
+use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
@@ -17,6 +18,10 @@ const MAX_MCP_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_MCP_SCHEMA_CHARS: usize = 8_000;
 const MCP_START_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Error)]
+#[error("MCP tool returned error: {0}")]
+struct McpToolError(String);
 
 pub struct McpManager {
     servers: Vec<McpServer>,
@@ -194,7 +199,7 @@ impl McpServer {
         )
         .await
         .with_context(|| format!("MCP tool `{name}` timed out"))??;
-        Ok(truncate_output(render_tool_result(&value)))
+        mcp_tool_result_to_output(&value)
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -351,6 +356,18 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     }
 }
 
+fn mcp_tool_result_to_output(value: &Value) -> Result<String> {
+    let output = truncate_output(render_tool_result(value));
+    if value
+        .get("isError")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err(McpToolError(output).into());
+    }
+    Ok(output)
+}
+
 fn render_tool_result(value: &Value) -> String {
     if let Some(content) = value.get("content").and_then(Value::as_array) {
         let mut text = String::new();
@@ -443,6 +460,24 @@ mod tests {
                 .unwrap()
                 .contains("omitted")
         );
+    }
+
+    #[test]
+    fn mcp_tool_error_result_becomes_error() {
+        let value = json!({
+            "isError": true,
+            "content": [{"type": "text", "text": "tool failed"}]
+        });
+        let error = mcp_tool_result_to_output(&value).unwrap_err();
+        assert!(error.to_string().contains("tool failed"));
+    }
+
+    #[test]
+    fn mcp_tool_success_result_stays_ok() {
+        let value = json!({
+            "content": [{"type": "text", "text": "tool ok"}]
+        });
+        assert_eq!(mcp_tool_result_to_output(&value).unwrap(), "tool ok");
     }
 
     #[tokio::test]

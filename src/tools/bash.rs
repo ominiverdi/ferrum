@@ -1,8 +1,9 @@
 use crate::text_truncate::truncate_tail_to_max_bytes;
 use anyhow::{Context, Result};
 use std::{
-    io::Read,
-    os::unix::process::CommandExt,
+    fs::OpenOptions,
+    io::{Read, Write},
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::Path,
     process::{Command, Stdio},
     sync::{
@@ -181,7 +182,13 @@ fn truncate_tail(label: &str, output: &str) -> Result<String> {
     }
     let full_output_path =
         std::env::temp_dir().join(format!("ferrum-bash-{}-{label}.log", Uuid::new_v4()));
-    std::fs::write(&full_output_path, output)
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&full_output_path)
+        .with_context(|| format!("failed to create {}", full_output_path.display()))?;
+    file.write_all(output.as_bytes())
         .with_context(|| format!("failed to write {}", full_output_path.display()))?;
     let tail = truncate_tail_to_max_bytes(output, MAX_OUTPUT_BYTES);
     let tail = tail
@@ -201,6 +208,8 @@ mod tests {
     use super::*;
     #[test]
     fn truncation_writes_full_output_file() {
+        use std::os::unix::fs::PermissionsExt;
+
         let output = "x".repeat(MAX_OUTPUT_BYTES + 100);
         let truncated = truncate_tail("stdout", &output).unwrap();
         assert!(truncated.contains("Full output:"));
@@ -213,6 +222,8 @@ mod tests {
             .unwrap()
             .trim_end_matches(']');
         assert_eq!(std::fs::read_to_string(path).unwrap(), output);
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
         let _ = std::fs::remove_file(path);
     }
 
