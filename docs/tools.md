@@ -183,7 +183,9 @@ Rules:
 
 ## bash
 
-Run a focused bash command in cwd with timeout. Before execution, Ferrum applies a safety-tiered shell guard inspired by Continue's tokenize-and-check approach. The guard canonicalizes simple quote/backslash tricks and rejects destructive or opaque shell patterns according to `/safety low|medium|high`.
+Run a focused bash command in cwd with timeout. Before execution, Ferrum applies a safety-tiered shell guard. The guard canonicalizes simple quote/backslash tricks and rejects destructive or opaque shell patterns according to `/safety low|medium|high`.
+
+The guard also rejects shell interpreter launchers and wrappers such as `sh -c`, `bash -lc`, `busybox sh`, `env sh -c`, and `timeout 1 bash -lc`; backslash-newline continuations; tar execution hooks such as `--to-command` and `--checkpoint-action=exec=...`; sensitive-path writes; and common destructive command shapes. At `high`, it additionally rejects network commands, inline interpreters, direct scripts, broad `dd` writes, and common generated-code execution paths such as temp-file compiler invocations and `go run`/`cargo run`.
 
 ```json
 {
@@ -230,7 +232,7 @@ Search file contents under a path, including hidden config directories while ski
 }
 ```
 
-Supports optional glob filtering, case-insensitive search, literal matching, context lines, and match limits. Uses `rg` if available, with a Rust fallback.
+Supports optional glob filtering, case-insensitive search, literal matching, context lines, and match limits. Uses `rg` if available, with a Rust fallback that preserves regex-vs-literal semantics.
 
 ## find
 

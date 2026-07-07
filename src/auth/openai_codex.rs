@@ -112,12 +112,11 @@ pub fn load(path: PathBuf) -> Result<Option<OpenAiCodexCredential>> {
         fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let json: serde_json::Value =
         serde_json::from_str(&text).context("failed to parse auth storage")?;
-    Ok(json
-        .get("openai-codex")
+    json.get("openai-codex")
         .cloned()
         .map(serde_json::from_value)
         .transpose()
-        .context("failed to parse OpenAI Codex credential")?)
+        .context("failed to parse OpenAI Codex credential")
 }
 
 fn save(path: PathBuf, credential: &OpenAiCodexCredential) -> Result<()> {

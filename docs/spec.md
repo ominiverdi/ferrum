@@ -346,7 +346,7 @@ Exact text replacement. Each old text must match exactly once. Multiple non-over
 
 ### `bash`
 
-Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Commands pass through a safety-tiered shell guard controlled by `/safety low|medium|high`.
+Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Commands pass through a safety-tiered shell guard controlled by `/safety low|medium|high`. The guard rejects destructive commands, opaque shell expansion, shell wrapper launches, backslash-newline continuations, tar execution hooks, sensitive-path writes, and stricter generated-code/network/script forms at `high`.
 
 ### `wait`
 
@@ -354,7 +354,7 @@ Wait in the foreground, then run a bash command using the same bash execution, s
 
 ### `grep`
 
-Search file contents.
+Search file contents. Uses ripgrep when available, with a Rust fallback that preserves regex and literal matching semantics.
 
 ### `find`
 
@@ -362,7 +362,7 @@ Find files by name/glob.
 
 ### `history_search`
 
-Search rendered current-session JSONL entries, including entries archived before compaction. Returns matching snippets with JSONL line numbers and active/archived status. Literal case-insensitive search is the default; regex search is available.
+Search rendered current-session JSONL entries, including text, tool calls, tool results, image metadata, and entries archived before compaction. Returns matching snippets with JSONL line numbers and active/archived status. Literal case-insensitive search is the default; regex search is available.
 
 ### `history_read`
 
@@ -385,7 +385,11 @@ MCP tool names are exposed as:
 mcp__<server>__<tool>
 ```
 
+Characters outside ASCII letters, digits, `_`, and `-` are sanitized to `_`; sanitized-name collisions are rejected. Stdio frames with oversized `Content-Length` are rejected before allocation. Tool output is truncated before being returned to the model.
+
 HTTP/SSE MCP transports are deferred.
+
+Provider adapters fail a turn when a provider returns malformed JSON for tool-call arguments instead of silently converting the input to `null`.
 
 ## Images
 

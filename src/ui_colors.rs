@@ -334,11 +334,11 @@ impl AnsiStyle {
         }
 
         if !color_parts.is_empty() {
-            if color_parts.len() == 1 {
-                if let Some(code) = named_color_code(color_parts[0], false) {
-                    codes.push(code.to_string());
-                    return Some(Self { codes });
-                }
+            if color_parts.len() == 1
+                && let Some(code) = named_color_code(color_parts[0], false)
+            {
+                codes.push(code.to_string());
+                return Some(Self { codes });
             }
             let color_name = color_parts.join("");
             if let Some(hex) = color_name.strip_prefix('#') {

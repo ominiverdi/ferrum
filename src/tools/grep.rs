@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use regex::RegexBuilder;
 use std::{path::Path, process::Command};
 
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
@@ -70,7 +71,22 @@ pub fn grep(pattern: &str, path: &Path, options: GrepOptions<'_>) -> Result<Stri
 fn grep_fallback(pattern: &str, path: &Path, options: GrepOptions<'_>) -> Result<String> {
     let mut matches = Vec::new();
     let limit = options.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    visit(path, pattern, options, limit, &mut matches)?;
+    let matcher = (!options.literal)
+        .then(|| {
+            RegexBuilder::new(pattern)
+                .case_insensitive(options.ignore_case)
+                .build()
+                .with_context(|| format!("invalid grep pattern: {pattern}"))
+        })
+        .transpose()?;
+    visit(
+        path,
+        pattern,
+        matcher.as_ref(),
+        options,
+        limit,
+        &mut matches,
+    )?;
     if matches.is_empty() {
         return Ok("no matches".to_string());
     }
@@ -80,6 +96,7 @@ fn grep_fallback(pattern: &str, path: &Path, options: GrepOptions<'_>) -> Result
 fn visit(
     path: &Path,
     pattern: &str,
+    matcher: Option<&regex::Regex>,
     options: GrepOptions<'_>,
     limit: usize,
     matches: &mut Vec<String>,
@@ -97,7 +114,7 @@ fn visit(
             if should_skip_dir_entry(&name) {
                 continue;
             }
-            visit(&entry.path(), pattern, options, limit, matches)?;
+            visit(&entry.path(), pattern, matcher, options, limit, matches)?;
         }
         return Ok(());
     }
@@ -133,7 +150,7 @@ fn visit(
         let matched = if options.literal {
             search_line.contains(&needle)
         } else {
-            search_line.contains(&needle)
+            matcher.is_some_and(|matcher| matcher.is_match(lines.get(index).copied().unwrap_or("")))
         };
         if matched {
             push_fallback_match(path, &lines, index, options.context.unwrap_or(0), matches);
@@ -154,14 +171,14 @@ fn push_fallback_match(
 ) {
     let start = match_index.saturating_sub(context);
     let end = (match_index + context + 1).min(lines.len());
-    for index in start..end {
+    for (index, line) in lines.iter().enumerate().take(end).skip(start) {
         let separator = if index == match_index { ':' } else { '-' };
         let rendered = format!(
             "{}{}{}:{}",
             path.display(),
             separator,
             index + 1,
-            truncate_line(lines[index])
+            truncate_line(line)
         );
         if !matches.contains(&rendered) {
             matches.push(rendered);
@@ -170,10 +187,7 @@ fn push_fallback_match(
 }
 
 fn format_grep_output(output: &str, limit: usize) -> String {
-    let mut lines = output
-        .lines()
-        .map(|line| truncate_line(line))
-        .collect::<Vec<_>>();
+    let mut lines = output.lines().map(truncate_line).collect::<Vec<_>>();
     let limit_reached = count_match_lines(&lines) >= limit;
     let truncated_by_bytes = lines.join("\n").len() > MAX_OUTPUT_BYTES;
     let mut rendered = truncate_tail(&lines.join("\n"));

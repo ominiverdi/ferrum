@@ -11,6 +11,7 @@ use tokio::{
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MAX_MCP_OUTPUT_CHARS: usize = 20_000;
+const MAX_MCP_FRAME_BYTES: usize = 10 * 1024 * 1024;
 const MCP_START_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -55,12 +56,16 @@ impl McpManager {
                 }
             };
             for tool in listed_tools {
-                let exposed_name = format!(
-                    "mcp__{}__{}",
-                    sanitize_name(&server_config.name),
-                    sanitize_name(&tool.name)
-                );
-                tool_routes.insert(exposed_name.clone(), (server_index, tool.name.clone()));
+                let exposed_name = exposed_tool_name(&server_config.name, &tool.name);
+                let route = (server_index, tool.name.clone());
+                if let Some((_existing_server_index, existing_tool_name)) =
+                    tool_routes.insert(exposed_name.clone(), route)
+                {
+                    anyhow::bail!(
+                        "MCP tool name collision after sanitization: {exposed_name} maps to both `{existing_tool_name}` and `{}`",
+                        tool.name
+                    );
+                }
                 tools.push(ToolDefinition {
                     name: exposed_name,
                     description: format!(
@@ -253,11 +258,7 @@ impl McpServer {
             return serde_json::from_str(trimmed).context("failed to parse MCP JSON-RPC line");
         }
 
-        let len = trimmed
-            .strip_prefix("Content-Length:")
-            .context("MCP message missing Content-Length")?
-            .trim()
-            .parse::<usize>()?;
+        let len = parse_content_length(trimmed)?;
         loop {
             line.clear();
             let bytes = self.stdout.read_line(&mut line).await?;
@@ -287,17 +288,37 @@ struct McpTool {
     input_schema: Option<Value>,
 }
 
+fn parse_content_length(header: &str) -> Result<usize> {
+    let len = header
+        .strip_prefix("Content-Length:")
+        .context("MCP message missing Content-Length")?
+        .trim()
+        .parse::<usize>()?;
+    if len > MAX_MCP_FRAME_BYTES {
+        anyhow::bail!("MCP message Content-Length {len} exceeds limit {MAX_MCP_FRAME_BYTES}");
+    }
+    Ok(len)
+}
+
+fn exposed_tool_name(server_name: &str, tool_name: &str) -> String {
+    format!(
+        "mcp__{}__{}",
+        sanitize_name(server_name),
+        sanitize_name(tool_name)
+    )
+}
+
 fn render_tool_result(value: &Value) -> String {
     if let Some(content) = value.get("content").and_then(Value::as_array) {
         let mut text = String::new();
         for item in content {
-            if item.get("type").and_then(Value::as_str) == Some("text") {
-                if let Some(part) = item.get("text").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        text.push('\n');
-                    }
-                    text.push_str(part);
+            if item.get("type").and_then(Value::as_str) == Some("text")
+                && let Some(part) = item.get("text").and_then(Value::as_str)
+            {
+                if !text.is_empty() {
+                    text.push('\n');
                 }
+                text.push_str(part);
             }
         }
         if !text.is_empty() {
@@ -335,4 +356,88 @@ fn sanitize_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_oversized_content_length_before_allocation() {
+        let header = format!("Content-Length: {}", MAX_MCP_FRAME_BYTES + 1);
+        let error = parse_content_length(&header).unwrap_err();
+        assert!(error.to_string().contains("exceeds limit"));
+    }
+
+    #[test]
+    fn accepts_content_length_at_limit() {
+        let header = format!("Content-Length: {MAX_MCP_FRAME_BYTES}");
+        assert_eq!(parse_content_length(&header).unwrap(), MAX_MCP_FRAME_BYTES);
+    }
+
+    #[tokio::test]
+    async fn manager_start_rejects_sanitized_tool_name_collisions() {
+        let script = std::env::temp_dir().join("ferrum_mcp_collision_server.py");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+TOOLS = sys.argv[1:]
+
+def send(obj):
+    data = json.dumps(obj, separators=(",", ":"))
+    sys.stdout.write(f"Content-Length: {len(data)}\r\n\r\n{data}")
+    sys.stdout.flush()
+
+def read_message():
+    header = sys.stdin.readline()
+    if not header:
+        return None
+    if header.startswith("Content-Length:"):
+        length = int(header.split(":", 1)[1].strip())
+        while True:
+            line = sys.stdin.readline()
+            if line in ("\n", "\r\n", ""):
+                break
+        return json.loads(sys.stdin.read(length))
+    return json.loads(header)
+
+while True:
+    msg = read_message()
+    if msg is None:
+        break
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1"}}})
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":msg["id"],"result":{"tools":[{"name":name,"description":"test tool","inputSchema":{"type":"object"}} for name in TOOLS]}})
+    else:
+        send({"jsonrpc":"2.0","id":msg.get("id"),"error":{"code":-32601,"message":"unknown method"}})
+"#,
+        )
+        .unwrap();
+        let config = McpServerConfig {
+            name: "server-a".to_string(),
+            command: "python3".to_string(),
+            args: vec![
+                script.display().to_string(),
+                "foo/bar".to_string(),
+                "foo_bar".to_string(),
+            ],
+            enabled: true,
+        };
+        let error = match McpManager::start(&[config]).await {
+            Ok(_) => panic!("expected MCP collision to fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("MCP tool name collision after sanitization")
+        );
+    }
 }

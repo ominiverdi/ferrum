@@ -6,6 +6,7 @@ Before public release:
 
 ```bash
 cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 cargo test
 cargo build --release
 ```
@@ -33,7 +34,7 @@ Set the next version in `Cargo.toml`, `Cargo.lock`, and install docs.
 Example:
 
 ```toml
-version = "0.6.2"
+version = "0.6.3"
 ```
 
 ## Tag release
@@ -41,7 +42,7 @@ version = "0.6.2"
 Use annotated tags and push Codeberg first, then the GitHub mirror:
 
 ```bash
-version=v0.6.2
+version=v0.6.3
 notes=/tmp/ferrum-${version}-notes.md
 
 git tag -a "$version" -F "$notes"
@@ -57,18 +58,18 @@ Build and package the Linux x86_64 assets locally after validation:
 
 ```bash
 cargo build --release
-scripts/package-linux.sh v0.6.2
+scripts/package-linux.sh v0.6.3
 ```
 
 The script writes assets to `dist/`:
 
 ```text
-ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz
-ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-ferrum_0.6.2_amd64.deb
-ferrum_0.6.2_amd64.deb.sha256
-ferrum-0.6.2-1.x86_64.rpm
-ferrum-0.6.2-1.x86_64.rpm.sha256
+ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz
+ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+ferrum_0.6.3_amd64.deb
+ferrum_0.6.3_amd64.deb.sha256
+ferrum-0.6.3-1.x86_64.rpm
+ferrum-0.6.3-1.x86_64.rpm.sha256
 ```
 
 The tarball includes:
@@ -100,11 +101,11 @@ Verify local packages:
 
 ```bash
 cd dist
-sha256sum -c ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum_0.6.2_amd64.deb.sha256
-sha256sum -c ferrum-0.6.2-1.x86_64.rpm.sha256
-dpkg-deb --info ferrum_0.6.2_amd64.deb
-dpkg-deb --contents ferrum_0.6.2_amd64.deb | head
+sha256sum -c ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum_0.6.3_amd64.deb.sha256
+sha256sum -c ferrum-0.6.3-1.x86_64.rpm.sha256
+dpkg-deb --info ferrum_0.6.3_amd64.deb
+dpkg-deb --contents ferrum_0.6.3_amd64.deb | head
 ```
 
 ## Codeberg release
@@ -112,7 +113,7 @@ dpkg-deb --contents ferrum_0.6.2_amd64.deb | head
 Create the Codeberg release with `tea` after pushing the tag:
 
 ```bash
-version=v0.6.2
+version=v0.6.3
 tea releases create "$version" \
   --title "Ferrum $version" \
   --note-file "/tmp/ferrum-${version}-notes.md" \
@@ -122,7 +123,7 @@ tea releases create "$version" \
 Upload release assets:
 
 ```bash
-version=v0.6.2
+version=v0.6.3
 tea releases assets create "$version" \
   dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz \
   dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256 \
@@ -138,7 +139,7 @@ If the release already exists, upload only missing assets.
 Verify Codeberg assets:
 
 ```bash
-version=v0.6.2
+version=v0.6.3
 plain_version=${version#v}
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
@@ -180,9 +181,9 @@ Release notes should include Codeberg primary install commands.
 Tarball:
 
 ```bash
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.2/ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.6.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.6.2-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.6.3-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.6.3-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -191,20 +192,20 @@ man ferrum
 Debian/Ubuntu:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.2/ferrum_0.6.2_amd64.deb
-sudo apt install ./ferrum_0.6.2_amd64.deb
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum_0.6.3_amd64.deb
+sudo apt install ./ferrum_0.6.3_amd64.deb
 ferrum --help
 ```
 
 Fedora/RHEL/openSUSE:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.2/ferrum-0.6.2-1.x86_64.rpm
-sudo dnf install ./ferrum-0.6.2-1.x86_64.rpm
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-0.6.3-1.x86_64.rpm
+sudo dnf install ./ferrum-0.6.3-1.x86_64.rpm
 ferrum --help
 ```
 
-Use `sudo zypper install ./ferrum-0.6.2-1.x86_64.rpm` on openSUSE.
+Use `sudo zypper install ./ferrum-0.6.3-1.x86_64.rpm` on openSUSE.
 
 From source, use Cargo:
 
@@ -218,14 +219,14 @@ ferrum --help
 Optional checksum verification:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.2/ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.2/ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## CI
 
-Codeberg Forgejo Actions validates pushes with `.forgejo/workflows/ci.yml` on the hosted `codeberg-medium` runner. The workflow checks formatting and runs `cargo test --release` in `rust:1.90`.
+Codeberg Forgejo Actions validates pushes with `.forgejo/workflows/ci.yml` on the hosted `codeberg-medium` runner. The workflow checks formatting, runs `cargo clippy --all-targets -- -D warnings`, and runs `cargo test --release` in `rust:1.90`.
 
 GitHub Actions may remain configured for mirror CI and optional backup release asset builds. Codeberg releases created locally with `tea` are the primary release path.
 

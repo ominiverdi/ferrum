@@ -28,6 +28,10 @@ pub fn evaluate(command: &str, safety: SafetyLevel) -> ShellGuardDecision {
         return ShellGuardDecision::Allow;
     }
 
+    if trimmed.contains("\\\n") || trimmed.contains("\\\r\n") {
+        return deny("backslash-newline shell continuation");
+    }
+
     if contains_opaque_shell_expansion(trimmed, safety) {
         return deny("opaque shell expansion or command substitution");
     }
@@ -107,10 +111,10 @@ fn contains_opaque_shell_expansion(command: &str, safety: SafetyLevel) -> bool {
                 let _ = chars.next();
                 continue;
             }
-            if ch == '`' {
-                if !matches!(safety, SafetyLevel::Low) || substitution_looks_dangerous(command) {
-                    return true;
-                }
+            if ch == '`'
+                && (!matches!(safety, SafetyLevel::Low) || substitution_looks_dangerous(command))
+            {
+                return true;
             }
             if ch == '$' {
                 match chars.peek().copied() {
@@ -268,15 +272,29 @@ fn is_redirection_operator(operator: &str) -> bool {
 }
 
 fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
-    let Some(first) = command.first() else {
-        return None;
-    };
+    let first = command.first()?;
     let base = command_name(first).to_ascii_lowercase();
     let args = &command[1..];
     let all = command
         .iter()
         .map(|token| token.to_ascii_lowercase())
         .collect::<Vec<_>>();
+
+    if is_command_wrapper(&base)
+        && args
+            .iter()
+            .any(|arg| is_shell_interpreter(command_name(arg)))
+    {
+        return Some("shell launcher through wrapper command".to_string());
+    }
+
+    if base == "busybox" && args.first().is_some_and(|arg| is_shell_interpreter(arg)) {
+        return Some("shell interpreter invocation".to_string());
+    }
+
+    if matches!(safety, SafetyLevel::High) && generated_code_execution(&base, args) {
+        return Some("generated code execution command".to_string());
+    }
 
     if base.starts_with("mkfs") {
         return Some("filesystem formatting command".to_string());
@@ -338,10 +356,10 @@ fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
         return Some("hex decoding command".to_string());
     }
 
-    if (base == "echo" && args.iter().any(|arg| arg == "-e")) || base == "printf" {
-        if all.iter().any(|arg| contains_escape_sequence(arg)) {
-            return Some("escape-sequence command construction".to_string());
-        }
+    if ((base == "echo" && args.iter().any(|arg| arg == "-e")) || base == "printf")
+        && all.iter().any(|arg| contains_escape_sequence(arg))
+    {
+        return Some("escape-sequence command construction".to_string());
     }
 
     if base == "find"
@@ -453,12 +471,25 @@ fn dangerous_dd(args: &[String], safety: SafetyLevel) -> bool {
 }
 
 fn dangerous_tar(args: &[String]) -> bool {
-    let has_extract = args.iter().any(|arg| {
-        arg == "-x"
-            || arg == "--extract"
-            || (arg.starts_with('-') && arg.contains('x') && !arg.starts_with("--"))
-    });
-    has_extract && option_targets_sensitive_path(args, "-C")
+    if args.iter().any(|arg| {
+        arg == "--to-command"
+            || arg.starts_with("--to-command=")
+            || arg == "--checkpoint-action"
+            || arg.starts_with("--checkpoint-action=exec=")
+    }) {
+        return true;
+    }
+    args.windows(2).any(|pair| {
+        matches!(pair[0].as_str(), "--to-command" | "--checkpoint-action")
+            && (pair[0] == "--to-command" || pair[1].starts_with("exec="))
+    }) || {
+        let has_extract = args.iter().any(|arg| {
+            arg == "-x"
+                || arg == "--extract"
+                || (arg.starts_with('-') && arg.contains('x') && !arg.starts_with("--"))
+        });
+        has_extract && option_targets_sensitive_path(args, "-C")
+    }
 }
 
 fn dangerous_install(args: &[String]) -> bool {
@@ -501,10 +532,28 @@ fn option_targets_sensitive_path(args: &[String], option: &str) -> bool {
         })
 }
 
+fn is_command_wrapper(command: &str) -> bool {
+    matches!(
+        command,
+        "env" | "command" | "nohup" | "timeout" | "nice" | "setsid" | "stdbuf"
+    )
+}
+
+fn generated_code_execution(command: &str, args: &[String]) -> bool {
+    matches!(command, "cc" | "gcc" | "clang" | "rustc")
+        && args
+            .iter()
+            .any(|arg| arg == "-" || arg.starts_with("/tmp/") || arg.contains("/tmp/"))
+        || command == "go" && args.first().is_some_and(|arg| arg == "run")
+        || command == "cargo" && args.first().is_some_and(|arg| arg == "run")
+        || command == "javac"
+        || command == "java" && args.iter().any(|arg| arg.starts_with("/tmp/"))
+}
+
 fn is_shell_interpreter(command: &str) -> bool {
     matches!(
         command,
-        "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh" | "csh" | "tcsh"
+        "sh" | "bash" | "zsh" | "dash" | "fish" | "ksh" | "mksh" | "ash" | "csh" | "tcsh"
     )
 }
 
@@ -711,11 +760,62 @@ mod tests {
         assert_denied("find /tmp/project -exec rm {} ;");
         assert_denied("tar -C / -x -f archive.tar");
         assert_denied("tar -xf archive.tar -C /etc");
+        assert_denied("tar -xf archive.tar --to-command=sh");
+        assert_denied("tar -xf archive.tar --checkpoint-action=exec=sh");
+        assert_denied("tar -xf archive.tar --checkpoint-action exec=sh");
         assert_denied("install -m 4755 payload /usr/local/bin/backdoor");
         assert_denied("install payload ~/.ssh/authorized_keys");
         assert_denied("sed -i 's/key=.*/key=attacker/' ~/.aws/credentials");
         assert_denied("cp payload ~/.aws/credentials");
         assert_denied("mv payload /etc/hosts");
+    }
+
+    #[test]
+    fn detects_wrapper_shell_launchers() {
+        for command in [
+            "sh -c 'echo hidden'",
+            "bash -lc 'echo hidden'",
+            "dash -c 'echo hidden'",
+            "zsh -c 'echo hidden'",
+            "fish -c 'echo hidden'",
+            "ksh -c 'echo hidden'",
+            "mksh -c 'echo hidden'",
+            "ash -c 'echo hidden'",
+            "busybox sh -c 'echo hidden'",
+            "env sh -c 'echo hidden'",
+            "command bash -lc 'echo hidden'",
+            "nohup sh -c 'echo hidden'",
+            "timeout 1 bash -lc 'echo hidden'",
+            "nice sh -c 'echo hidden'",
+            "setsid bash -c 'echo hidden'",
+            "stdbuf -oL sh -c 'echo hidden'",
+            "sh script.sh",
+        ] {
+            assert_denied_at(command, SafetyLevel::Low);
+        }
+    }
+
+    #[test]
+    fn detects_backslash_newline_continuation() {
+        assert_denied_at("r\\\nm -rf /tmp/example", SafetyLevel::Low);
+    }
+
+    #[test]
+    fn high_safety_denies_generated_code_execution() {
+        for command in [
+            "cc /tmp/x.c -o /tmp/x",
+            "gcc /tmp/x.c -o /tmp/x",
+            "clang /tmp/x.c -o /tmp/x",
+            "rustc /tmp/x.rs -o /tmp/x",
+            "go run /tmp/x.go",
+            "cargo run --bin helper",
+            "javac /tmp/X.java",
+            "java /tmp/X",
+        ] {
+            assert_denied_at(command, SafetyLevel::High);
+        }
+        assert_allowed_at("cargo test", SafetyLevel::High);
+        assert_allowed_at("cargo build --release", SafetyLevel::High);
     }
 
     #[test]

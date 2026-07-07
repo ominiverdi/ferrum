@@ -33,7 +33,9 @@ Interactive:
 - `tools/call`
 - tool discovery at first model turn
 - MCP tool output truncation
+- bounded MCP frame size before allocation
 - namespaced MCP tool names
+- sanitized-name collision rejection
 
 ## Not supported yet
 
@@ -86,7 +88,7 @@ Example:
 mcp__filesystem__read_file
 ```
 
-Characters outside ASCII letters, digits, `_`, and `-` are replaced with `_`.
+Characters outside ASCII letters, digits, `_`, and `-` are replaced with `_`. If two configured tools would expose the same sanitized name, Ferrum rejects MCP startup instead of silently overwriting one route.
 
 ## Safety
 
@@ -95,3 +97,5 @@ MCP servers run as local child processes with your user permissions. Ferrum does
 Do not configure MCP servers with secrets unless you trust the server and its dependencies.
 
 MCP tool output is truncated to a bounded tail before it is returned to the model.
+
+MCP JSON-RPC frames with `Content-Length` larger than Ferrum's internal frame limit are rejected before allocating the body buffer. This protects the Ferrum process from oversized MCP frames, but it does not sandbox the MCP server process itself.

@@ -386,6 +386,7 @@ impl Config {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn apply_cli_overrides(
         &mut self,
         provider: Option<&str>,

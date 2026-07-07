@@ -86,10 +86,11 @@ fn add_skills_from_dir(skills: &mut Vec<Skill>, dir: &Path, direct_md: bool) -> 
         {
             let entry = entry?;
             let path = entry.path();
-            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md") {
-                if let Some(skill) = parse_skill_file(&path)? {
-                    skills.push(skill);
-                }
+            if path.is_file()
+                && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+                && let Some(skill) = parse_skill_file(&path)?
+            {
+                skills.push(skill);
             }
         }
     }

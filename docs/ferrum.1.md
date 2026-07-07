@@ -106,6 +106,9 @@ only those servers are enabled.
 **--tools** TOOL ...
 : Expose only the listed tools to the model.
 
+**Security and safety**
+: Ferrum runs tools with the local user's permissions and is not a sandbox. See **docs/security.md** for threat-model notes, shell guard behavior, MCP caveats, and higher-risk workflow guidance.
+
 # MODEL TOOLS
 
 Ferrum's default native tool set includes:
@@ -116,8 +119,11 @@ Ferrum's default native tool set includes:
 The `bash` and `wait` tools apply a safety-tiered shell guard before execution.
 Use **--safety low|medium|high** at startup or **/safety low|medium|high**
 interactively to choose the trade-off. The default **medium** tier rejects
-destructive patterns and rewriteable opaque shell syntax while allowing common
+destructive patterns, shell wrapper launches, backslash-newline continuations,
+tar execution hooks, and rewriteable opaque shell syntax while allowing common
 coding commands such as Python one-liners and network tools.
+
+MCP tool names are namespaced and sanitized as **mcp__SERVER__TOOL**. Ferrum rejects sanitized-name collisions and oversized stdio **Content-Length** frames before allocation.
 
 The history tools are model-facing only. They search or read the current session
 JSONL, including entries archived before compaction, and return rendered text
@@ -327,9 +333,9 @@ configuration directory.
 Download the release tarball from Codeberg, extract it, and install the binary and man page:
 
 ```sh
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.2/ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.6.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.6.2-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.6.3-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.6.3-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -338,9 +344,9 @@ man ferrum
 Optional checksum verification:
 
 ```sh
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.2/ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.2/ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.6.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## From source

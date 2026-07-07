@@ -16,6 +16,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -25,6 +27,9 @@ jobs:
 
       - name: Test
         run: cargo test
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Build release
         run: cargo build --release

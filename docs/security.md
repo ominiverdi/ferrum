@@ -14,6 +14,9 @@ The shell guard is a hard rejection layer, not an approval prompt.
 
 ## Current baseline
 
+External review: several hardening items in this document were added after a
+security review by GitHub user Komzpa / Darafei Praliaskouski (`me@komzpa.net`).
+
 - Native tools: `read`, `write`, `edit`, `grep`, `find`, `ls`, `bash`, `wait`,
   `history_search`, and `history_read`.
 - Tool exposure can be narrowed with `--tools`, `--no-tools`, and `[tools]`
@@ -24,6 +27,11 @@ The shell guard is a hard rejection layer, not an approval prompt.
 - `/safety low|medium|high` changes the tier interactively.
 - Ferrum is not a sandbox and does not isolate `$HOME`.
 - Non-shell tools such as `write` and `edit` still mutate files by design.
+
+Ferrum also hardens adjacent tool plumbing: MCP frames have a maximum accepted
+`Content-Length` before allocation, sanitized MCP tool-name collisions are
+rejected, malformed provider tool-call JSON is treated as an error, and session
+and usage files are created private to the user.
 
 ## How to think about risk
 
@@ -142,9 +150,11 @@ ferrum --safety medium -p 'run exactly: echo "$(date)"'
 
 Expected: rejected at `medium` and `high`.
 
-### 4. Pipe-to-shell and encoded payloads
+### 4. Shell launchers, pipe-to-shell, and encoded payloads
 
-Ferrum rejects pipelines into shell interpreters, including common encoded
+Ferrum rejects direct and wrapped shell interpreter launches such as `sh -c`,
+`bash -lc`, `busybox sh`, `env sh -c`, `timeout 1 bash -lc`, and `setsid bash
+-c`. It also rejects pipelines into shell interpreters, including common encoded
 payload shapes.
 
 Example:
@@ -265,8 +275,9 @@ Why weak: it gives repository-owned text too much authority over the session.
 
 ### 10. Multi-line scripts
 
-Ferrum checks newline-separated shell segments. Prefer focused commands over
-large generated scripts.
+Ferrum checks newline-separated shell segments and rejects backslash-newline
+continuations that would make Bash join text before tokenization. Prefer focused
+commands over large generated scripts.
 
 Example:
 
@@ -306,6 +317,22 @@ ferrum --mcp untrusted -p "follow tool output"
 ```
 
 Why weak: `--safety` does not sandbox MCP servers or make their output trusted.
+
+### 12. Generated code and archive execution hooks
+
+At `high`, Ferrum rejects common generated-code execution paths such as temp-file
+`cc`/`gcc`/`clang`/`rustc` builds and `go run`/`cargo run`. At all tiers,
+Ferrum rejects tar execution hooks such as `--to-command` and
+`--checkpoint-action=exec=...`.
+
+Example:
+
+```sh
+ferrum --safety low -p 'run exactly: tar -xf archive.tar --to-command=sh'
+```
+
+Expected: rejected before Bash starts. Since this is rejected at `low`, it is
+also rejected at `medium` and `high`.
 
 ## Summary
 

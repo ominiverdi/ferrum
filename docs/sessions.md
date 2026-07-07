@@ -15,7 +15,7 @@ Entry types:
 - `metadata`
 - `compaction`
 
-Sessions are append-oriented and human-inspectable.
+Sessions are append-oriented and human-inspectable. New session files are created with user-private permissions (`0600`), and Ferrum tightens existing session file permissions on open when possible.
 
 ## Resume and named sessions
 
@@ -108,7 +108,7 @@ Interactive input supports completion and hints for slash commands, selected com
 
 The resolved tool list is stored in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
-Model-facing history tools, `history_search` and `history_read`, can search and read the current session JSONL by line number, including entries archived before compaction. They are tools only; there is no slash command for them. See [`tools.md`](tools.md).
+Model-facing history tools, `history_search` and `history_read`, can search and read the current session JSONL by line number, including tool calls/results and entries archived before compaction. They are tools only; there is no slash command for them. See [`tools.md`](tools.md).
 
 `/session` shows:
 

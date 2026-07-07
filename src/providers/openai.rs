@@ -108,7 +108,7 @@ impl Provider for OpenAiCompatProvider {
             let usage = body.usage.as_ref().map(OpenAiUsage::to_token_usage);
             let message = body.choices.into_iter().next().map(|choice| choice.message);
             Ok(ProviderResponse {
-                message: chat_response_to_message(message),
+                message: chat_response_to_message(message)?,
                 usage,
             })
         })
@@ -648,28 +648,32 @@ fn openai_tools(tools: &[ToolDefinition]) -> Vec<OpenAiTool> {
         .collect()
 }
 
-fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Message {
+fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Result<Message> {
     let Some(message) = message else {
-        return Message::text(Role::Assistant, "");
+        return Ok(Message::text(Role::Assistant, ""));
     };
     let mut content = Vec::new();
     if let Some(text) = message.content.filter(|text| !text.is_empty()) {
         content.push(ContentBlock::Text { text });
     }
     for call in message.tool_calls.unwrap_or_default() {
-        let input =
-            serde_json::from_str(&call.function.arguments).unwrap_or(serde_json::Value::Null);
+        let input = serde_json::from_str(&call.function.arguments).with_context(|| {
+            format!(
+                "failed to parse tool-call arguments for `{}` as JSON",
+                call.function.name
+            )
+        })?;
         content.push(ContentBlock::ToolUse {
             id: call.id,
             name: call.function.name,
             input,
         });
     }
-    Message {
+    Ok(Message {
         role: Role::Assistant,
         content,
         usage: None,
-    }
+    })
 }
 
 #[derive(Default)]
@@ -702,10 +706,10 @@ impl ChatSseParser {
         let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
             return;
         };
-        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
-            if let Ok(parsed) = serde_json::from_value::<OpenAiUsage>(usage.clone()) {
-                self.usage = Some(parsed.to_token_usage());
-            }
+        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null())
+            && let Ok(parsed) = serde_json::from_value::<OpenAiUsage>(usage.clone())
+        {
+            self.usage = Some(parsed.to_token_usage());
         }
         for choice in event
             .get("choices")
@@ -778,7 +782,12 @@ impl ChatSseParser {
             if call.name.is_empty() {
                 continue;
             }
-            let input = serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+            let input = serde_json::from_str(&call.arguments).with_context(|| {
+                format!(
+                    "failed to parse streamed tool-call arguments for `{}` as JSON",
+                    call.name
+                )
+            })?;
             content.push(ContentBlock::ToolUse {
                 id: if call.id.is_empty() {
                     format!("call_{}", content.len())
@@ -1064,20 +1073,20 @@ impl ResponsesSseParser {
                         on_event(StreamEvent::ThinkingDelta(delta.to_string()));
                     }
                 }
-                if let Some(text) = event.get("text").and_then(|value| value.as_str()) {
-                    if !self.thinking.ends_with(text) {
-                        self.thinking.push_str(text);
-                        if let Some(on_event) = on_event.as_deref_mut() {
-                            on_event(StreamEvent::ThinkingDelta(text.to_string()));
-                        }
+                if let Some(text) = event.get("text").and_then(|value| value.as_str())
+                    && !self.thinking.ends_with(text)
+                {
+                    self.thinking.push_str(text);
+                    if let Some(on_event) = on_event.as_deref_mut() {
+                        on_event(StreamEvent::ThinkingDelta(text.to_string()));
                     }
                 }
-            } else if event_type == "response.reasoning_text.delta" {
-                if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                    self.thinking.push_str(delta);
-                    if let Some(on_event) = on_event.as_deref_mut() {
-                        on_event(StreamEvent::ThinkingDelta(delta.to_string()));
-                    }
+            } else if event_type == "response.reasoning_text.delta"
+                && let Some(delta) = event.get("delta").and_then(|value| value.as_str())
+            {
+                self.thinking.push_str(delta);
+                if let Some(on_event) = on_event.as_deref_mut() {
+                    on_event(StreamEvent::ThinkingDelta(delta.to_string()));
                 }
             }
         }
@@ -1085,7 +1094,7 @@ impl ResponsesSseParser {
             Some("response.output_text.delta") => {
                 if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
                     self.output.push_str(delta);
-                    if let Some(on_event) = on_event.as_deref_mut() {
+                    if let Some(on_event) = on_event {
                         on_event(StreamEvent::TextDelta(delta.to_string()));
                     }
                 }
@@ -1101,41 +1110,41 @@ impl ResponsesSseParser {
                 }
             }
             Some("response.output_item.added") => {
-                if let Some(item) = event.get("item") {
-                    if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
-                        self.current_call = Some((
-                            item.get("call_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("call")
-                                .to_string(),
-                            item.get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("fc_call")
-                                .to_string(),
-                            item.get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            item.get("arguments")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                        ));
-                    }
+                if let Some(item) = event.get("item")
+                    && item.get("type").and_then(|value| value.as_str()) == Some("function_call")
+                {
+                    self.current_call = Some((
+                        item.get("call_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("call")
+                            .to_string(),
+                        item.get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("fc_call")
+                            .to_string(),
+                        item.get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        item.get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    ));
                 }
             }
             Some("response.function_call_arguments.delta") => {
-                if let Some((_, _, _, args)) = &mut self.current_call {
-                    if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                        args.push_str(delta);
-                    }
+                if let Some((_, _, _, args)) = &mut self.current_call
+                    && let Some(delta) = event.get("delta").and_then(|value| value.as_str())
+                {
+                    args.push_str(delta);
                 }
             }
             Some("response.function_call_arguments.done") => {
-                if let Some((_, _, _, args)) = &mut self.current_call {
-                    if let Some(done) = event.get("arguments").and_then(|value| value.as_str()) {
-                        *args = done.to_string();
-                    }
+                if let Some((_, _, _, args)) = &mut self.current_call
+                    && let Some(done) = event.get("arguments").and_then(|value| value.as_str())
+                {
+                    *args = done.to_string();
                 }
             }
             Some("response.output_item.done") => {
@@ -1187,10 +1196,10 @@ impl ResponsesSseParser {
         }
         let delta = text.strip_prefix(&self.output).unwrap_or(text).to_string();
         self.output.push_str(&delta);
-        if !delta.is_empty() {
-            if let Some(on_event) = on_event {
-                on_event(StreamEvent::TextDelta(delta));
-            }
+        if !delta.is_empty()
+            && let Some(on_event) = on_event
+        {
+            on_event(StreamEvent::TextDelta(delta));
         }
     }
 
@@ -1270,7 +1279,9 @@ impl ResponsesSseParser {
             content.push(ContentBlock::Text { text: self.output });
         }
         for (call_id, item_id, name, args) in self.tool_calls {
-            let input = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+            let input = serde_json::from_str(&args).with_context(|| {
+                format!("failed to parse Codex tool-call arguments for `{name}` as JSON")
+            })?;
             content.push(ContentBlock::ToolUse {
                 id: format!("{call_id}|{item_id}"),
                 name,
@@ -1431,6 +1442,41 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(3));
         assert_eq!(usage.total_tokens, Some(13));
         assert_eq!(usage.cache_read_tokens, 4);
+    }
+
+    #[test]
+    fn rejects_malformed_chat_tool_call_json() {
+        let message = ChatChoiceMessage {
+            content: None,
+            tool_calls: Some(vec![ChatResponseToolCall {
+                id: "call_1".to_string(),
+                function: ChatResponseToolFunction {
+                    name: "read".to_string(),
+                    arguments: "{not-json".to_string(),
+                },
+            }]),
+        };
+        let error = chat_response_to_message(Some(message)).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse tool-call arguments")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_stream_tool_call_json() {
+        let mut parser = ChatSseParser::default();
+        parser.process_line(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{not-json"}}]}}]}"#,
+            None,
+        );
+        let error = parser.finish().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse streamed tool-call arguments")
+        );
     }
 
     #[test]

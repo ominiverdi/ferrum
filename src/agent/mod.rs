@@ -471,10 +471,10 @@ fn expand_tilde_path(path: &str) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(path));
     }
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
 }
@@ -486,10 +486,11 @@ pub async fn run_print(
     title: Option<&str>,
     config: &Config,
 ) -> Result<()> {
+    let mut effective_config = config.clone();
     let mut state = if let Some(reference) = session_ref {
-        AgentState::resume_or_create_ref(config, reference)?
+        AgentState::resume_or_create_ref(&mut effective_config, reference)?
     } else {
-        AgentState::new(config)?
+        AgentState::new(&effective_config)?
     };
     if let Some(title) = title {
         state.set_title(title)?;
@@ -497,9 +498,10 @@ pub async fn run_print(
     state.attach_images(images)?;
     let (prompt, pasted_images) = extract_pasted_images(&prompt, &state.cwd);
     state.attach_images(pasted_images)?;
-    state.run_turn(prompt, config, false).await
+    state.run_turn(prompt, &effective_config, false).await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_interactive(
     config: &mut Config,
     resume: Option<Option<String>>,
@@ -708,10 +710,8 @@ fn restore_session_preferences(
     if let Some(diff_mode) = info.diff_mode.as_deref() {
         config.diff_mode = DiffMode::parse(diff_mode)?;
     }
-    if restore_safety {
-        if let Some(safety) = info.safety.as_deref() {
-            config.safety = SafetyLevel::parse(safety)?;
-        }
+    if restore_safety && let Some(safety) = info.safety.as_deref() {
+        config.safety = SafetyLevel::parse(safety)?;
     }
     if let Some(color_mode) = info.color_mode.as_deref() {
         config.color_mode = ColorMode::parse(color_mode)?;
@@ -1513,7 +1513,7 @@ impl AgentState {
         Self::open_session(config, path)
     }
 
-    fn resume_or_create_ref(config: &Config, reference: &str) -> Result<Self> {
+    fn resume_or_create_ref(config: &mut Config, reference: &str) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let resolution = session::jsonl::resolve_or_create_session_ref(
             &config.sessions_dir(),
@@ -1528,6 +1528,7 @@ impl AgentState {
         )?;
         match resolution {
             session::jsonl::SessionRefResolution::Existing(path) => {
+                let _restored_tools = restore_session_preferences(config, &path, true, true, true)?;
                 let state = Self::open_session(config, path.clone())?;
                 println!(
                     "resumed {} ({} messages)",
@@ -2174,12 +2175,11 @@ impl AgentState {
         if matches!(name, "history_search" | "history_read") {
             return self.execute_history_tool(name, input);
         }
-        if self.mcp_enabled {
-            if let Some(mcp) = &mut self.mcp {
-                if mcp.has_tool(name) {
-                    return mcp.call(name, input).await;
-                }
-            }
+        if self.mcp_enabled
+            && let Some(mcp) = &mut self.mcp
+            && mcp.has_tool(name)
+        {
+            return mcp.call(name, input).await;
         }
         builtin_tools::execute_with_cancel_and_safety(
             name,
@@ -2973,17 +2973,15 @@ fn render_tool_result(
     let status = if display_error { "error" } else { "ok" };
     let line_count = content.lines().count();
     let bytes = content.len();
-    if is_error {
-        if let Some(reason) = blocked_tool_reason(name, content) {
-            eprintln!(
-                "{}",
-                colors.paint(
-                    ColorToken::Warning,
-                    color_mode,
-                    format!("[tool:{name} blocked] {reason}")
-                )
-            );
-        }
+    if is_error && let Some(reason) = blocked_tool_reason(name, content) {
+        eprintln!(
+            "{}",
+            colors.paint(
+                ColorToken::Warning,
+                color_mode,
+                format!("[tool:{name} blocked] {reason}")
+            )
+        );
     }
     let result_token = if display_error {
         ColorToken::Error
@@ -3098,7 +3096,7 @@ fn print_session_title(title: &str, color_mode: ColorMode, colors: &ColorPalette
 }
 
 fn set_terminal_title(title: &str) -> Result<()> {
-    let title = title.replace('\x1b', "").replace('\x07', "");
+    let title = title.replace(['\x1b', '\x07'], "");
     print!("\x1b]0;Ferrum: {title}\x07");
     io::stdout().flush()?;
     Ok(())
@@ -4398,10 +4396,10 @@ fn extract_pasted_images(input: &str, cwd: &Path) -> (String, Vec<String>) {
 
     for part in input.split_whitespace() {
         let trimmed = part.trim_matches(['\'', '"']);
-        if trimmed.starts_with("data:image/") {
-            image_paths.push(trimmed.to_string());
-        } else if looks_like_image_path(trimmed)
-            && builtin_tools::path::resolve_to_cwd(trimmed, cwd).is_ok_and(|path| path.is_file())
+        if trimmed.starts_with("data:image/")
+            || looks_like_image_path(trimmed)
+                && builtin_tools::path::resolve_to_cwd(trimmed, cwd)
+                    .is_ok_and(|path| path.is_file())
         {
             image_paths.push(trimmed.to_string());
         } else {

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -82,6 +83,7 @@ impl JsonlSession {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_named(
         dir: PathBuf,
         id: &str,
@@ -106,6 +108,7 @@ impl JsonlSession {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_with_header_id(
         dir: PathBuf,
         filename: String,
@@ -118,10 +121,12 @@ impl JsonlSession {
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        tighten_dir_permissions(&dir);
         let path = dir.join(filename);
         let file = OpenOptions::new()
             .create_new(true)
             .write(true)
+            .mode(0o600)
             .open(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
         let mut session = Self { path, file };
@@ -148,8 +153,10 @@ impl JsonlSession {
     }
 
     pub fn open(path: PathBuf) -> Result<Self> {
+        tighten_file_permissions(&path);
         let file = OpenOptions::new()
             .append(true)
+            .mode(0o600)
             .open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
         Ok(Self { path, file })
@@ -456,7 +463,7 @@ const HISTORY_SNIPPET_CHARS: usize = 240;
 
 pub fn search_history(path: &Path, options: HistorySearchOptions) -> Result<String> {
     let matcher = HistoryMatcher::new(&options.query, options.literal, options.ignore_case)?;
-    let limit = options.limit.max(1).min(50);
+    let limit = options.limit.clamp(1, 50);
     let entries = parsed_session_entries(path)?;
     let archive_cutoff = latest_compaction_line(&entries).unwrap_or(0);
     let mut out = String::new();
@@ -493,7 +500,7 @@ pub fn search_history(path: &Path, options: HistorySearchOptions) -> Result<Stri
 
 pub fn read_history(path: &Path, offset: usize, limit: usize) -> Result<String> {
     let offset = offset.max(1);
-    let limit = limit.max(1).min(100);
+    let limit = limit.clamp(1, 100);
     let entries = parsed_session_entries(path)?;
     let archive_cutoff = latest_compaction_line(&entries).unwrap_or(0);
     let mut out = String::new();
@@ -560,7 +567,7 @@ fn latest_compaction_line(entries: &[ParsedSessionEntry]) -> Option<usize> {
         .iter()
         .filter(|entry| matches!(entry.entry, SessionEntry::Compaction { .. }))
         .map(|entry| entry.line_number)
-        .last()
+        .next_back()
 }
 
 fn searchable_entry_text(entry: &SessionEntry) -> Option<(&'static str, String)> {
@@ -597,18 +604,20 @@ fn message_search_text(message: &Message) -> String {
     message
         .content
         .iter()
-        .filter_map(|block| match block {
-            crate::agent::messages::ContentBlock::Text { text } => Some(text.clone()),
+        .map(|block| match block {
+            crate::agent::messages::ContentBlock::Text { text } => text.clone(),
             crate::agent::messages::ContentBlock::Thinking { text, .. } => {
-                Some(format!("thinking: {text}"))
+                format!("thinking: {text}")
             }
             crate::agent::messages::ContentBlock::ToolResult {
                 content, is_error, ..
-            } => Some(format!("tool_result error={is_error}: {content}")),
+            } => format!("tool_result error={is_error}: {content}"),
             crate::agent::messages::ContentBlock::Image { source, sha256, .. } => {
-                Some(format!("image {source} sha256={sha256}"))
+                format!("image {source} sha256={sha256}")
             }
-            crate::agent::messages::ContentBlock::ToolUse { .. } => None,
+            crate::agent::messages::ContentBlock::ToolUse { name, input, .. } => {
+                format!("tool_call {name}: {input}")
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -698,6 +707,7 @@ pub enum SessionRefResolution {
     Created(PathBuf),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_or_create_session_ref(
     dir: &Path,
     cwd: &Path,
@@ -810,40 +820,40 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 tools,
                 ..
             } => {
-                if let Some(title) = title {
-                    if !title.trim().is_empty() {
-                        explicit_title = Some(one_line_title(&title));
-                    }
+                if let Some(title) = title
+                    && !title.trim().is_empty()
+                {
+                    explicit_title = Some(one_line_title(&title));
                 }
-                if let Some(provider) = provider {
-                    if !provider.trim().is_empty() {
-                        explicit_provider = Some(provider);
-                    }
+                if let Some(provider) = provider
+                    && !provider.trim().is_empty()
+                {
+                    explicit_provider = Some(provider);
                 }
-                if let Some(model) = model {
-                    if !model.trim().is_empty() {
-                        explicit_model = Some(model);
-                    }
+                if let Some(model) = model
+                    && !model.trim().is_empty()
+                {
+                    explicit_model = Some(model);
                 }
-                if let Some(thinking) = thinking {
-                    if !thinking.trim().is_empty() {
-                        explicit_thinking = Some(thinking);
-                    }
+                if let Some(thinking) = thinking
+                    && !thinking.trim().is_empty()
+                {
+                    explicit_thinking = Some(thinking);
                 }
-                if let Some(color_mode) = color_mode {
-                    if !color_mode.trim().is_empty() {
-                        explicit_color_mode = Some(color_mode);
-                    }
+                if let Some(color_mode) = color_mode
+                    && !color_mode.trim().is_empty()
+                {
+                    explicit_color_mode = Some(color_mode);
                 }
-                if let Some(diff_mode) = diff_mode {
-                    if !diff_mode.trim().is_empty() {
-                        explicit_diff_mode = Some(diff_mode);
-                    }
+                if let Some(diff_mode) = diff_mode
+                    && !diff_mode.trim().is_empty()
+                {
+                    explicit_diff_mode = Some(diff_mode);
                 }
-                if let Some(safety) = safety {
-                    if !safety.trim().is_empty() {
-                        explicit_safety = Some(safety);
-                    }
+                if let Some(safety) = safety
+                    && !safety.trim().is_empty()
+                {
+                    explicit_safety = Some(safety);
                 }
                 if let Some(tools) = tools {
                     explicit_tools = Some(tools);
@@ -924,14 +934,53 @@ fn one_line_title(text: &str) -> String {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system time is before unix epoch")
-        .as_millis() as u64
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn tighten_dir_permissions(path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o077 != 0 {
+            permissions.set_mode(0o700);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
+}
+
+fn tighten_file_permissions(path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o177 != 0 {
+            permissions.set_mode(0o600);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::messages::{Message, Role};
+
+    #[test]
+    fn session_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let mode = fs::metadata(session.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 
     #[test]
     fn creates_named_session_with_user_id() {
