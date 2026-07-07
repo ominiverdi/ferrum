@@ -28,12 +28,11 @@ security review by GitHub user Komzpa / Darafei Praliaskouski (`me@komzpa.net`).
 - Ferrum is not a sandbox and does not isolate `$HOME`.
 - Non-shell tools such as `write` and `edit` still mutate files by design.
 
-Ferrum also hardens adjacent tool plumbing: MCP stdio reads and writes use
-`Content-Length` frames, oversized frames are rejected before allocation,
-sanitzed MCP tool-name collisions are rejected, MCP metadata is bounded before it
-reaches model tool definitions, malformed provider tool-call JSON is treated as
-an error, and session, usage, and OAuth auth files are created or tightened
-private to the user.
+Ferrum also hardens adjacent tool plumbing: MCP inbound `Content-Length` frames
+are capped before allocation, sanitized MCP tool-name collisions are rejected,
+MCP metadata is bounded before it reaches model tool definitions, malformed
+provider tool-call JSON is treated as an error, and session, usage, and OAuth
+auth files are created or tightened private to the user.
 
 ## How to think about risk
 

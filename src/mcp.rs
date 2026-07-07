@@ -1,5 +1,6 @@
 use crate::{agent::tools::ToolDefinition, config::McpServerConfig};
 use anyhow::{Context, Result};
+use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::HashMap, io, process::Stdio, time::Duration};
@@ -29,34 +30,41 @@ impl McpManager {
         let mut tools = Vec::new();
         let mut tool_routes = HashMap::new();
 
-        for server_config in configs.iter().filter(|server| server.enabled) {
-            let mut server = match timeout(MCP_START_TIMEOUT, McpServer::start(server_config)).await
-            {
-                Ok(Ok(server)) => server,
-                Ok(Err(error)) => {
-                    eprintln!("[mcp] failed to start `{}`: {error}", server_config.name);
-                    continue;
-                }
-                Err(_) => {
-                    eprintln!("[mcp] timed out starting `{}`", server_config.name);
-                    continue;
-                }
-            };
+        let started_servers = join_all(configs.iter().filter(|server| server.enabled).map(
+            |server_config| async move {
+                let mut server =
+                    match timeout(MCP_START_TIMEOUT, McpServer::start(server_config)).await {
+                        Ok(Ok(server)) => server,
+                        Ok(Err(error)) => {
+                            eprintln!("[mcp] failed to start `{}`: {error}", server_config.name);
+                            return None;
+                        }
+                        Err(_) => {
+                            eprintln!("[mcp] timed out starting `{}`", server_config.name);
+                            return None;
+                        }
+                    };
+                let listed_tools = match timeout(MCP_REQUEST_TIMEOUT, server.list_tools()).await {
+                    Ok(Ok(tools)) => tools,
+                    Ok(Err(error)) => {
+                        eprintln!(
+                            "[mcp] failed to list tools for `{}`: {error}",
+                            server_config.name
+                        );
+                        return None;
+                    }
+                    Err(_) => {
+                        eprintln!("[mcp] timed out listing tools for `{}`", server_config.name);
+                        return None;
+                    }
+                };
+                Some((server_config, server, listed_tools))
+            },
+        ))
+        .await;
+
+        for (server_config, server, listed_tools) in started_servers.into_iter().flatten() {
             let server_index = servers.len();
-            let listed_tools = match timeout(MCP_REQUEST_TIMEOUT, server.list_tools()).await {
-                Ok(Ok(tools)) => tools,
-                Ok(Err(error)) => {
-                    eprintln!(
-                        "[mcp] failed to list tools for `{}`: {error}",
-                        server_config.name
-                    );
-                    continue;
-                }
-                Err(_) => {
-                    eprintln!("[mcp] timed out listing tools for `{}`", server_config.name);
-                    continue;
-                }
-            };
             for tool in listed_tools {
                 let exposed_name = exposed_tool_name(&server_config.name, &tool.name);
                 let route = (server_index, tool.name.clone());
@@ -222,7 +230,7 @@ impl McpServer {
     }
 
     async fn write_message(&mut self, message: &Value) -> Result<()> {
-        let frame = encode_message_frame(message)?;
+        let frame = encode_message_line(message)?;
         if let Err(error) = self.stdin.write_all(&frame).await {
             return Err(self.write_error_context(error).await);
         }
@@ -287,11 +295,10 @@ struct McpTool {
     input_schema: Option<Value>,
 }
 
-fn encode_message_frame(message: &Value) -> Result<Vec<u8>> {
-    let body = serde_json::to_vec(message)?;
-    let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-    frame.extend_from_slice(&body);
-    Ok(frame)
+fn encode_message_line(message: &Value) -> Result<Vec<u8>> {
+    let mut body = serde_json::to_vec(message)?;
+    body.push(b'\n');
+    Ok(body)
 }
 
 fn parse_content_length(header: &str) -> Result<usize> {
@@ -412,12 +419,12 @@ mod tests {
     }
 
     #[test]
-    fn write_message_uses_content_length_frame() {
+    fn write_message_uses_json_line() {
         let message = json!({"jsonrpc":"2.0","id":1,"method":"ping"});
-        let frame = encode_message_frame(&message).unwrap();
+        let line = encode_message_line(&message).unwrap();
         let body = serde_json::to_vec(&message).unwrap();
-        assert!(frame.starts_with(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes()));
-        assert_eq!(&frame[frame.len() - body.len()..], body.as_slice());
+        assert_eq!(&line[..line.len() - 1], body.as_slice());
+        assert_eq!(line.last(), Some(&b'\n'));
     }
 
     #[test]

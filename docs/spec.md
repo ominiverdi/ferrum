@@ -385,7 +385,7 @@ MCP tool names are exposed as:
 mcp__<server>__<tool>
 ```
 
-Characters outside ASCII letters, digits, `_`, and `-` are sanitized to `_`; sanitized-name collisions are rejected. Stdio reads and writes use `Content-Length` frames. Oversized incoming `Content-Length` frames are rejected before allocation. Tool output and model-visible metadata are bounded before being returned to or sent to the model.
+Characters outside ASCII letters, digits, `_`, and `-` are sanitized to `_`; sanitized-name collisions are rejected. Ferrum writes newline-delimited JSON to MCP stdio servers for compatibility. Incoming MCP messages may be newline-delimited JSON or `Content-Length` frames; oversized incoming `Content-Length` frames are rejected before allocation. Tool output and model-visible metadata are bounded before being returned to or sent to the model.
 
 HTTP/SSE MCP transports are deferred.
 
