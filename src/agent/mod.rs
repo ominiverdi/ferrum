@@ -696,16 +696,14 @@ fn restore_session_preferences(
     let Some(info) = session::jsonl::session_info(path)? else {
         return Ok(None);
     };
-    if restore_thinking {
-        if let Some(provider) = info.provider.as_deref() {
-            config.set_provider(provider)?;
-        }
-        if let Some(model) = info.model.as_deref() {
-            config.set_model(model)?;
-        }
-        if let Some(thinking) = info.thinking.as_deref() {
-            config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
-        }
+    if let Some(provider) = info.provider.as_deref() {
+        config.set_provider(provider)?;
+    }
+    if let Some(model) = info.model.as_deref() {
+        config.set_model(model)?;
+    }
+    if restore_thinking && let Some(thinking) = info.thinking.as_deref() {
+        config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
     }
     if let Some(diff_mode) = info.diff_mode.as_deref() {
         config.diff_mode = DiffMode::parse(diff_mode)?;
@@ -1956,6 +1954,9 @@ impl AgentState {
             return Ok(());
         }
         self.mcp_enabled = enabled;
+        if !enabled {
+            self.mcp = None;
+        }
         let message = messages::Message::text(
             messages::Role::System,
             format!(
@@ -4059,6 +4060,7 @@ mod context_pressure_tests {
             models: std::collections::BTreeMap::new(),
             offline: false,
             max_context_tokens: 1234,
+            base_max_context_tokens: 1234,
             max_tool_rounds: 0,
             thinking: crate::config::ThinkingLevel::Off,
             mcp_enabled: true,

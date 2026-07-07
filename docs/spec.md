@@ -346,7 +346,7 @@ Exact text replacement. Each old text must match exactly once. Multiple non-over
 
 ### `bash`
 
-Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Commands pass through a safety-tiered shell guard controlled by `/safety low|medium|high`. The guard rejects destructive commands, opaque shell expansion, shell wrapper launches, backslash-newline continuations, tar execution hooks, sensitive-path writes, and stricter generated-code/network/script forms at `high`.
+Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Commands pass through a safety-tiered shell guard controlled by `/safety low|medium|high`. The guard rejects destructive commands, opaque shell expansion, shell compound/control syntax, shell wrapper launches, backslash-newline continuations, tar execution hooks, sensitive-path writes, and stricter generated-code/network/script forms at `high`, including direct compiler entrypoints.
 
 ### `wait`
 
@@ -385,7 +385,7 @@ MCP tool names are exposed as:
 mcp__<server>__<tool>
 ```
 
-Characters outside ASCII letters, digits, `_`, and `-` are sanitized to `_`; sanitized-name collisions are rejected. Stdio frames with oversized `Content-Length` are rejected before allocation. Tool output is truncated before being returned to the model.
+Characters outside ASCII letters, digits, `_`, and `-` are sanitized to `_`; sanitized-name collisions are rejected. Stdio reads and writes use `Content-Length` frames. Oversized incoming `Content-Length` frames are rejected before allocation. Tool output and model-visible metadata are bounded before being returned to or sent to the model.
 
 HTTP/SSE MCP transports are deferred.
 

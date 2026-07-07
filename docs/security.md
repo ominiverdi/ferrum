@@ -28,10 +28,12 @@ security review by GitHub user Komzpa / Darafei Praliaskouski (`me@komzpa.net`).
 - Ferrum is not a sandbox and does not isolate `$HOME`.
 - Non-shell tools such as `write` and `edit` still mutate files by design.
 
-Ferrum also hardens adjacent tool plumbing: MCP frames have a maximum accepted
-`Content-Length` before allocation, sanitized MCP tool-name collisions are
-rejected, malformed provider tool-call JSON is treated as an error, and session
-and usage files are created private to the user.
+Ferrum also hardens adjacent tool plumbing: MCP stdio reads and writes use
+`Content-Length` frames, oversized frames are rejected before allocation,
+sanitzed MCP tool-name collisions are rejected, MCP metadata is bounded before it
+reaches model tool definitions, malformed provider tool-call JSON is treated as
+an error, and session, usage, and OAuth auth files are created or tightened
+private to the user.
 
 ## How to think about risk
 
@@ -102,6 +104,19 @@ Example:
 
 ```sh
 ferrum --safety low -p "run exactly: r''m -r''f /"
+```
+
+Expected: rejected before Bash starts. Since this is rejected at `low`, it is
+also rejected at `medium` and `high`.
+
+Ferrum rejects shell compound syntax and control-flow forms that can hide command
+words from a partial shell tokenizer, including subshell/grouping forms and
+`if`/`while`/`case` blocks.
+
+Example:
+
+```sh
+ferrum --safety low -p 'run exactly: (rm -rf /)'
 ```
 
 Expected: rejected before Bash starts. Since this is rejected at `low`, it is
@@ -320,10 +335,10 @@ Why weak: `--safety` does not sandbox MCP servers or make their output trusted.
 
 ### 12. Generated code and archive execution hooks
 
-At `high`, Ferrum rejects common generated-code execution paths such as temp-file
-`cc`/`gcc`/`clang`/`rustc` builds and `go run`/`cargo run`. At all tiers,
-Ferrum rejects tar execution hooks such as `--to-command` and
-`--checkpoint-action=exec=...`.
+At `high`, Ferrum rejects direct compiler entrypoints such as `cc`, `gcc`,
+`clang`, `rustc`, and `javac`, plus common generated-code execution paths such as
+`go run` and `cargo run`. At all tiers, Ferrum rejects tar execution hooks such
+as `--to-command` and `--checkpoint-action=exec=...`.
 
 Example:
 

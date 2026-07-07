@@ -203,7 +203,7 @@ fn tokenize(command: &str) -> Vec<Token> {
                 flush_word(&mut tokens, &mut current);
                 at_word_start = true;
             }
-            ';' | '|' | '&' => {
+            ';' | '|' | '&' | '(' | ')' | '{' | '}' => {
                 flush_word(&mut tokens, &mut current);
                 let mut operator = ch.to_string();
                 if matches!(ch, '|' | '&') && chars.peek() == Some(&ch) {
@@ -279,6 +279,10 @@ fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
         .iter()
         .map(|token| token.to_ascii_lowercase())
         .collect::<Vec<_>>();
+
+    if is_shell_control_word(&base) {
+        return Some("shell compound control syntax".to_string());
+    }
 
     if is_command_wrapper(&base)
         && args
@@ -450,7 +454,7 @@ fn is_sensitive_path(arg: &str) -> bool {
             | "~/.vault"
     ) || [
         "/etc/", "/usr/", "/bin/", "/sbin/", "/boot/", "/sys/", "/proc/", "/dev/", "/lib/",
-        "/lib64/", "~/.ssh", "~/.aws", "~/.vault",
+        "/lib64/", "/home/", "/var/", "/opt/", "~/.ssh", "~/.aws", "~/.vault",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
@@ -532,6 +536,28 @@ fn option_targets_sensitive_path(args: &[String], option: &str) -> bool {
         })
 }
 
+fn is_shell_control_word(word: &str) -> bool {
+    matches!(
+        word,
+        "if" | "then"
+            | "else"
+            | "elif"
+            | "fi"
+            | "for"
+            | "while"
+            | "until"
+            | "do"
+            | "done"
+            | "case"
+            | "esac"
+            | "select"
+            | "function"
+            | "time"
+            | "[["
+            | "]]"
+    )
+}
+
 fn is_command_wrapper(command: &str) -> bool {
     matches!(
         command,
@@ -546,7 +572,7 @@ fn generated_code_execution(command: &str, args: &[String]) -> bool {
             .any(|arg| arg == "-" || arg.starts_with("/tmp/") || arg.contains("/tmp/"))
         || command == "go" && args.first().is_some_and(|arg| arg == "run")
         || command == "cargo" && args.first().is_some_and(|arg| arg == "run")
-        || command == "javac"
+        || matches!(command, "cc" | "gcc" | "clang" | "rustc" | "javac")
         || command == "java" && args.iter().any(|arg| arg.starts_with("/tmp/"))
 }
 
@@ -746,6 +772,9 @@ mod tests {
     fn detects_sensitive_file_and_permission_commands() {
         assert_denied("rm /etc/passwd");
         assert_denied("rm -rf /etc");
+        assert_denied("rm -rf /home/example");
+        assert_denied("rm -rf /var/log/example");
+        assert_denied("rm -rf /opt/example");
         assert_denied("rm -rf ~/.ssh");
         assert_denied("dd if=/dev/zero of=/dev/sda");
         assert_allowed("dd if=/dev/null of=marker");
@@ -768,6 +797,19 @@ mod tests {
         assert_denied("sed -i 's/key=.*/key=attacker/' ~/.aws/credentials");
         assert_denied("cp payload ~/.aws/credentials");
         assert_denied("mv payload /etc/hosts");
+    }
+
+    #[test]
+    fn detects_shell_compound_syntax_bypasses() {
+        for command in [
+            "(rm -rf /)",
+            "{ rm -rf /; }",
+            "if true; then rm -rf /; fi",
+            "while true; do rm -rf /; done",
+            "case x in x) rm -rf /;; esac",
+        ] {
+            assert_denied_at(command, SafetyLevel::Low);
+        }
     }
 
     #[test]
@@ -809,7 +851,11 @@ mod tests {
             "rustc /tmp/x.rs -o /tmp/x",
             "go run /tmp/x.go",
             "cargo run --bin helper",
-            "javac /tmp/X.java",
+            "cc foo.c -o foo",
+            "gcc foo.c -o foo",
+            "clang foo.c -o foo",
+            "rustc foo.rs -o foo",
+            "javac Foo.java",
             "java /tmp/X",
         ] {
             assert_denied_at(command, SafetyLevel::High);

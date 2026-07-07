@@ -12,6 +12,8 @@ use tokio::{
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MAX_MCP_OUTPUT_CHARS: usize = 20_000;
 const MAX_MCP_FRAME_BYTES: usize = 10 * 1024 * 1024;
+const MAX_MCP_DESCRIPTION_CHARS: usize = 2_000;
+const MAX_MCP_SCHEMA_CHARS: usize = 8_000;
 const MCP_START_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -68,15 +70,15 @@ impl McpManager {
                 }
                 tools.push(ToolDefinition {
                     name: exposed_name,
-                    description: format!(
-                        "MCP tool `{}` from server `{}`. {}",
-                        tool.name,
-                        server_config.name,
-                        tool.description.unwrap_or_default()
+                    description: bounded_tool_description(
+                        &tool.name,
+                        &server_config.name,
+                        tool.description.as_deref().unwrap_or_default(),
                     ),
-                    input_schema: tool
-                        .input_schema
-                        .unwrap_or_else(|| json!({"type":"object"})),
+                    input_schema: bounded_input_schema(
+                        tool.input_schema
+                            .unwrap_or_else(|| json!({"type":"object"})),
+                    ),
                 });
             }
             servers.push(server);
@@ -220,11 +222,8 @@ impl McpServer {
     }
 
     async fn write_message(&mut self, message: &Value) -> Result<()> {
-        let body = serde_json::to_vec(message)?;
-        if let Err(error) = self.stdin.write_all(&body).await {
-            return Err(self.write_error_context(error).await);
-        }
-        if let Err(error) = self.stdin.write_all(b"\n").await {
+        let frame = encode_message_frame(message)?;
+        if let Err(error) = self.stdin.write_all(&frame).await {
             return Err(self.write_error_context(error).await);
         }
         if let Err(error) = self.stdin.flush().await {
@@ -288,6 +287,13 @@ struct McpTool {
     input_schema: Option<Value>,
 }
 
+fn encode_message_frame(message: &Value) -> Result<Vec<u8>> {
+    let body = serde_json::to_vec(message)?;
+    let mut frame = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+    frame.extend_from_slice(&body);
+    Ok(frame)
+}
+
 fn parse_content_length(header: &str) -> Result<usize> {
     let len = header
         .strip_prefix("Content-Length:")
@@ -306,6 +312,36 @@ fn exposed_tool_name(server_name: &str, tool_name: &str) -> String {
         sanitize_name(server_name),
         sanitize_name(tool_name)
     )
+}
+
+fn bounded_tool_description(tool_name: &str, server_name: &str, description: &str) -> String {
+    format!(
+        "MCP tool `{}` from server `{}`. {}",
+        tool_name,
+        server_name,
+        truncate_chars(description, MAX_MCP_DESCRIPTION_CHARS)
+    )
+}
+
+fn bounded_input_schema(schema: Value) -> Value {
+    let text = schema.to_string();
+    if text.chars().count() <= MAX_MCP_SCHEMA_CHARS {
+        return schema;
+    }
+    json!({
+        "type": "object",
+        "description": "MCP input schema omitted because it exceeded Ferrum's metadata size limit"
+    })
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated} [truncated]")
+    } else {
+        truncated
+    }
 }
 
 fn render_tool_result(value: &Value) -> String {
@@ -373,6 +409,33 @@ mod tests {
     fn accepts_content_length_at_limit() {
         let header = format!("Content-Length: {MAX_MCP_FRAME_BYTES}");
         assert_eq!(parse_content_length(&header).unwrap(), MAX_MCP_FRAME_BYTES);
+    }
+
+    #[test]
+    fn write_message_uses_content_length_frame() {
+        let message = json!({"jsonrpc":"2.0","id":1,"method":"ping"});
+        let frame = encode_message_frame(&message).unwrap();
+        let body = serde_json::to_vec(&message).unwrap();
+        assert!(frame.starts_with(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes()));
+        assert_eq!(&frame[frame.len() - body.len()..], body.as_slice());
+    }
+
+    #[test]
+    fn bounds_mcp_metadata() {
+        let description = "x".repeat(MAX_MCP_DESCRIPTION_CHARS + 10);
+        let bounded = bounded_tool_description("tool", "server", &description);
+        assert!(bounded.contains("[truncated]"));
+        assert!(bounded.chars().count() <= MAX_MCP_DESCRIPTION_CHARS + 100);
+
+        let schema = json!({"type":"object","description":"x".repeat(MAX_MCP_SCHEMA_CHARS + 10)});
+        let bounded_schema = bounded_input_schema(schema);
+        assert_eq!(bounded_schema["type"], "object");
+        assert!(
+            bounded_schema["description"]
+                .as_str()
+                .unwrap()
+                .contains("omitted")
+        );
     }
 
     #[tokio::test]

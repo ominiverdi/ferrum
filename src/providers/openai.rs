@@ -1038,6 +1038,7 @@ struct ResponsesSseParser {
     usage: Option<TokenUsage>,
     tool_calls: Vec<(String, String, String, String)>,
     current_call: Option<(String, String, String, String)>,
+    error: Option<String>,
 }
 
 impl ResponsesSseParser {
@@ -1113,24 +1114,10 @@ impl ResponsesSseParser {
                 if let Some(item) = event.get("item")
                     && item.get("type").and_then(|value| value.as_str()) == Some("function_call")
                 {
-                    self.current_call = Some((
-                        item.get("call_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("call")
-                            .to_string(),
-                        item.get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("fc_call")
-                            .to_string(),
-                        item.get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        item.get("arguments")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                    ));
+                    match parse_response_function_call_item(item) {
+                        Ok(call) => self.current_call = Some(call),
+                        Err(error) => self.error = Some(error.to_string()),
+                    }
                 }
             }
             Some("response.function_call_arguments.delta") => {
@@ -1157,28 +1144,13 @@ impl ResponsesSseParser {
                         self.thinking_signature = Some(item.to_string());
                     }
                     if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
-                        let call_id = item
-                            .get("call_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("call")
-                            .to_string();
-                        let item_id = item
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("fc_call")
-                            .to_string();
-                        let name = item
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        let args = item
-                            .get("arguments")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("{}")
-                            .to_string();
-                        self.tool_calls.push((call_id, item_id, name, args));
-                        self.current_call = None;
+                        match parse_response_function_call_item(item) {
+                            Ok(call) => {
+                                self.tool_calls.push(call);
+                                self.current_call = None;
+                            }
+                            Err(error) => self.error = Some(error.to_string()),
+                        }
                     }
                 }
             }
@@ -1230,40 +1202,27 @@ impl ResponsesSseParser {
                 self.thinking_signature = Some(item.to_string());
             }
             if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
-                let call_id = item
-                    .get("call_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("call")
-                    .to_string();
-                let item_id = item
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("fc_call")
-                    .to_string();
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let args = item
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}")
-                    .to_string();
-                let call = (call_id, item_id, name, args);
-                if !self
-                    .tool_calls
-                    .iter()
-                    .any(|existing| existing.0 == call.0 || existing.1 == call.1)
-                {
-                    self.tool_calls.push(call);
+                match parse_response_function_call_item(item) {
+                    Ok(call) => {
+                        if !self
+                            .tool_calls
+                            .iter()
+                            .any(|existing| existing.0 == call.0 || existing.1 == call.1)
+                        {
+                            self.tool_calls.push(call);
+                        }
+                        self.current_call = None;
+                    }
+                    Err(error) => self.error = Some(error.to_string()),
                 }
-                self.current_call = None;
             }
         }
     }
 
     fn finish(mut self) -> Result<ProviderResponse> {
+        if let Some(error) = self.error.take() {
+            anyhow::bail!(error);
+        }
         if let Some(call) = self.current_call.take() {
             self.tool_calls.push(call);
         }
@@ -1350,12 +1309,40 @@ fn emit_codex_usage_metrics_if_enabled(event_type: &str, event: &serde_json::Val
     );
 }
 
-fn extract_sse_responses_message(text: &str) -> Option<Message> {
+fn extract_sse_responses_message_result(text: &str) -> Result<Message> {
     let mut parser = ResponsesSseParser::default();
     for line in text.lines() {
         parser.process_line(line, None);
     }
-    parser.finish().ok().map(|response| response.message)
+    parser.finish().map(|response| response.message)
+}
+
+fn extract_sse_responses_message(text: &str) -> Option<Message> {
+    extract_sse_responses_message_result(text).ok()
+}
+
+fn parse_response_function_call_item(
+    item: &serde_json::Value,
+) -> Result<(String, String, String, String)> {
+    let call_id = required_non_empty_string(item, "call_id")?.to_string();
+    let item_id = required_non_empty_string(item, "id")?.to_string();
+    let name = required_non_empty_string(item, "name")?.to_string();
+    let arguments = required_string(item, "arguments")?.to_string();
+    Ok((call_id, item_id, name, arguments))
+}
+
+fn required_non_empty_string<'a>(item: &'a serde_json::Value, field: &str) -> Result<&'a str> {
+    let value = required_string(item, field)?;
+    if value.trim().is_empty() {
+        anyhow::bail!("OpenAI Codex function_call missing non-empty `{field}`");
+    }
+    Ok(value)
+}
+
+fn required_string<'a>(item: &'a serde_json::Value, field: &str) -> Result<&'a str> {
+    item.get(field)
+        .and_then(|value| value.as_str())
+        .with_context(|| format!("OpenAI Codex function_call missing string `{field}`"))
 }
 
 fn thinking_text_from_item(item: &serde_json::Value) -> String {
@@ -1442,6 +1429,26 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(3));
         assert_eq!(usage.total_tokens, Some(13));
         assert_eq!(usage.cache_read_tokens, 4);
+    }
+
+    #[test]
+    fn rejects_malformed_responses_function_call_missing_name() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"arguments\":\"{}\"}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let error = extract_sse_responses_message_result(sse).unwrap_err();
+        assert!(error.to_string().contains("function_call missing"));
+    }
+
+    #[test]
+    fn rejects_malformed_responses_function_call_missing_arguments() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\"}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let error = extract_sse_responses_message_result(sse).unwrap_err();
+        assert!(error.to_string().contains("function_call missing"));
     }
 
     #[test]

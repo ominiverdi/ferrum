@@ -1,3 +1,4 @@
+use crate::text_truncate::truncate_tail_to_max_bytes;
 use anyhow::{Context, Result};
 use regex::RegexBuilder;
 use std::{path::Path, process::Command};
@@ -227,16 +228,12 @@ fn truncate_tail(output: &str) -> String {
     if output.len() <= MAX_OUTPUT_BYTES {
         return output.to_string();
     }
-    let start = output.len() - MAX_OUTPUT_BYTES;
-    let start = output[start..]
-        .find('\n')
-        .map(|offset| start + offset + 1)
-        .unwrap_or(start);
-    format!(
-        "[truncated to last {} bytes]\n{}",
-        MAX_OUTPUT_BYTES,
-        &output[start..]
-    )
+    let tail = truncate_tail_to_max_bytes(output, MAX_OUTPUT_BYTES);
+    let tail = tail
+        .split_once('\n')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or(tail);
+    format!("[truncated to last {} bytes]\n{}", MAX_OUTPUT_BYTES, tail)
 }
 
 #[cfg(test)]

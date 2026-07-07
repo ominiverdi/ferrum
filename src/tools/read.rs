@@ -1,3 +1,4 @@
+use crate::text_truncate::truncate_to_max_bytes;
 use anyhow::{Context, Result};
 use std::{
     fs::File,
@@ -24,7 +25,7 @@ pub fn read_text(path: &Path, offset: usize, limit: Option<usize>) -> Result<Str
         }
         output.push_str(&line);
         if output.len() > MAX_BYTES {
-            output.truncate(MAX_BYTES);
+            output = truncate_to_max_bytes(&output, MAX_BYTES);
             output.push_str("\n[truncated]");
             break;
         }

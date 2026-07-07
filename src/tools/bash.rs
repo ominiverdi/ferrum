@@ -1,3 +1,4 @@
+use crate::text_truncate::truncate_tail_to_max_bytes;
 use anyhow::{Context, Result};
 use std::{
     io::Read,
@@ -182,16 +183,16 @@ fn truncate_tail(label: &str, output: &str) -> Result<String> {
         std::env::temp_dir().join(format!("ferrum-bash-{}-{label}.log", Uuid::new_v4()));
     std::fs::write(&full_output_path, output)
         .with_context(|| format!("failed to write {}", full_output_path.display()))?;
-    let start = output.len() - MAX_OUTPUT_BYTES;
-    let start = output[start..]
-        .find('\n')
-        .map(|offset| start + offset + 1)
-        .unwrap_or(start);
+    let tail = truncate_tail_to_max_bytes(output, MAX_OUTPUT_BYTES);
+    let tail = tail
+        .split_once('\n')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or(tail);
     Ok(format!(
         "[truncated to last {} bytes. Full output: {}]\n{}",
         MAX_OUTPUT_BYTES,
         full_output_path.display(),
-        &output[start..]
+        tail
     ))
 }
 

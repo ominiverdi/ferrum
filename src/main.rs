@@ -7,6 +7,7 @@ mod mcp;
 mod providers;
 mod session;
 mod skills;
+mod text_truncate;
 mod tools;
 mod ui_colors;
 mod usage;

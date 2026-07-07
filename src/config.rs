@@ -15,6 +15,7 @@ pub struct Config {
     pub models: BTreeMap<String, ModelDefinition>,
     pub offline: bool,
     pub max_context_tokens: usize,
+    pub base_max_context_tokens: usize,
     pub max_tool_rounds: usize,
     pub thinking: ThinkingLevel,
     pub mcp_enabled: bool,
@@ -346,6 +347,7 @@ impl Config {
             models,
             offline,
             max_context_tokens,
+            base_max_context_tokens: file_config.max_context_tokens.unwrap_or(256_000),
             max_tool_rounds: env::var("FERRUM_MAX_TOOL_ROUNDS")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
@@ -454,13 +456,11 @@ impl Config {
             self.set_provider(&model_provider)?;
         }
         self.provider_model = provider_model_for(&model, &self.models);
-        if let Some(max_context_tokens) = self
+        self.max_context_tokens = self
             .models
             .get(&model)
             .and_then(|definition| definition.max_context_tokens)
-        {
-            self.max_context_tokens = max_context_tokens;
-        }
+            .unwrap_or(self.base_max_context_tokens);
         self.model = model;
         Ok(())
     }
@@ -860,6 +860,32 @@ max_context_tokens = 100000
         assert_eq!(config.model, "mini");
         assert_eq!(config.provider_model, "MiniMax-M2");
         assert_eq!(config.max_context_tokens, 100000);
+    }
+
+    #[test]
+    fn model_switch_resets_context_budget_to_base_when_no_override() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "openai-codex"
+model = "small"
+max_context_tokens = 1000
+
+[providers.openai-codex]
+type = "openai-codex"
+default_model = "plain"
+
+[models.small]
+actual_model = "gpt-5.5"
+max_context_tokens = 400
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(config.max_context_tokens, 400);
+        config.set_model("plain").unwrap();
+        assert_eq!(config.max_context_tokens, 1000);
     }
 
     #[test]

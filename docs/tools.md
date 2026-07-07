@@ -185,7 +185,7 @@ Rules:
 
 Run a focused bash command in cwd with timeout. Before execution, Ferrum applies a safety-tiered shell guard. The guard canonicalizes simple quote/backslash tricks and rejects destructive or opaque shell patterns according to `/safety low|medium|high`.
 
-The guard also rejects shell interpreter launchers and wrappers such as `sh -c`, `bash -lc`, `busybox sh`, `env sh -c`, and `timeout 1 bash -lc`; backslash-newline continuations; tar execution hooks such as `--to-command` and `--checkpoint-action=exec=...`; sensitive-path writes; and common destructive command shapes. At `high`, it additionally rejects network commands, inline interpreters, direct scripts, broad `dd` writes, and common generated-code execution paths such as temp-file compiler invocations and `go run`/`cargo run`.
+The guard also rejects shell compound/control syntax, shell interpreter launchers and wrappers such as `sh -c`, `bash -lc`, `busybox sh`, `env sh -c`, and `timeout 1 bash -lc`; backslash-newline continuations; tar execution hooks such as `--to-command` and `--checkpoint-action=exec=...`; sensitive-path writes; and common destructive command shapes. At `high`, it additionally rejects network commands, inline interpreters, direct scripts, broad `dd` writes, direct compiler entrypoints such as `cc`/`gcc`/`clang`/`rustc`/`javac`, and generated-code execution paths such as `go run`/`cargo run`.
 
 ```json
 {

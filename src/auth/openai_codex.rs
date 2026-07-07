@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::OpenOptionsExt,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::PathBuf,
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -119,11 +119,13 @@ pub fn load(path: PathBuf) -> Result<Option<OpenAiCodexCredential>> {
         .context("failed to parse OpenAI Codex credential")
 }
 
-fn save(path: PathBuf, credential: &OpenAiCodexCredential) -> Result<()> {
+pub fn save(path: PathBuf, credential: &OpenAiCodexCredential) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
+        tighten_dir_permissions(parent);
     }
+    tighten_file_permissions(&path);
     let mut json = if path.exists() {
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -142,6 +144,26 @@ fn save(path: PathBuf, credential: &OpenAiCodexCredential) -> Result<()> {
         .with_context(|| format!("failed to write {}", path.display()))?;
     file.write_all(text.as_bytes())?;
     Ok(())
+}
+
+fn tighten_dir_permissions(path: &std::path::Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o077 != 0 {
+            permissions.set_mode(0o700);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
+}
+
+fn tighten_file_permissions(path: &std::path::Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o177 != 0 {
+            permissions.set_mode(0o600);
+            let _ = fs::set_permissions(path, permissions);
+        }
+    }
 }
 
 async fn refresh(refresh_token: &str) -> Result<OpenAiCodexCredential> {
@@ -323,4 +345,28 @@ fn oauth_page(title: &str, heading: &str, message: &str, details: Option<&str>) 
         escape_html(message),
         details
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn save_tightens_existing_auth_file_permissions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("auth.json");
+        fs::write(&path, "{}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let credential = OpenAiCodexCredential {
+            r#type: "oauth".to_string(),
+            access: "access".to_string(),
+            refresh: "refresh".to_string(),
+            expires: 1,
+            account_id: "acct".to_string(),
+        };
+        save(path.clone(), &credential).unwrap();
+        let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }

@@ -136,13 +136,15 @@ guard before execution.
 Use \f[B]\[en]safety low|medium|high\f[R] at startup or \f[B]/safety
 low|medium|high\f[R] interactively to choose the trade-off.
 The default \f[B]medium\f[R] tier rejects destructive patterns, shell
-wrapper launches, backslash-newline continuations, tar execution hooks,
-and rewriteable opaque shell syntax while allowing common coding
-commands such as Python one-liners and network tools.
+compound/control syntax, shell wrapper launches, backslash-newline
+continuations, tar execution hooks, and rewriteable opaque shell syntax
+while allowing common coding commands such as Python one-liners and
+network tools.
 .PP
 MCP tool names are namespaced and sanitized as **mcp__SERVER__TOOL\f[B].
-Ferrum rejects sanitized-name collisions and oversized stdio
-\f[R]Content-Length** frames before allocation.
+Ferrum rejects sanitized-name collisions, writes stdio messages as
+\f[R]Content-Length** frames, rejects oversized incoming frames before
+allocation, and bounds model-visible MCP metadata.
 .PP
 The history tools are model-facing only.
 They search or read the current session JSONL, including entries
@@ -369,9 +371,9 @@ binary and man page:
 .IP
 .nf
 \f[C]
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.6.3-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.6.3-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.4/ferrum-v0.6.4-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.6.4-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.6.4-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -382,9 +384,9 @@ Optional checksum verification:
 .IP
 .nf
 \f[C]
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.3/ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.6.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.4/ferrum-v0.6.4-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.4/ferrum-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.6.4-x86_64-unknown-linux-gnu.tar.gz.sha256
 \f[R]
 .fi
 .SS From source

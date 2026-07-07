@@ -98,4 +98,6 @@ Do not configure MCP servers with secrets unless you trust the server and its de
 
 MCP tool output is truncated to a bounded tail before it is returned to the model.
 
-MCP JSON-RPC frames with `Content-Length` larger than Ferrum's internal frame limit are rejected before allocating the body buffer. This protects the Ferrum process from oversized MCP frames, but it does not sandbox the MCP server process itself.
+MCP stdio messages written by Ferrum use `Content-Length` frames. Incoming frames with `Content-Length` larger than Ferrum's internal frame limit are rejected before allocating the body buffer. This protects the Ferrum process from oversized MCP frames, but it does not sandbox the MCP server process itself.
+
+MCP tool descriptions and input schemas are bounded before they become model-visible tool definitions. Oversized descriptions are truncated; oversized schemas are replaced with a small generic object schema noting omission.

@@ -1,3 +1,4 @@
+use crate::text_truncate::truncate_to_max_bytes;
 use anyhow::{Context, Result};
 use std::{collections::HashSet, fs, path::Path};
 
@@ -45,7 +46,7 @@ pub fn load_context(config_dir: &Path, cwd: &Path) -> Result<Option<String>> {
         sections.join("\n\n---\n\n")
     );
     if context.len() > MAX_CONTEXT_BYTES {
-        context.truncate(MAX_CONTEXT_BYTES);
+        context = truncate_to_max_bytes(&context, MAX_CONTEXT_BYTES);
         context.push_str("\n\n[AGENTS.md context truncated]");
     }
     Ok(Some(context))
