@@ -24,8 +24,9 @@ use similar::{ChangeTag, TextDiff};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write as FmtWrite,
-    fs,
+    fs::{self, OpenOptions},
     io::{self, IsTerminal, Write},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -549,6 +550,7 @@ pub async fn run_interactive(
     let mut rl = Editor::<FerrumLineHelper, DefaultHistory>::new()?;
     rl.set_helper(Some(FerrumLineHelper::new(&state.skills, config)));
     let history = config.history_path();
+    let _ = prepare_history_file(&history);
     let _ = rl.load_history(&history);
 
     let mut last_ctrl_c: Option<Instant> = None;
@@ -567,13 +569,14 @@ pub async fn run_interactive(
                 if input.is_empty() {
                     continue;
                 }
-                let _ = rl.add_history_entry(input);
+                let history_input = sanitize_history_input(input);
+                let _ = rl.add_history_entry(history_input.as_str());
                 if input.starts_with('!') {
                     match handle_bang_command(input, config, &mut state).await {
                         Ok(CommandAction::Continue) => continue,
                         Ok(CommandAction::Quit) => {
                             state.remove_empty_session()?;
-                            let _ = rl.save_history(&history);
+                            save_history_private(&mut rl, &history);
                             return Ok(());
                         }
                         Err(error) => {
@@ -630,7 +633,7 @@ pub async fn run_interactive(
                         Ok(CommandAction::Continue) => continue,
                         Ok(CommandAction::Quit) => {
                             state.remove_empty_session()?;
-                            let _ = rl.save_history(&history);
+                            save_history_private(&mut rl, &history);
                             return Ok(());
                         }
                         Err(error) => {
@@ -668,7 +671,7 @@ pub async fn run_interactive(
                 {
                     println!("^C^C");
                     state.remove_empty_session()?;
-                    let _ = rl.save_history(&history);
+                    save_history_private(&mut rl, &history);
                     return Ok(());
                 }
                 last_ctrl_c = Some(now);
@@ -678,7 +681,7 @@ pub async fn run_interactive(
             Err(ReadlineError::Eof) => {
                 println!();
                 state.remove_empty_session()?;
-                let _ = rl.save_history(&history);
+                save_history_private(&mut rl, &history);
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
@@ -1936,6 +1939,7 @@ impl AgentState {
             preview_attached_image(Some(&resolved), &image);
             self.pending_images.push(image);
             eprintln!("[image] attached {}", resolved.display());
+            remove_if_ferrum_temp_image(&resolved);
         }
         Ok(())
     }
@@ -3634,6 +3638,52 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn history_input_sanitizes_image_payloads_and_temp_paths() {
+        let temp_path = ferrum_temp_dir()
+            .unwrap()
+            .join("ferrum-clipboard-secret.png");
+        let input = format!("see data:image/png;base64,AAAA and {}", temp_path.display());
+        let sanitized = sanitize_history_input(&input);
+        assert!(sanitized.contains("[image omitted]"));
+        assert!(sanitized.contains("[clipboard image]"));
+        assert!(!sanitized.contains("base64"));
+        assert!(!sanitized.contains("ferrum-clipboard-secret"));
+    }
+
+    #[test]
+    fn history_file_permissions_are_private() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("history.txt");
+        std::fs::write(&path, "old\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        prepare_history_file(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn private_temp_image_files_are_random_and_private() {
+        let first = write_private_temp_file("ferrum-test-", ".png", b"one").unwrap();
+        let second = write_private_temp_file("ferrum-test-", ".png", b"one").unwrap();
+        assert_ne!(first, second);
+        assert!(is_ferrum_temp_image_path(&first));
+        assert_eq!(
+            std::fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        remove_if_ferrum_temp_image(&first);
+        remove_if_ferrum_temp_image(&second);
+        assert!(!first.exists());
+        assert!(!second.exists());
+    }
+
+    #[test]
     fn slash_command_completion_ignores_arguments_without_specific_completer() {
         let temp = tempfile::tempdir().unwrap();
         let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
@@ -4337,6 +4387,127 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     }
 }
 
+fn prepare_history_file(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create history directory {}", parent.display()))?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).with_context(|| {
+            format!(
+                "failed to set permissions on history directory {}",
+                parent.display()
+            )
+        })?;
+    }
+    if path.exists() {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "failed to set permissions on history file {}",
+                path.display()
+            )
+        })?;
+    } else {
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed to create history file {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn save_history_private(rl: &mut Editor<FerrumLineHelper, DefaultHistory>, path: &Path) {
+    if let Err(error) = prepare_history_file(path).and_then(|()| {
+        rl.save_history(path)
+            .with_context(|| format!("failed to save history file {}", path.display()))
+    }) {
+        eprintln!("[history] {error}");
+    }
+    let _ = prepare_history_file(path);
+}
+
+fn sanitize_history_input(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|part| {
+            let trimmed = part.trim_matches(['\'', '"']);
+            if trimmed.starts_with("data:image/") {
+                "[image omitted]".to_string()
+            } else if is_ferrum_temp_image_path(Path::new(trimmed))
+                || trimmed.contains("/ferrum-clipboard-")
+            {
+                "[clipboard image]".to_string()
+            } else {
+                part.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn ferrum_temp_dir() -> Result<PathBuf> {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("ferrum");
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create temporary image directory {}",
+            dir.display()
+        )
+    })?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+        format!(
+            "failed to set permissions on temporary image directory {}",
+            dir.display()
+        )
+    })?;
+    Ok(dir)
+}
+
+fn write_private_temp_file(prefix: &str, suffix: &str, data: &[u8]) -> Result<PathBuf> {
+    let dir = ferrum_temp_dir()?;
+    for _ in 0..16 {
+        let path = dir.join(format!("{prefix}{}{suffix}", uuid::Uuid::new_v4()));
+        match OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(data)
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                file.sync_all()
+                    .with_context(|| format!("failed to sync {}", path.display()))?;
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                    .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create temporary image file in {}", dir.display())
+                });
+            }
+        }
+    }
+    anyhow::bail!(
+        "failed to create unique temporary image file in {}",
+        dir.display()
+    )
+}
+
+fn is_ferrum_temp_image_path(path: &Path) -> bool {
+    ferrum_temp_dir().is_ok_and(|dir| path.starts_with(dir))
+}
+
+fn remove_if_ferrum_temp_image(path: &Path) {
+    if is_ferrum_temp_image_path(path) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 fn replace_paste_image_triggers(input: &str) -> String {
     let mut output = input.to_string();
     for trigger in ["\u{16}", "\u{1b}[118;6u", "[118;6u"] {
@@ -4436,22 +4607,19 @@ fn save_clipboard_image_to_temp() -> Result<PathBuf> {
     let messages::ContentBlock::Image {
         mime_type,
         data_base64,
-        sha256,
         ..
     } = image
     else {
         anyhow::bail!("clipboard did not contain an image")
     };
-    let path = std::env::temp_dir().join(format!(
-        "ferrum-clipboard-{}.{}",
-        &sha256[..12],
-        messages::image_extension(&mime_type)
-    ));
     let bytes = STANDARD
         .decode(data_base64)
         .context("failed to decode clipboard image")?;
-    fs::write(&path, bytes).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(path)
+    write_private_temp_file(
+        "ferrum-clipboard-",
+        &format!(".{}", messages::image_extension(&mime_type)),
+        &bytes,
+    )
 }
 
 fn read_clipboard_image_bytes() -> Result<(String, Vec<u8>)> {
@@ -4637,19 +4805,19 @@ fn write_temp_image(image: &messages::ContentBlock) -> Result<PathBuf> {
     let messages::ContentBlock::Image {
         mime_type,
         data_base64,
-        sha256,
         ..
     } = image
     else {
         anyhow::bail!("not an image")
     };
-    let ext = messages::image_extension(mime_type);
-    let path = std::env::temp_dir().join(format!("ferrum-image-{}.{}", &sha256[..12], ext));
     let data = STANDARD
         .decode(data_base64)
         .context("failed to decode image for preview")?;
-    fs::write(&path, data).with_context(|| format!("failed to write {}", path.display()))?;
-    Ok(path)
+    write_private_temp_file(
+        "ferrum-image-",
+        &format!(".{}", messages::image_extension(mime_type)),
+        &data,
+    )
 }
 
 fn command_exists(command: &str) -> bool {

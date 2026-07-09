@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fs, path::Path};
+use std::{fs, io::Read, path::Path};
 
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
@@ -138,12 +138,19 @@ pub fn image_from_data_uri(data_uri: &str) -> Result<ContentBlock> {
     let data = STANDARD
         .decode(encoded)
         .context("failed to decode image data URI")?;
+    let detected = detect_image_mime(&data)?;
+    if detected != mime_type {
+        anyhow::bail!("image data URI declared {mime_type} but bytes are {detected}");
+    }
     image_from_bytes(mime_type.to_string(), data, "pasted data URI".to_string())
 }
 
 pub fn image_from_path(path: &Path) -> Result<ContentBlock> {
     let metadata =
         fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("image path must be a regular file: {}", path.display());
+    }
     if metadata.len() > MAX_IMAGE_BYTES as u64 {
         anyhow::bail!(
             "image {} is too large: {} bytes > {} bytes",
@@ -152,8 +159,20 @@ pub fn image_from_path(path: &Path) -> Result<ContentBlock> {
             MAX_IMAGE_BYTES
         );
     }
-    let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mime_type = detect_image_mime(&data, path)?;
+    let file =
+        fs::File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut data = Vec::new();
+    file.take((MAX_IMAGE_BYTES + 1) as u64)
+        .read_to_end(&mut data)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    if data.len() > MAX_IMAGE_BYTES {
+        anyhow::bail!(
+            "image {} is too large: > {} bytes",
+            path.display(),
+            MAX_IMAGE_BYTES
+        );
+    }
+    let mime_type = detect_image_mime(&data)?;
     image_from_bytes(mime_type, data, path.display().to_string())
 }
 
@@ -164,6 +183,10 @@ pub fn image_from_bytes(mime_type: String, data: Vec<u8>, source: String) -> Res
             data.len(),
             MAX_IMAGE_BYTES
         );
+    }
+    let detected = detect_image_mime(&data)?;
+    if detected != mime_type {
+        anyhow::bail!("image declared {mime_type} but bytes are {detected}");
     }
     let mut hasher = Sha256::new();
     hasher.update(&data);
@@ -185,7 +208,7 @@ pub fn image_extension(mime_type: &str) -> &'static str {
     }
 }
 
-fn detect_image_mime(data: &[u8], path: &Path) -> Result<String> {
+fn detect_image_mime(data: &[u8]) -> Result<String> {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok("image/png".to_string());
     }
@@ -195,16 +218,7 @@ fn detect_image_mime(data: &[u8], path: &Path) -> Result<String> {
     if data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         return Ok("image/webp".to_string());
     }
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)
-    {
-        Some(ext) if ext == "png" => Ok("image/png".to_string()),
-        Some(ext) if ext == "jpg" || ext == "jpeg" => Ok("image/jpeg".to_string()),
-        Some(ext) if ext == "webp" => Ok("image/webp".to_string()),
-        _ => anyhow::bail!("unsupported image type: {}", path.display()),
-    }
+    anyhow::bail!("unsupported image type: image bytes did not match png, jpeg, or webp")
 }
 
 pub fn strip_think_blocks(text: &str) -> String {
@@ -229,7 +243,45 @@ pub fn strip_think_blocks(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_think_blocks;
+    use super::{image_from_data_uri, image_from_path, strip_think_blocks};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nminimal";
+
+    #[test]
+    fn rejects_text_file_named_png() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("not-an-image.png");
+        std::fs::write(&path, b"hello").unwrap();
+        let error = image_from_path(&path).unwrap_err();
+        assert!(error.to_string().contains("unsupported image type"));
+    }
+
+    #[test]
+    fn rejects_directory_as_image() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = image_from_path(temp.path()).unwrap_err();
+        assert!(error.to_string().contains("regular file"));
+    }
+
+    #[test]
+    fn detects_image_mime_from_bytes_not_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("image.jpg");
+        std::fs::write(&path, PNG_BYTES).unwrap();
+        let image = image_from_path(&path).unwrap();
+        let super::ContentBlock::Image { mime_type, .. } = image else {
+            panic!("expected image block");
+        };
+        assert_eq!(mime_type, "image/png");
+    }
+
+    #[test]
+    fn rejects_data_uri_declared_png_with_non_png_bytes() {
+        let encoded = STANDARD.encode(b"hello");
+        let error = image_from_data_uri(&format!("data:image/png;base64,{encoded}")).unwrap_err();
+        assert!(error.to_string().contains("unsupported image type"));
+    }
 
     #[test]
     fn strips_think_blocks() {
