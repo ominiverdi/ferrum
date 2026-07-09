@@ -156,10 +156,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
     ]
 }
 
+#[cfg(test)]
 pub async fn execute(name: &str, input: &serde_json::Value, cwd: &Path) -> Result<String> {
     execute_with_cancel(name, input, cwd, None, false).await
 }
 
+#[cfg(test)]
 pub async fn execute_with_cancel(
     name: &str,
     input: &serde_json::Value,

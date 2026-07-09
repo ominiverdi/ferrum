@@ -2050,9 +2050,13 @@ impl AgentState {
             .all(|(_, name, _)| self.is_parallel_safe_builtin_tool(name));
         let color_mode = self.color_mode;
         if can_parallelize && tool_uses.len() > 1 {
-            return self
-                .execute_parallel_builtin_tools(tool_uses, color_mode, self.colors.clone())
+            let mut abort = ActiveTurnAbort::start(interactive);
+            let cancel = Some(abort.token());
+            let results = self
+                .execute_parallel_builtin_tools(tool_uses, color_mode, self.colors.clone(), cancel)
                 .await;
+            abort.stop();
+            return results;
         }
         self.execute_sequential_tools(tool_uses, color_mode, self.colors.clone(), interactive)
             .await
@@ -2070,6 +2074,7 @@ impl AgentState {
         tool_uses: Vec<(String, String, serde_json::Value)>,
         color_mode: ColorMode,
         colors: ColorPalette,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Vec<ExecutedToolUse> {
         for (_, name, input) in &tool_uses {
             eprintln!();
@@ -2078,13 +2083,20 @@ impl AgentState {
 
         let cwd = self.cwd.clone();
         let active_tool_names = self.active_tool_names.clone();
+        let safety = self.safety;
         let mut handles = Vec::new();
         for (index, (id, name, input)) in tool_uses.into_iter().enumerate() {
             let cwd = cwd.clone();
             let active_tool_names = active_tool_names.clone();
+            let cancel = cancel.clone();
             handles.push(tokio::spawn(async move {
                 let started = Instant::now();
-                let (content, is_error) = if !active_tool_names.contains(&name) {
+                let (content, is_error, aborted) = if cancel
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    ("aborted".to_string(), true, true)
+                } else if !active_tool_names.contains(&name) {
                     let content = if active_tool_names.is_empty() {
                         format!(
                             "Tool '{name}' is not available because tools are disabled (--no-tools)"
@@ -2092,11 +2104,18 @@ impl AgentState {
                     } else {
                         format!("Tool '{name}' is not in the active tool set")
                     };
-                    (content, true)
+                    (content, true, false)
                 } else {
-                    match builtin_tools::execute(&name, &input, &cwd).await {
-                        Ok(output) => (output, false),
-                        Err(error) => (error.to_string(), true),
+                    match builtin_tools::execute_with_cancel_and_safety(
+                        &name, &input, &cwd, cancel, false, safety,
+                    )
+                    .await
+                    {
+                        Ok(output) => (output, false, false),
+                        Err(error) if error.to_string() == "aborted" => {
+                            ("aborted".to_string(), true, true)
+                        }
+                        Err(error) => (error.to_string(), true, false),
                     }
                 };
                 (
@@ -2107,7 +2126,7 @@ impl AgentState {
                         input,
                         content,
                         is_error,
-                        aborted: false,
+                        aborted,
                         duration_ms: started.elapsed().as_millis(),
                     },
                 )
@@ -4185,6 +4204,39 @@ mod context_pressure_tests {
                 source: "test".to_string(),
             }),
         }
+    }
+
+    #[tokio::test]
+    async fn parallel_builtin_batch_marks_precancelled_tools_aborted() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let state = AgentState::new(&config).unwrap();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let tool_uses = vec![
+            (
+                "call_1".to_string(),
+                "read".to_string(),
+                serde_json::json!({"path":"Cargo.toml"}),
+            ),
+            (
+                "call_2".to_string(),
+                "ls".to_string(),
+                serde_json::json!({"path":"."}),
+            ),
+        ];
+
+        let results = state
+            .execute_parallel_builtin_tools(
+                tool_uses,
+                ColorMode::Auto,
+                ColorPalette::default(),
+                Some(cancel),
+            )
+            .await;
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.aborted));
+        assert!(results.iter().all(|result| result.is_error));
     }
 
     #[test]
