@@ -4,11 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const UNICODE_SPACES: &[char] = &[
-    '\u{00A0}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}', '\u{2006}',
-    '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}', '\u{202F}', '\u{205F}', '\u{3000}',
-];
-
 pub fn resolve_to_cwd(input: &str, cwd: &Path) -> Result<PathBuf> {
     let normalized = normalize_path(input)?;
     let path = PathBuf::from(normalized);
@@ -20,32 +15,24 @@ pub fn resolve_to_cwd(input: &str, cwd: &Path) -> Result<PathBuf> {
 }
 
 fn normalize_path(input: &str) -> Result<String> {
-    let mut value = input
-        .chars()
-        .map(|ch| {
-            if UNICODE_SPACES.contains(&ch) {
-                ' '
-            } else {
-                ch
-            }
-        })
-        .collect::<String>();
-
-    if let Some(stripped) = value.strip_prefix('@') {
-        value = stripped.to_string();
-    }
-
-    if value == "~" {
+    if input == "~" {
         return Ok(home_dir()?.to_string_lossy().into_owned());
     }
-    if let Some(rest) = value.strip_prefix("~/") {
+    if let Some(rest) = input.strip_prefix("~/") {
         return Ok(home_dir()?.join(rest).to_string_lossy().into_owned());
     }
-    if let Some(rest) = value.strip_prefix("file://") {
-        return Ok(rest.to_string());
+    if let Some(rest) = input.strip_prefix("file://") {
+        return decode_file_url(rest);
     }
 
-    Ok(value)
+    Ok(input.to_string())
+}
+
+fn decode_file_url(rest: &str) -> Result<String> {
+    let url = url::Url::parse(&format!("file://{rest}"))?;
+    url.to_file_path()
+        .map(|path| path.to_string_lossy().into_owned())
+        .map_err(|_| anyhow::anyhow!("invalid file URL path"))
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -71,6 +58,30 @@ mod tests {
         assert_eq!(
             resolve_to_cwd("/tmp/file", Path::new("/repo")).unwrap(),
             PathBuf::from("/tmp/file")
+        );
+    }
+
+    #[test]
+    fn path_named_at_file_resolves_literally() {
+        assert_eq!(
+            resolve_to_cwd("@notes.txt", Path::new("/tmp/repo")).unwrap(),
+            PathBuf::from("/tmp/repo/@notes.txt")
+        );
+    }
+
+    #[test]
+    fn path_with_nbsp_resolves_literally() {
+        assert_eq!(
+            resolve_to_cwd("a\u{00a0}b.txt", Path::new("/tmp/repo")).unwrap(),
+            PathBuf::from("/tmp/repo/a\u{00a0}b.txt")
+        );
+    }
+
+    #[test]
+    fn file_url_decodes_percent_spaces() {
+        assert_eq!(
+            resolve_to_cwd("file:///tmp/a%20b.png", Path::new("/repo")).unwrap(),
+            PathBuf::from("/tmp/a b.png")
         );
     }
 }

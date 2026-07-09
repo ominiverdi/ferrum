@@ -238,6 +238,7 @@ pub fn strip_think_blocks(text: &str) -> String {
         output.push_str(&rest[..start]);
         let after_start = &rest[start + "<think>".len()..];
         let Some(end) = after_start.find("</think>") else {
+            output.push_str(after_start);
             break;
         };
         rest = &after_start[end + "</think>".len()..];
@@ -295,5 +296,9 @@ mod tests {
             "visible"
         );
         assert_eq!(strip_think_blocks("a<think>b</think>c"), "ac");
+        assert_eq!(
+            strip_think_blocks("hello <think>oops visible"),
+            "hello oops visible"
+        );
     }
 }

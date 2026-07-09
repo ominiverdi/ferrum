@@ -2038,7 +2038,8 @@ impl AgentState {
                 continue;
             }
 
-            let resolved = builtin_tools::path::resolve_to_cwd(&spec, &self.cwd)?;
+            let path_spec = ui_path_argument(&spec, &self.cwd);
+            let resolved = builtin_tools::path::resolve_to_cwd(&path_spec, &self.cwd)?;
             let image = messages::image_from_path(&resolved)?;
             preview_attached_image(Some(&resolved), &image);
             self.pending_images.push(image);
@@ -4287,6 +4288,64 @@ mod context_pressure_tests {
         }
     }
 
+    #[test]
+    fn absolute_path_leading_prompt_is_not_slash_command() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!should_handle_as_command(
+            "/tmp/foo failed, explain why",
+            temp.path()
+        ));
+    }
+
+    #[test]
+    fn unknown_slash_word_is_user_message() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!should_handle_as_command(
+            "/not-a-command do something",
+            temp.path()
+        ));
+        assert!(should_handle_as_command("/help", temp.path()));
+    }
+
+    #[test]
+    fn ui_layer_can_strip_paste_marker_for_image_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("image.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nminimal").unwrap();
+        let input = format!("look @{}", path.display());
+
+        let (prompt, images) = extract_pasted_images(&input, temp.path());
+
+        assert_eq!(prompt, "look");
+        assert_eq!(images, vec![path.display().to_string()]);
+    }
+
+    #[test]
+    fn pasted_quoted_image_path_attaches() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("image with spaces.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nminimal").unwrap();
+        let input = format!("explain '{}' please", path.display());
+
+        let (prompt, images) = extract_pasted_images(&input, temp.path());
+
+        assert_eq!(prompt, "explain please");
+        assert_eq!(images, vec![path.display().to_string()]);
+    }
+
+    #[test]
+    fn file_url_with_percent_spaces_attaches() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("image with spaces.png");
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nminimal").unwrap();
+        let url = format!("file://{}", path.display()).replace(' ', "%20");
+
+        let (prompt, images) = extract_pasted_images(&format!("look {url}"), temp.path());
+
+        assert_eq!(prompt, "look");
+        assert_eq!(images, vec![url]);
+    }
+
     #[tokio::test]
     async fn manual_compaction_summary_honors_precancelled_token() {
         let temp = tempfile::tempdir().unwrap();
@@ -4860,27 +4919,104 @@ fn should_handle_as_command(input: &str, cwd: &Path) -> bool {
     {
         return false;
     }
-    true
+    is_known_slash_command(first)
+}
+
+fn is_known_slash_command(command: &str) -> bool {
+    command.starts_with("/skill:")
+        || matches!(
+            command,
+            "/help"
+                | "/version"
+                | "/session"
+                | "/title"
+                | "/sessions"
+                | "/skills"
+                | "/skill"
+                | "/model"
+                | "/models"
+                | "/provider"
+                | "/providers"
+                | "/thinking"
+                | "/safety"
+                | "/mcp"
+                | "/colors"
+                | "/palette"
+                | "/palettes"
+                | "/diff"
+                | "/image"
+                | "/image-paste"
+                | "/paste-image"
+                | "/usage"
+                | "/compact"
+                | "/quit"
+                | "/exit"
+        )
 }
 
 fn extract_pasted_images(input: &str, cwd: &Path) -> (String, Vec<String>) {
     let mut prompt_parts = Vec::new();
     let mut image_paths = Vec::new();
 
-    for part in input.split_whitespace() {
-        let trimmed = part.trim_matches(['\'', '"']);
+    for part in split_shell_like_words(input) {
+        let trimmed = part.as_str();
+        let path_candidate = ui_path_argument(trimmed, cwd);
         if trimmed.starts_with("data:image/")
             || looks_like_image_path(trimmed)
-                && builtin_tools::path::resolve_to_cwd(trimmed, cwd)
+                && builtin_tools::path::resolve_to_cwd(&path_candidate, cwd)
                     .is_ok_and(|path| path.is_file())
         {
-            image_paths.push(trimmed.to_string());
+            image_paths.push(path_candidate);
         } else {
             prompt_parts.push(part);
         }
     }
 
     (prompt_parts.join(" "), image_paths)
+}
+
+fn split_shell_like_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (Some(_), c) => current.push(c),
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (None, '\\') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn ui_path_argument(spec: &str, cwd: &Path) -> String {
+    if let Some(stripped) = spec.strip_prefix('@')
+        && builtin_tools::path::resolve_to_cwd(spec, cwd).is_ok_and(|path| !path.exists())
+        && builtin_tools::path::resolve_to_cwd(stripped, cwd).is_ok_and(|path| path.exists())
+    {
+        return stripped.to_string();
+    }
+    spec.to_string()
 }
 
 fn looks_like_image_path(path: &str) -> bool {
@@ -5489,9 +5625,12 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/image" => {
-            let path = parts
-                .next()
-                .ok_or_else(|| anyhow::anyhow!("usage: /image <path>"))?;
+            let raw_args = input[command.len()..].trim();
+            let args = split_shell_like_words(raw_args);
+            if args.len() != 1 {
+                anyhow::bail!("usage: /image <path>");
+            }
+            let path = &args[0];
             state.attach_images(vec![path.to_string()])?;
             println!("attached image: {path}");
             Ok(CommandAction::Continue)
