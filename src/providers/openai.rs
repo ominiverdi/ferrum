@@ -1,7 +1,7 @@
 use super::{Provider, ProviderResponse, StreamEvent, TokenUsage};
 use crate::{
     agent::{
-        messages::{ContentBlock, Message, Role},
+        messages::{ContentBlock, Message, Role, sanitize_thinking_text},
         tools::ToolDefinition,
     },
     auth::openai_codex,
@@ -843,9 +843,13 @@ impl ChatSseParser {
                 .or_else(|| delta.get("reasoning"))
                 .and_then(|value| value.as_str())
             {
-                self.thinking.push_str(text);
+                let text = sanitize_thinking_text(text);
+                if text.is_empty() {
+                    continue;
+                }
+                self.thinking.push_str(&text);
                 if let Some(on_event) = on_event.as_deref_mut() {
-                    on_event(StreamEvent::ThinkingDelta(text.to_string()));
+                    on_event(StreamEvent::ThinkingDelta(text));
                 }
             }
             for tool_call in delta
@@ -1177,33 +1181,22 @@ impl ResponsesSseParser {
             emit_codex_usage_metrics_if_enabled(event_type, &event);
             if event_type.contains("reasoning") && event_type.contains("summary") {
                 if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                    self.thinking.push_str(delta);
-                    if let Some(on_event) = on_event.as_deref_mut() {
-                        on_event(StreamEvent::ThinkingDelta(delta.to_string()));
-                    }
+                    self.append_thinking_delta(delta, &mut on_event);
                 }
-                if let Some(text) = event.get("text").and_then(|value| value.as_str())
-                    && !self.thinking.ends_with(text)
-                {
-                    self.thinking.push_str(text);
-                    if let Some(on_event) = on_event.as_deref_mut() {
-                        on_event(StreamEvent::ThinkingDelta(text.to_string()));
-                    }
+                if let Some(text) = event.get("text").and_then(|value| value.as_str()) {
+                    self.absorb_completed_thinking(text, &mut on_event);
                 }
             } else if event_type == "response.reasoning_text.delta"
                 && let Some(delta) = event.get("delta").and_then(|value| value.as_str())
             {
-                self.thinking.push_str(delta);
-                if let Some(on_event) = on_event.as_deref_mut() {
-                    on_event(StreamEvent::ThinkingDelta(delta.to_string()));
-                }
+                self.append_thinking_delta(delta, &mut on_event);
             }
         }
         match event_type {
             Some("response.output_text.delta") => {
                 if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
                     self.output.push_str(delta);
-                    if let Some(on_event) = on_event {
+                    if let Some(on_event) = on_event.as_mut() {
                         on_event(StreamEvent::TextDelta(delta.to_string()));
                     }
                 }
@@ -1265,6 +1258,42 @@ impl ResponsesSseParser {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn append_thinking_delta(
+        &mut self,
+        text: &str,
+        on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) {
+        let text = sanitize_thinking_text(text);
+        if text.is_empty() {
+            return;
+        }
+        self.thinking.push_str(&text);
+        if let Some(on_event) = on_event.as_deref_mut() {
+            on_event(StreamEvent::ThinkingDelta(text));
+        }
+    }
+
+    fn absorb_completed_thinking(
+        &mut self,
+        text: &str,
+        on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) {
+        let text = sanitize_thinking_text(text);
+        if text.is_empty() || self.thinking == text {
+            return;
+        }
+        let delta = text
+            .strip_prefix(&self.thinking)
+            .unwrap_or(&text)
+            .to_string();
+        self.thinking = text;
+        if !delta.is_empty()
+            && let Some(on_event) = on_event.as_deref_mut()
+        {
+            on_event(StreamEvent::ThinkingDelta(delta));
         }
     }
 
@@ -1521,7 +1550,7 @@ fn thinking_text_from_item(item: &serde_json::Value) -> String {
         .collect::<Vec<_>>()
         .join("\n\n");
     if !summary.trim().is_empty() {
-        return summary;
+        return sanitize_thinking_text(&summary);
     }
 
     let content = item
@@ -1534,13 +1563,14 @@ fn thinking_text_from_item(item: &serde_json::Value) -> String {
         .collect::<Vec<_>>()
         .join("\n\n");
     if !content.trim().is_empty() {
-        return content;
+        return sanitize_thinking_text(&content);
     }
 
-    item.get("text")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_string()
+    sanitize_thinking_text(
+        item.get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+    )
 }
 
 fn extract_responses_text(body: &serde_json::Value) -> Option<String> {
@@ -1846,6 +1876,29 @@ mod tests {
         let message = extract_sse_responses_message(sse).unwrap();
         assert_eq!(message.thinking_text(), "Checked context.");
         assert_eq!(message.display_text(), "hello");
+    }
+
+    #[test]
+    fn codex_reasoning_summary_done_replaces_delta_without_duplicate() {
+        let sse = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Switching to fixed directory usage** \"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"**Switching to fixed directory usage** <!-- -->\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let message = extract_sse_responses_message(sse).unwrap();
+
+        assert_eq!(
+            message.thinking_text().trim(),
+            "**Switching to fixed directory usage**"
+        );
+        assert_eq!(
+            message
+                .thinking_text()
+                .matches("Switching to fixed directory usage")
+                .count(),
+            1
+        );
     }
 
     #[test]

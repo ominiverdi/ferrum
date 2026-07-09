@@ -119,12 +119,16 @@ impl Message {
         self.content
             .iter()
             .filter_map(|block| match block {
-                ContentBlock::Thinking { text, .. } => Some(text.as_str()),
+                ContentBlock::Thinking { text, .. } => Some(sanitize_thinking_text(text)),
                 _ => None,
             })
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+pub fn sanitize_thinking_text(text: &str) -> String {
+    text.replace("<!-- -->", "")
 }
 
 pub fn image_from_data_uri(data_uri: &str) -> Result<ContentBlock> {
@@ -249,7 +253,7 @@ pub fn strip_think_blocks(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_from_data_uri, image_from_path, strip_think_blocks};
+    use super::{image_from_data_uri, image_from_path, sanitize_thinking_text, strip_think_blocks};
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nminimal";
@@ -287,6 +291,14 @@ mod tests {
         let encoded = STANDARD.encode(b"hello");
         let error = image_from_data_uri(&format!("data:image/png;base64,{encoded}")).unwrap_err();
         assert!(error.to_string().contains("unsupported image type"));
+    }
+
+    #[test]
+    fn sanitizes_provider_thinking_separator_comments() {
+        assert_eq!(
+            sanitize_thinking_text("**Switching** <!-- -->"),
+            "**Switching** "
+        );
     }
 
     #[test]
