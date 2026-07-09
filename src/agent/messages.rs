@@ -138,7 +138,6 @@ pub fn sanitize_thinking_text(text: &str) -> String {
         output.push_str(&rest[..start]);
         let after_start = &rest[start + "<!--".len()..];
         let Some(end) = after_start.find("-->") else {
-            output.push_str(&rest[start..]);
             break;
         };
         rest = &after_start[end + "-->".len()..];

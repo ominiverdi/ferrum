@@ -1146,6 +1146,8 @@ fn has_codex_message_content(message: &Message) -> bool {
 struct ResponsesSseParser {
     output: String,
     thinking: String,
+    thinking_comment_open: bool,
+    thinking_comment_pending: String,
     thinking_signature: Option<String>,
     usage: Option<TokenUsage>,
     tool_calls: Vec<(String, String, String, String)>,
@@ -1270,7 +1272,7 @@ impl ResponsesSseParser {
         text: &str,
         on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     ) {
-        let text = sanitize_thinking_text(text);
+        let text = self.sanitize_thinking_delta(text);
         let delta = self.merge_thinking_text(&text);
         if delta.is_empty() {
             return;
@@ -1294,6 +1296,46 @@ impl ResponsesSseParser {
         }
     }
 
+    fn sanitize_thinking_delta(&mut self, text: &str) -> String {
+        let combined;
+        let mut rest = if self.thinking_comment_pending.is_empty() {
+            text
+        } else {
+            combined = format!("{}{}", self.thinking_comment_pending, text);
+            self.thinking_comment_pending.clear();
+            combined.as_str()
+        };
+        let mut output = String::with_capacity(rest.len());
+        loop {
+            if self.thinking_comment_open {
+                let Some(end) = rest.find("-->") else {
+                    return output;
+                };
+                self.thinking_comment_open = false;
+                rest = &rest[end + "-->".len()..];
+                continue;
+            }
+            let Some(start) = rest.find("<!--") else {
+                let pending_len = partial_comment_prefix_suffix_len(rest);
+                if pending_len > 0 {
+                    let split = rest.len() - pending_len;
+                    output.push_str(&rest[..split]);
+                    self.thinking_comment_pending = rest[split..].to_string();
+                } else {
+                    output.push_str(rest);
+                }
+                return output;
+            };
+            output.push_str(&rest[..start]);
+            let after_start = &rest[start + "<!--".len()..];
+            let Some(end) = after_start.find("-->") else {
+                self.thinking_comment_open = true;
+                return output;
+            };
+            rest = &after_start[end + "-->".len()..];
+        }
+    }
+
     fn merge_thinking_text(&mut self, incoming: &str) -> String {
         if incoming.is_empty() {
             return String::new();
@@ -1313,6 +1355,21 @@ impl ResponsesSseParser {
         if let Some(delta) = incoming.trim_start().strip_prefix(current.trim_start()) {
             self.thinking = incoming.to_string();
             return delta.to_string();
+        }
+        let current_flat = collapse_whitespace(current);
+        let incoming_flat = collapse_whitespace(incoming);
+        if current_flat == incoming_flat {
+            self.thinking = incoming_flat;
+            return String::new();
+        }
+        if incoming_flat.starts_with(&current_flat) {
+            let delta = incoming_flat[current_flat.len()..].to_string();
+            self.thinking = incoming_flat;
+            return delta;
+        }
+        if current_flat.ends_with(&incoming_flat) {
+            self.thinking = current_flat;
+            return String::new();
         }
         self.thinking.push_str(incoming);
         incoming.to_string()
@@ -1451,6 +1508,17 @@ impl ResponsesSseParser {
             usage: self.usage,
         })
     }
+}
+
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn partial_comment_prefix_suffix_len(text: &str) -> usize {
+    ["<!--", "<!-", "<!", "<"]
+        .iter()
+        .find_map(|prefix| text.ends_with(prefix).then_some(prefix.len()))
+        .unwrap_or(0)
 }
 
 fn response_call_key(item: &serde_json::Value, call: &(String, String, String, String)) -> String {
@@ -2019,6 +2087,50 @@ mod tests {
             1
         );
         assert!(!rendered.contains("<!--"));
+    }
+
+    #[test]
+    fn codex_reasoning_summary_split_comments_do_not_render() {
+        let sse = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Planning response verification approach**\\n\\n<!-\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"- -->**Planning response verification approach** **Planning targeted tool tests** <!\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"-- -->**Planning targeted tool tests**\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut events = Vec::new();
+        let mut parser = ResponsesSseParser::default();
+        for line in sse.lines() {
+            parser.process_line(line, Some(&mut |event| events.push(event)));
+        }
+        let message = parser.finish().unwrap().message;
+        let thinking = message.thinking_text();
+        let rendered = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ThinkingDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+
+        assert_eq!(
+            thinking
+                .matches("Planning response verification approach")
+                .count(),
+            1
+        );
+        assert_eq!(thinking.matches("Planning targeted tool tests").count(), 1);
+        assert!(!thinking.contains("<!--"));
+        assert!(!thinking.contains("-->"));
+        assert_eq!(
+            rendered
+                .matches("Planning response verification approach")
+                .count(),
+            1
+        );
+        assert_eq!(rendered.matches("Planning targeted tool tests").count(), 1);
+        assert!(!rendered.contains("<!--"));
+        assert!(!rendered.contains("-->"));
     }
 
     #[test]
