@@ -1167,10 +1167,11 @@ fn active_mcp_servers(config: &Config) -> Vec<crate::config::McpServerConfig> {
         .mcp_servers
         .iter()
         .filter(|server| {
-            config
-                .mcp_server_allow
-                .as_ref()
-                .is_none_or(|allow| allow.iter().any(|name| name == &server.name))
+            server.enabled
+                && config
+                    .mcp_server_allow
+                    .as_ref()
+                    .is_none_or(|allow| allow.iter().any(|name| name == &server.name))
         })
         .cloned()
         .collect()
@@ -4184,6 +4185,56 @@ mod context_pressure_tests {
                 source: "test".to_string(),
             }),
         }
+    }
+
+    #[test]
+    fn active_mcp_servers_excludes_disabled_servers() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.mcp_servers = vec![
+            crate::config::McpServerConfig {
+                name: "enabled".to_string(),
+                command: "true".to_string(),
+                args: Vec::new(),
+                enabled: true,
+            },
+            crate::config::McpServerConfig {
+                name: "disabled".to_string(),
+                command: "true".to_string(),
+                args: Vec::new(),
+                enabled: false,
+            },
+        ];
+
+        let servers = active_mcp_servers(&config);
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "enabled");
+    }
+
+    #[test]
+    fn active_mcp_servers_applies_allow_list_after_enabled_filter() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.mcp_server_allow = Some(vec!["disabled".to_string()]);
+        config.mcp_servers = vec![
+            crate::config::McpServerConfig {
+                name: "enabled".to_string(),
+                command: "true".to_string(),
+                args: Vec::new(),
+                enabled: true,
+            },
+            crate::config::McpServerConfig {
+                name: "disabled".to_string(),
+                command: "true".to_string(),
+                args: Vec::new(),
+                enabled: false,
+            },
+        ];
+
+        let servers = active_mcp_servers(&config);
+
+        assert!(servers.is_empty());
     }
 
     fn test_config(config_dir: std::path::PathBuf) -> Config {

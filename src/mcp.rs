@@ -3,11 +3,18 @@ use anyhow::{Context, Result};
 use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, io, process::Stdio, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    io,
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
+    sync::Mutex,
     time::timeout,
 };
 
@@ -18,6 +25,36 @@ const MAX_MCP_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_MCP_SCHEMA_CHARS: usize = 8_000;
 const MCP_START_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MCP_DIAGNOSTIC_MESSAGES: usize = 20;
+const MCP_DIAGNOSTIC_CHARS: usize = 4_000;
+
+#[derive(Clone, Default)]
+struct DiagnosticRing {
+    messages: Arc<Mutex<VecDeque<String>>>,
+}
+
+impl DiagnosticRing {
+    async fn push(&self, message: impl Into<String>) {
+        let mut messages = self.messages.lock().await;
+        messages.push_back(truncate_chars(&message.into(), MCP_DIAGNOSTIC_CHARS));
+        while messages.len() > MCP_DIAGNOSTIC_MESSAGES {
+            messages.pop_front();
+        }
+    }
+
+    async fn snapshot(&self) -> Vec<String> {
+        self.messages.lock().await.iter().cloned().collect()
+    }
+
+    async fn context(&self) -> String {
+        let messages = self.snapshot().await;
+        if messages.is_empty() {
+            String::new()
+        } else {
+            format!("; recent MCP diagnostics: {}", messages.join(" | "))
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 #[error("MCP tool returned error: {0}")]
@@ -129,6 +166,7 @@ struct McpServer {
     stdout: BufReader<ChildStdout>,
     _child: Child,
     next_id: u64,
+    diagnostics: DiagnosticRing,
 }
 
 impl McpServer {
@@ -138,7 +176,7 @@ impl McpServer {
             .args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         let mut child = command
             .spawn()
@@ -152,13 +190,21 @@ impl McpServer {
             .stdout
             .take()
             .context("MCP server stdout was not piped")?;
+        let diagnostics = DiagnosticRing::default();
+        if let Some(stderr) = child.stderr.take() {
+            collect_stderr(stderr, diagnostics.clone());
+        }
         let mut server = Self {
             stdin,
             stdout: BufReader::new(stdout),
             _child: child,
             next_id: 1,
+            diagnostics,
         };
-        server.initialize().await?;
+        if let Err(error) = server.initialize().await {
+            let context = server.diagnostics.context().await;
+            anyhow::bail!("{error}{context}");
+        }
         Ok(server)
     }
 
@@ -216,10 +262,16 @@ impl McpServer {
         loop {
             let message = self.read_message().await?;
             if message.get("id").and_then(Value::as_u64) != Some(id) {
+                self.diagnostics
+                    .push(format!(
+                        "out-of-band JSON-RPC message while awaiting {method}: {message}"
+                    ))
+                    .await;
                 continue;
             }
             if let Some(error) = message.get("error") {
-                anyhow::bail!("MCP {method} failed: {error}");
+                let context = self.diagnostics.context().await;
+                anyhow::bail!("MCP {method} failed: {error}{context}");
             }
             return Ok(message.get("result").cloned().unwrap_or(Value::Null));
         }
@@ -248,14 +300,21 @@ impl McpServer {
     async fn write_error_context(&mut self, error: io::Error) -> anyhow::Error {
         match self._child.try_wait() {
             Ok(Some(status)) => {
+                let context = self.diagnostics.context().await;
                 anyhow::anyhow!(
-                    "MCP server exited before request could be written: {status}: {error}"
+                    "MCP server exited before request could be written: {status}: {error}{context}"
                 )
             }
-            Ok(None) => anyhow::anyhow!("failed to write MCP request to server stdin: {error}"),
-            Err(wait_error) => anyhow::anyhow!(
-                "failed to write MCP request to server stdin: {error}; failed to inspect MCP server status: {wait_error}"
-            ),
+            Ok(None) => {
+                let context = self.diagnostics.context().await;
+                anyhow::anyhow!("failed to write MCP request to server stdin: {error}{context}")
+            }
+            Err(wait_error) => {
+                let context = self.diagnostics.context().await;
+                anyhow::anyhow!(
+                    "failed to write MCP request to server stdin: {error}; failed to inspect MCP server status: {wait_error}{context}"
+                )
+            }
         }
     }
 
@@ -263,28 +322,58 @@ impl McpServer {
         let mut line = String::new();
         let bytes = self.stdout.read_line(&mut line).await?;
         if bytes == 0 {
-            anyhow::bail!("MCP server closed stdout");
+            let context = self.diagnostics.context().await;
+            anyhow::bail!("MCP server closed stdout{context}");
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
-        if !trimmed.starts_with("Content-Length:") {
+        if !looks_like_mcp_header(trimmed) {
             return serde_json::from_str(trimmed).context("failed to parse MCP JSON-RPC line");
         }
 
-        let len = parse_content_length(trimmed)?;
+        let mut headers = vec![trimmed.to_string()];
         loop {
             line.clear();
             let bytes = self.stdout.read_line(&mut line).await?;
             if bytes == 0 {
-                anyhow::bail!("MCP server closed stdout before body");
+                let context = self.diagnostics.context().await;
+                anyhow::bail!("MCP server closed stdout before body{context}");
             }
-            if line.trim_end_matches(['\r', '\n']).is_empty() {
+            let header = line.trim_end_matches(['\r', '\n']);
+            if header.is_empty() {
                 break;
             }
+            headers.push(header.to_string());
         }
+        let len = parse_content_length_headers(&headers)?;
         let mut body = vec![0; len];
         self.stdout.read_exact(&mut body).await?;
         serde_json::from_slice(&body).context("failed to parse MCP JSON-RPC message")
     }
+}
+
+fn collect_stderr(stderr: ChildStderr, diagnostics: DiagnosticRing) {
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let text = line.trim_end_matches(['\r', '\n']).to_string();
+                    if !text.is_empty() {
+                        diagnostics.push(format!("stderr: {text}")).await;
+                    }
+                }
+                Err(error) => {
+                    diagnostics
+                        .push(format!("stderr read failed: {error}"))
+                        .await;
+                    break;
+                }
+            }
+        }
+    });
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,16 +395,31 @@ fn encode_message_line(message: &Value) -> Result<Vec<u8>> {
     Ok(body)
 }
 
+#[cfg(test)]
 fn parse_content_length(header: &str) -> Result<usize> {
-    let len = header
-        .strip_prefix("Content-Length:")
-        .context("MCP message missing Content-Length")?
-        .trim()
-        .parse::<usize>()?;
+    parse_content_length_headers(&[header.to_string()])
+}
+
+fn parse_content_length_headers(headers: &[String]) -> Result<usize> {
+    let mut length = None;
+    for header in headers {
+        let Some((name, value)) = header.split_once(':') else {
+            anyhow::bail!("invalid MCP header: {header}");
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            length = Some(value.trim().parse::<usize>()?);
+        }
+    }
+    let len = length.context("MCP framed message missing Content-Length")?;
     if len > MAX_MCP_FRAME_BYTES {
         anyhow::bail!("MCP message Content-Length {len} exceeds limit {MAX_MCP_FRAME_BYTES}");
     }
     Ok(len)
+}
+
+fn looks_like_mcp_header(line: &str) -> bool {
+    line.split_once(':')
+        .is_some_and(|(name, _)| !name.trim().is_empty() && !name.trim_start().starts_with('{'))
 }
 
 fn exposed_tool_name(server_name: &str, tool_name: &str) -> String {
@@ -336,14 +440,64 @@ fn bounded_tool_description(tool_name: &str, server_name: &str, description: &st
 }
 
 fn bounded_input_schema(schema: Value) -> Value {
-    let text = schema.to_string();
-    if text.chars().count() <= MAX_MCP_SCHEMA_CHARS {
+    if bounded_json_chars(&schema, MAX_MCP_SCHEMA_CHARS).is_some() {
         return schema;
     }
     json!({
         "type": "object",
         "description": "MCP input schema omitted because it exceeded Ferrum's metadata size limit"
     })
+}
+
+fn bounded_json_chars(value: &Value, max_chars: usize) -> Option<usize> {
+    bounded_json_chars_inner(value, max_chars).filter(|count| *count <= max_chars)
+}
+
+fn bounded_json_chars_inner(value: &Value, remaining: usize) -> Option<usize> {
+    let used = match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(number) => number.to_string().chars().count(),
+        Value::String(text) => text.chars().count().saturating_add(2),
+        Value::Array(items) => {
+            let mut used = 2usize;
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    used = used.checked_add(1)?;
+                }
+                used = used.checked_add(bounded_json_chars_inner(
+                    item,
+                    remaining.checked_sub(used)?,
+                )?)?;
+                if used > remaining {
+                    return None;
+                }
+            }
+            used
+        }
+        Value::Object(map) => {
+            let mut used = 2usize;
+            for (index, (key, item)) in map.iter().enumerate() {
+                if index > 0 {
+                    used = used.checked_add(1)?;
+                }
+                used = used.checked_add(key.chars().count().saturating_add(3))?;
+                used = used.checked_add(bounded_json_chars_inner(
+                    item,
+                    remaining.checked_sub(used)?,
+                )?)?;
+                if used > remaining {
+                    return None;
+                }
+            }
+            used
+        }
+    };
+    if used > remaining {
+        return None;
+    }
+    Some(used)
 }
 
 fn truncate_chars(text: &str, max_chars: usize) -> String {
@@ -423,6 +577,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accepts_lowercase_content_length() {
+        assert_eq!(parse_content_length("content-length: 2").unwrap(), 2);
+    }
+
+    #[test]
+    fn accepts_extra_headers_around_content_length() {
+        let headers = vec![
+            "X-Test: before".to_string(),
+            "Content-Length: 3".to_string(),
+            "Another: after".to_string(),
+        ];
+        assert_eq!(parse_content_length_headers(&headers).unwrap(), 3);
+    }
+
+    #[test]
+    fn rejects_missing_content_length_in_framed_message() {
+        let headers = vec!["X-Test: nope".to_string()];
+        let error = parse_content_length_headers(&headers).unwrap_err();
+        assert!(error.to_string().contains("missing Content-Length"));
+    }
+
+    #[test]
+    fn huge_mcp_schema_does_not_require_serialized_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "big": {"type": "string", "description": "x".repeat(MAX_MCP_SCHEMA_CHARS * 4)}
+            }
+        });
+        let bounded_schema = bounded_input_schema(schema);
+        assert_eq!(bounded_schema["type"], "object");
+        assert!(
+            bounded_schema["description"]
+                .as_str()
+                .unwrap()
+                .contains("omitted")
+        );
+    }
+
+    #[test]
     fn rejects_oversized_content_length_before_allocation() {
         let header = format!("Content-Length: {}", MAX_MCP_FRAME_BYTES + 1);
         let error = parse_content_length(&header).unwrap_err();
@@ -478,6 +672,93 @@ mod tests {
             "content": [{"type": "text", "text": "tool ok"}]
         });
         assert_eq!(mcp_tool_result_to_output(&value).unwrap(), "tool ok");
+    }
+
+    #[tokio::test]
+    async fn notification_before_tools_list_response_is_recorded() {
+        let script = std::env::temp_dir().join(format!(
+            "ferrum_mcp_notify_server_{}.py",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import json
+import sys
+
+def send(obj):
+    data = json.dumps(obj, separators=(",", ":"))
+    sys.stdout.write(f"Content-Length: {len(data)}\r\n\r\n{data}")
+    sys.stdout.flush()
+
+def read_message():
+    header = sys.stdin.readline()
+    if not header:
+        return None
+    return json.loads(header)
+
+while True:
+    msg = read_message()
+    if msg is None:
+        break
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"test","version":"1"}}})
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"ready"}})
+        send({"jsonrpc":"2.0","id":msg["id"],"result":{"tools":[]}})
+    else:
+        send({"jsonrpc":"2.0","id":msg.get("id"),"error":{"code":-32601,"message":"unknown method"}})
+"#,
+        )
+        .unwrap();
+        let config = McpServerConfig {
+            name: "notify".to_string(),
+            command: "python3".to_string(),
+            args: vec![script.display().to_string()],
+            enabled: true,
+        };
+
+        let manager = McpManager::start(&[config]).await.unwrap();
+        let diagnostics = manager.servers[0].diagnostics.snapshot().await;
+
+        assert!(
+            diagnostics
+                .iter()
+                .any(|message| message.contains("notifications/message"))
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_mcp_server_stderr_appears_in_error() {
+        let script = std::env::temp_dir().join(format!(
+            "ferrum_mcp_stderr_server_{}.py",
+            std::process::id()
+        ));
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import sys
+sys.stderr.write("startup exploded\n")
+sys.stderr.flush()
+"#,
+        )
+        .unwrap();
+        let config = McpServerConfig {
+            name: "stderr".to_string(),
+            command: "python3".to_string(),
+            args: vec![script.display().to_string()],
+            enabled: true,
+        };
+
+        let error = match McpServer::start(&config).await {
+            Ok(_) => panic!("expected MCP startup to fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("startup exploded"));
     }
 
     #[tokio::test]
