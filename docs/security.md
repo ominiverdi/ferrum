@@ -57,8 +57,8 @@ shell remains exposed.
   obvious obfuscation.
 - `medium`: default. Allows normal coding commands; blocks destructive commands
   and ambiguous shell tricks like command substitution.
-- `high`: strict. Allows simple inspection/build commands; also blocks network
-  commands, inline interpreters, direct scripts, and broad disk writes.
+- `high`: strict. Allows simple inspection/build commands; also blocks common
+  direct network-capable commands, inline interpreters, direct scripts, and broad disk writes.
 
 Tier differences:
 

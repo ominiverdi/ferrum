@@ -41,6 +41,10 @@ pub fn evaluate(command: &str, safety: SafetyLevel) -> ShellGuardDecision {
         return ShellGuardDecision::Allow;
     }
 
+    if !matches!(safety, SafetyLevel::Low) && contains_shell_function_definition(&tokens) {
+        return deny("shell function definition");
+    }
+
     let mut current = Vec::new();
     let mut previous_was_pipe = false;
     let mut pending_redirection = false;
@@ -70,7 +74,7 @@ pub fn evaluate(command: &str, safety: SafetyLevel) -> ShellGuardDecision {
                     }
                     current.clear();
                 }
-                previous_was_pipe = operator == "|";
+                previous_was_pipe = matches!(operator.as_str(), "|" | "|&");
             }
         }
     }
@@ -206,7 +210,9 @@ fn tokenize(command: &str) -> Vec<Token> {
             ';' | '|' | '&' | '(' | ')' | '{' | '}' => {
                 flush_word(&mut tokens, &mut current);
                 let mut operator = ch.to_string();
-                if matches!(ch, '|' | '&') && chars.peek() == Some(&ch) {
+                if (ch == '|' && chars.peek() == Some(&'&'))
+                    || (matches!(ch, '|' | '&') && chars.peek() == Some(&ch))
+                {
                     operator.push(chars.next().unwrap());
                 }
                 tokens.push(Token::Operator(operator));
@@ -267,11 +273,43 @@ fn flush_word(tokens: &mut Vec<Token>, current: &mut String) {
     }
 }
 
+fn contains_shell_function_definition(tokens: &[Token]) -> bool {
+    for window in tokens.windows(4) {
+        if matches!(
+            window,
+            [
+                Token::Word(_),
+                Token::Operator(open),
+                Token::Operator(close),
+                Token::Operator(brace),
+            ] if open == "(" && close == ")" && brace == "{"
+        ) {
+            return true;
+        }
+        if matches!(
+            window,
+            [
+                Token::Word(function),
+                Token::Word(_),
+                Token::Operator(brace),
+                ..
+            ] if function == "function" && brace == "{"
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 fn is_redirection_operator(operator: &str) -> bool {
     matches!(operator, ">" | ">>" | "<" | "<<")
 }
 
 fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
+    evaluate_command_inner(command, safety, 0)
+}
+
+fn evaluate_command_inner(command: &[String], safety: SafetyLevel, depth: usize) -> Option<String> {
     let first = command.first()?;
     let base = command_name(first).to_ascii_lowercase();
     let args = &command[1..];
@@ -279,6 +317,10 @@ fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
         .iter()
         .map(|token| token.to_ascii_lowercase())
         .collect::<Vec<_>>();
+
+    if matches!(safety, SafetyLevel::Medium | SafetyLevel::High) && is_detacher_command(&base) {
+        return Some("detached process launcher".to_string());
+    }
 
     if is_shell_control_word(&base) {
         return Some("shell compound control syntax".to_string());
@@ -293,6 +335,10 @@ fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
         })
     {
         return Some("shell builtin or wrapper bypass command".to_string());
+    }
+
+    if base == "env" && env_s_payload_is_dangerous(args, safety, depth) {
+        return Some("shell launcher through env -S".to_string());
     }
 
     if is_command_wrapper(&base)
@@ -351,7 +397,7 @@ fn evaluate_command(command: &[String], safety: SafetyLevel) -> Option<String> {
         return Some("inline script interpreter invocation".to_string());
     }
 
-    if matches!(safety, SafetyLevel::High) && is_network_tool(&base) {
+    if matches!(safety, SafetyLevel::High) && is_network_tool(&base, args) {
         return Some("network-capable command".to_string());
     }
 
@@ -437,6 +483,8 @@ fn is_broad_path(arg: &str) -> bool {
 }
 
 fn is_sensitive_path(arg: &str) -> bool {
+    let normalized = normalize_home_prefix(arg);
+    let arg = normalized.as_str();
     matches!(
         arg,
         "/" | "/etc/passwd"
@@ -459,18 +507,54 @@ fn is_sensitive_path(arg: &str) -> bool {
             | "~/.ssh"
             | "~/.aws"
             | "~/.vault"
+            | "~/.config/ferrum"
     ) || [
-        "/etc/", "/usr/", "/bin/", "/sbin/", "/boot/", "/sys/", "/proc/", "/dev/", "/lib/",
-        "/lib64/", "/home/", "/var/", "/opt/", "~/.ssh", "~/.aws", "~/.vault",
+        "/etc/",
+        "/usr/",
+        "/bin/",
+        "/sbin/",
+        "/boot/",
+        "/sys/",
+        "/proc/",
+        "/dev/",
+        "/lib/",
+        "/lib64/",
+        "/home/",
+        "/var/",
+        "/opt/",
+        "~/.ssh",
+        "~/.aws",
+        "~/.vault",
+        "~/.config/ferrum",
     ]
     .iter()
     .any(|prefix| arg.starts_with(prefix))
 }
 
+fn normalize_home_prefix(arg: &str) -> String {
+    let mut normalized = arg.trim_matches('"').to_string();
+    for prefix in ["$home/", "${home}/", "$HOME/", "${HOME}/"] {
+        if let Some(rest) = normalized.strip_prefix(prefix) {
+            normalized = format!("~/{}", rest);
+            break;
+        }
+    }
+    normalized.to_ascii_lowercase()
+}
+
 fn dangerous_chmod(args: &[String]) -> bool {
     args.iter().any(|arg| {
-        matches!(arg.as_str(), "777" | "0777" | "+s" | "u+s" | "g+s") || arg.contains("+s")
+        matches!(arg.as_str(), "777" | "0777" | "+s" | "u+s" | "g+s")
+            || arg.contains("+s")
+            || octal_mode_has_special_bits(arg)
     })
+}
+
+fn octal_mode_has_special_bits(mode: &str) -> bool {
+    if mode.is_empty() || !mode.chars().all(|ch| matches!(ch, '0'..='7')) {
+        return false;
+    }
+    u32::from_str_radix(mode, 8).is_ok_and(|value| value & 0o7000 != 0)
 }
 
 fn dangerous_dd(args: &[String], safety: SafetyLevel) -> bool {
@@ -499,7 +583,9 @@ fn dangerous_tar(args: &[String]) -> bool {
                 || arg == "--extract"
                 || (arg.starts_with('-') && arg.contains('x') && !arg.starts_with("--"))
         });
-        has_extract && option_targets_sensitive_path(args, "-C")
+        has_extract
+            && (option_targets_sensitive_path(args, "-C")
+                || option_targets_sensitive_path(args, "--directory"))
     }
 }
 
@@ -507,20 +593,24 @@ fn dangerous_install(args: &[String]) -> bool {
     let has_privileged_mode = args
         .windows(2)
         .any(|pair| matches!(pair[0].as_str(), "-m" | "--mode") && is_privileged_mode(&pair[1]))
-        || args
-            .iter()
-            .any(|arg| arg.starts_with("-m") && is_privileged_mode(&arg[2..]));
+        || args.iter().any(|arg| {
+            arg.strip_prefix("--mode=").is_some_and(is_privileged_mode)
+                || arg.starts_with("-m") && is_privileged_mode(&arg[2..])
+        });
     has_privileged_mode || file_operation_targets_sensitive_path(args)
 }
 
 fn is_privileged_mode(mode: &str) -> bool {
-    matches!(mode, "4755" | "04755" | "2755" | "02755") || mode.contains("+s")
+    mode.contains("+s") || octal_mode_has_special_bits(mode)
 }
 
 fn dangerous_sed(args: &[String]) -> bool {
-    let has_in_place = args
-        .iter()
-        .any(|arg| arg == "-i" || arg.starts_with("-i") || arg == "--in-place");
+    let has_in_place = args.iter().any(|arg| {
+        arg == "-i"
+            || arg.starts_with("-i")
+            || arg == "--in-place"
+            || arg.starts_with("--in-place=")
+    });
     has_in_place
         && args
             .iter()
@@ -537,8 +627,11 @@ fn option_targets_sensitive_path(args: &[String], option: &str) -> bool {
     args.windows(2)
         .any(|pair| pair[0] == option && is_sensitive_path(&pair[1].to_ascii_lowercase()))
         || args.iter().any(|arg| {
-            arg.strip_prefix(option)
-                .filter(|suffix| !suffix.is_empty())
+            arg.strip_prefix(&format!("{option}="))
+                .or_else(|| {
+                    arg.strip_prefix(option)
+                        .filter(|suffix| !suffix.is_empty() && !option.starts_with("--"))
+                })
                 .is_some_and(|suffix| is_sensitive_path(&suffix.to_ascii_lowercase()))
         })
 }
@@ -577,6 +670,46 @@ fn is_command_wrapper(command: &str) -> bool {
     )
 }
 
+fn is_detacher_command(command: &str) -> bool {
+    matches!(
+        command,
+        "setsid" | "nohup" | "daemonize" | "disown" | "systemd-run" | "at" | "batch"
+    )
+}
+
+fn env_s_payload_is_dangerous(args: &[String], safety: SafetyLevel, depth: usize) -> bool {
+    if depth >= 4 {
+        return true;
+    }
+    for (index, arg) in args.iter().enumerate() {
+        let payload = if arg == "-S" {
+            args.get(index + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix("-S").filter(|payload| !payload.is_empty())
+        };
+        let Some(payload) = payload else {
+            continue;
+        };
+        let words = tokenize(payload)
+            .into_iter()
+            .filter_map(|token| match token {
+                Token::Word(word) => Some(word),
+                Token::Operator(_) => None,
+            })
+            .collect::<Vec<_>>();
+        if words.is_empty() {
+            continue;
+        }
+        if is_shell_interpreter(command_name(&words[0])) {
+            return true;
+        }
+        if evaluate_command_inner(&words, safety, depth + 1).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 fn generated_code_execution(command: &str, args: &[String]) -> bool {
     matches!(command, "cc" | "gcc" | "clang" | "rustc" | "javac")
         || command == "go" && args.first().is_some_and(|arg| arg == "run")
@@ -600,7 +733,7 @@ fn is_inline_script_interpreter(command: &str, args: &[String]) -> bool {
         .any(|arg| matches!(arg.as_str(), "-c" | "-e" | "-r"))
 }
 
-fn is_network_tool(command: &str) -> bool {
+fn is_network_tool(command: &str, args: &[String]) -> bool {
     matches!(
         command,
         "curl"
@@ -615,7 +748,15 @@ fn is_network_tool(command: &str) -> bool {
             | "ftp"
             | "sftp"
             | "tftp"
-    )
+    ) || command == "git"
+        && args.first().is_some_and(|arg| {
+            matches!(
+                arg.as_str(),
+                "clone" | "fetch" | "pull" | "push" | "ls-remote" | "submodule"
+            )
+        })
+        || command == "gh"
+        || command == "openssl" && args.first().is_some_and(|arg| arg == "s_client")
 }
 
 fn is_direct_script(command: &str) -> bool {
@@ -884,6 +1025,69 @@ mod tests {
         }
         assert_allowed_at("cargo test", SafetyLevel::High);
         assert_allowed_at("cargo build --release", SafetyLevel::High);
+    }
+
+    #[test]
+    fn detects_posix_shell_function_definitions() {
+        assert_denied("f(){ echo ok; }; f");
+        assert_denied("f () { echo ok; }\nf");
+        assert_denied("function f { echo ok; }; f");
+        assert_allowed_at("f(){ echo ok; }; f", SafetyLevel::Low);
+    }
+
+    #[test]
+    fn detects_bash_pipe_ampersand_into_shell() {
+        assert_denied("echo 'id' | sh");
+        assert_denied("echo 'id' |& sh");
+        assert_denied("cat script.txt | bash");
+    }
+
+    #[test]
+    fn detects_env_s_shell_launchers() {
+        assert_denied("env -S 'bash -lc echo pwn'");
+        assert_denied("env -Sbash -lc echo pwn");
+        assert_denied("/usr/bin/env -S 'sh -c id'");
+    }
+
+    #[test]
+    fn medium_safety_denies_detached_process_launchers() {
+        assert_denied("setsid sleep 999");
+        assert_denied("nohup sleep 999 &");
+        assert_denied_at("systemd-run --user sleep 999", SafetyLevel::High);
+        assert_allowed_at("setsid sleep 1", SafetyLevel::Low);
+    }
+
+    #[test]
+    fn detects_numeric_special_chmod_modes() {
+        assert_denied("chmod 4755 x");
+        assert_denied("chmod 2755 x");
+        assert_denied("chmod 6755 x");
+        assert_denied_at("chmod 1777 dir", SafetyLevel::High);
+    }
+
+    #[test]
+    fn detects_equals_form_dangerous_options() {
+        assert_denied("install --mode=4755 a b");
+        assert_denied("tar --directory=/etc -xf a.tar");
+        assert_denied("sed --in-place=.bak s/a/b/ ~/.aws/credentials");
+    }
+
+    #[test]
+    fn detects_home_variable_sensitive_paths() {
+        assert_denied("cat x > $HOME/.ssh/config");
+        assert_denied("cp x ${HOME}/.aws/credentials");
+        assert_denied("sed -i s/a/b/ $HOME/.config/ferrum/auth.json");
+    }
+
+    #[test]
+    fn high_safety_denies_more_network_capable_commands() {
+        assert_denied_at("git clone https://example.com/x", SafetyLevel::High);
+        assert_denied_at("gh repo clone x/y", SafetyLevel::High);
+        assert_denied_at(
+            "openssl s_client -connect example.com:443",
+            SafetyLevel::High,
+        );
+        assert_allowed_at("git status --short", SafetyLevel::High);
     }
 
     #[test]

@@ -4997,7 +4997,7 @@ fn handle_command(
                     "shell guard: balanced. Allows normal coding commands; blocks destructive commands and ambiguous shell tricks like command substitution."
                 ),
                 SafetyLevel::High => println!(
-                    "shell guard: strict. Allows simple inspection/build commands; also blocks network commands, inline interpreters, direct scripts, and broad disk writes."
+                    "shell guard: strict. Allows simple inspection/build commands; also blocks common direct network-capable commands, inline interpreters, direct scripts, and broad disk writes."
                 ),
             }
             Ok(CommandAction::Continue)
