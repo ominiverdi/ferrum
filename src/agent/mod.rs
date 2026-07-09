@@ -1898,19 +1898,90 @@ impl AgentState {
                 "Adaptive loop guard stopped tool use: {force_final_reason}. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
             ),
         ));
-        model_request_index += 1;
-        if metrics_enabled {
-            emit_model_metrics_start(model_request_index, &final_messages, &[]);
-        }
-        let started = Instant::now();
-        let final_response = provider
-            .complete(
-                &config.provider_model,
-                &final_messages,
-                &[],
-                config.thinking,
-            )
-            .await?;
+        let mut final_overflow_recovery_attempted = overflow_recovery_attempted;
+        let final_response = loop {
+            model_request_index += 1;
+            if metrics_enabled {
+                emit_model_metrics_start(model_request_index, &final_messages, &[]);
+            }
+            let started = Instant::now();
+            let mut abort = ActiveTurnAbort::start(interactive);
+            let mut live_render = LiveRenderState::new(self.color_mode, self.colors.clone());
+            let mut on_event = |event| {
+                let _ = live_render.render_event(event);
+            };
+            let response_result = if interactive {
+                provider
+                    .complete_streaming(
+                        &config.provider_model,
+                        &final_messages,
+                        &[],
+                        config.thinking,
+                        &mut on_event,
+                        Some(abort.token()),
+                    )
+                    .await
+            } else {
+                provider
+                    .complete(
+                        &config.provider_model,
+                        &final_messages,
+                        &[],
+                        config.thinking,
+                    )
+                    .await
+            };
+            abort.stop();
+            match response_result {
+                Ok(response) => {
+                    if metrics_enabled {
+                        emit_model_metrics_end(
+                            model_request_index,
+                            started.elapsed(),
+                            &response.message,
+                        );
+                    }
+                    if interactive {
+                        live_render.finish()?;
+                    }
+                    break (response, live_render.text_started);
+                }
+                Err(error) if error.to_string() == "aborted" => {
+                    println!("aborted");
+                    return Ok(());
+                }
+                Err(error)
+                    if is_context_overflow_error(&error) && !final_overflow_recovery_attempted =>
+                {
+                    final_overflow_recovery_attempted = true;
+                    eprintln!(
+                        "[session] provider reported context overflow during final synthesis; compacting and retrying once"
+                    );
+                    let outcome = self.compact(config, None, true, None).await?;
+                    self.last_context_warning_bucket = None;
+                    match outcome {
+                        CompactionOutcome::Compacted {
+                            before_tokens,
+                            after_tokens,
+                        } => eprintln!(
+                            "[session] compacted context before final synthesis retry: {before_tokens} -> {after_tokens} estimated tokens"
+                        ),
+                        CompactionOutcome::Skipped { reason, .. } => eprintln!(
+                            "[session] final synthesis overflow recovery compaction skipped: {reason}"
+                        ),
+                    }
+                    final_messages = self.messages.clone();
+                    final_messages.push(messages::Message::text(
+                        messages::Role::System,
+                        format!(
+                            "Adaptive loop guard stopped tool use: {force_final_reason}. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
+                        ),
+                    ));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let (final_response, final_text_was_rendered_live) = final_response;
         let provider_usage = final_response.usage;
         let mut final_response = final_response.message;
         let token_usage = usage_for_response(
@@ -1936,10 +2007,9 @@ impl AgentState {
                 source: token_usage.source.clone(),
             },
         );
-        if metrics_enabled {
-            emit_model_metrics_end(model_request_index, started.elapsed(), &final_response);
+        if !interactive || !final_text_was_rendered_live {
+            render_assistant_response(&final_response, interactive, self.color_mode, &self.colors)?;
         }
-        render_assistant_response(&final_response, interactive, self.color_mode, &self.colors)?;
         self.session.append_message(&final_response)?;
         self.messages.push(final_response);
         self.maybe_warn_context_pressure(
