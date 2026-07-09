@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::{
     collections::HashMap,
     fs,
@@ -80,12 +81,9 @@ fn add_skills_from_dir(skills: &mut Vec<Skill>, dir: &Path, direct_md: bool) -> 
         return Ok(());
     }
 
+    let start = skills.len();
     if direct_md {
-        for entry in
-            fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
+        for path in sorted_dir_entries(dir)? {
             if path.is_file()
                 && path.extension().and_then(|ext| ext.to_str()) == Some("md")
                 && let Some(skill) = parse_skill_file(&path)?
@@ -95,13 +93,12 @@ fn add_skills_from_dir(skills: &mut Vec<Skill>, dir: &Path, direct_md: bool) -> 
         }
     }
 
-    visit_skill_dirs(dir, skills)
+    visit_skill_dirs(dir, skills)?;
+    reject_duplicate_skills_same_scope(&skills[start..], dir)
 }
 
 fn visit_skill_dirs(dir: &Path, skills: &mut Vec<Skill>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
+    for path in sorted_dir_entries(dir)? {
         if !path.is_dir() {
             continue;
         }
@@ -117,6 +114,31 @@ fn visit_skill_dirs(dir: &Path, skills: &mut Vec<Skill>) -> Result<()> {
     Ok(())
 }
 
+fn sorted_dir_entries(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut entries = fs::read_dir(dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort();
+    Ok(entries)
+}
+
+fn reject_duplicate_skills_same_scope(skills: &[Skill], scope: &Path) -> Result<()> {
+    let mut seen = HashMap::new();
+    for skill in skills {
+        if let Some(previous) = seen.insert(skill.name.clone(), skill.path.clone()) {
+            anyhow::bail!(
+                "duplicate skill `{}` in {}: {} and {}",
+                skill.name,
+                scope.display(),
+                previous.display(),
+                skill.path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn parse_skill_file(path: &Path) -> Result<Option<Skill>> {
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -124,7 +146,16 @@ fn parse_skill_file(path: &Path) -> Result<Option<Skill>> {
         eprintln!("[skills] skipping {}: missing frontmatter", path.display());
         return Ok(None);
     };
-    let fields = parse_frontmatter_fields(frontmatter);
+    let fields = match parse_frontmatter_fields(&frontmatter) {
+        Ok(fields) => fields,
+        Err(error) => {
+            eprintln!(
+                "[skills] skipping {}: invalid frontmatter: {error}",
+                path.display()
+            );
+            return Ok(None);
+        }
+    };
     let Some(name) = fields.get("name").cloned() else {
         eprintln!("[skills] skipping {}: missing name", path.display());
         return Ok(None);
@@ -152,32 +183,60 @@ fn parse_skill_file(path: &Path) -> Result<Option<Skill>> {
     }))
 }
 
-fn extract_frontmatter(text: &str) -> Option<&str> {
-    let rest = text.strip_prefix("---\n")?;
-    let end = rest.find("\n---")?;
-    Some(&rest[..end])
+fn extract_frontmatter(text: &str) -> Option<String> {
+    let (start, end, _) = frontmatter_bounds(text)?;
+    Some(text[start..end].replace("\r\n", "\n"))
 }
 
 fn strip_frontmatter(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("---\n") else {
+    let Some((_, _, body_start)) = frontmatter_bounds(text) else {
         return text;
     };
-    let Some(end) = rest.find("\n---") else {
-        return text;
-    };
-    &rest[end + "\n---".len()..]
+    &text[body_start..]
 }
 
-fn parse_frontmatter_fields(frontmatter: &str) -> HashMap<String, String> {
+fn frontmatter_bounds(text: &str) -> Option<(usize, usize, usize)> {
+    let offset = text
+        .strip_prefix('\u{feff}')
+        .map_or(0, |_| '\u{feff}'.len_utf8());
+    let rest = &text[offset..];
+    let opening_len = if rest.starts_with("---\r\n") {
+        "---\r\n".len()
+    } else if rest.starts_with("---\n") {
+        "---\n".len()
+    } else {
+        return None;
+    };
+    let body_start = offset + opening_len;
+    let body = &text[body_start..];
+    let candidates = ["\r\n---\r\n", "\n---\n", "\r\n---\n", "\n---\r\n"];
+    let (relative_end, delimiter_len) = candidates
+        .iter()
+        .filter_map(|delimiter| body.find(delimiter).map(|index| (index, delimiter.len())))
+        .min_by_key(|(index, _)| *index)?;
+    Some((
+        body_start,
+        body_start + relative_end,
+        body_start + relative_end + delimiter_len,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillFrontmatter {
+    name: Option<String>,
+    description: Option<String>,
+}
+
+fn parse_frontmatter_fields(frontmatter: &str) -> Result<HashMap<String, String>> {
+    let parsed: SkillFrontmatter = serde_yaml::from_str(frontmatter)?;
     let mut fields = HashMap::new();
-    for line in frontmatter.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_matches(['\'', '"']).to_string();
-        fields.insert(key.trim().to_string(), value);
+    if let Some(name) = parsed.name {
+        fields.insert("name".to_string(), name);
     }
-    fields
+    if let Some(description) = parsed.description {
+        fields.insert("description".to_string(), description);
+    }
+    Ok(fields)
 }
 
 fn valid_skill_name(name: &str) -> bool {
@@ -210,12 +269,19 @@ fn project_ancestors(cwd: &Path) -> Vec<PathBuf> {
     let mut current = Some(cwd);
     while let Some(dir) = current {
         dirs.push(dir.to_path_buf());
-        if dir.join(".git").exists() {
-            break;
+        if is_project_marker(dir) {
+            return dirs;
         }
         current = dir.parent();
     }
-    dirs
+    vec![cwd.to_path_buf()]
+}
+
+fn is_project_marker(dir: &Path) -> bool {
+    dir.join(".git").exists()
+        || dir.join(".ferrum").exists()
+        || dir.join("AGENTS.md").exists()
+        || dir.join("agents.md").exists()
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -246,8 +312,99 @@ mod tests {
     #[test]
     fn parses_frontmatter() {
         let fm = extract_frontmatter("---\nname: test\ndescription: hello\n---\nbody").unwrap();
-        let fields = parse_frontmatter_fields(fm);
+        let fields = parse_frontmatter_fields(&fm).unwrap();
         assert_eq!(fields.get("name").unwrap(), "test");
         assert_eq!(fields.get("description").unwrap(), "hello");
+    }
+
+    #[test]
+    fn outside_git_repo_does_not_load_parent_tmp_agents_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path();
+        let cwd = parent.join("child");
+        fs::create_dir_all(&cwd).unwrap();
+
+        let ancestors = project_ancestors(&cwd);
+
+        assert_eq!(ancestors, vec![cwd]);
+    }
+
+    #[test]
+    fn project_ancestors_stop_at_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let nested = repo.join("a/b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(repo.join("AGENTS.md"), "instructions").unwrap();
+
+        let ancestors = project_ancestors(&nested);
+
+        assert_eq!(ancestors, vec![nested, repo.join("a"), repo]);
+    }
+
+    #[test]
+    fn duplicate_skill_name_same_dir_errors_deterministically() {
+        let temp = tempfile::tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        fs::create_dir_all(skills_dir.join("a")).unwrap();
+        fs::create_dir_all(skills_dir.join("b")).unwrap();
+        fs::write(
+            skills_dir.join("a/SKILL.md"),
+            "---\nname: dup\ndescription: first\n---\nbody\n",
+        )
+        .unwrap();
+        fs::write(
+            skills_dir.join("b/SKILL.md"),
+            "---\nname: dup\ndescription: second\n---\nbody\n",
+        )
+        .unwrap();
+        let mut skills = Vec::new();
+
+        let error = add_skills_from_dir(&mut skills, &skills_dir, true).unwrap_err();
+
+        assert!(error.to_string().contains("duplicate skill `dup`"));
+        assert!(error.to_string().contains("a/SKILL.md"));
+        assert!(error.to_string().contains("b/SKILL.md"));
+    }
+
+    #[test]
+    fn skill_with_bom_frontmatter_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("SKILL.md");
+        fs::write(
+            &path,
+            "\u{feff}---\nname: bom-skill\ndescription: loads\n---\nbody\n",
+        )
+        .unwrap();
+
+        let skill = parse_skill_file(&path).unwrap().unwrap();
+
+        assert_eq!(skill.name, "bom-skill");
+        assert_eq!(
+            strip_frontmatter(&fs::read_to_string(&path).unwrap()).trim(),
+            "body"
+        );
+    }
+
+    #[test]
+    fn skill_with_crlf_frontmatter_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("SKILL.md");
+        fs::write(
+            &path,
+            "---\r\nname: crlf-skill\r\ndescription: loads\r\n---\r\nbody\r\n",
+        )
+        .unwrap();
+
+        let skill = parse_skill_file(&path).unwrap().unwrap();
+
+        assert_eq!(skill.name, "crlf-skill");
+    }
+
+    #[test]
+    fn skill_frontmatter_uses_yaml_colon_strings() {
+        let fm = "name: yaml-skill\ndescription: \"does: parse: colons\"\n";
+        let fields = parse_frontmatter_fields(fm).unwrap();
+        assert_eq!(fields.get("description").unwrap(), "does: parse: colons");
     }
 }
