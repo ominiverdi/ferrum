@@ -397,7 +397,7 @@ impl Provider for OpenAiCodexProvider {
                 },
                 reasoning: thinking.as_codex().map(|effort| CodexReasoning {
                     effort,
-                    summary: "auto",
+                    summary: "detailed",
                 }),
                 parallel_tool_calls: !_tools.is_empty(),
             };
@@ -465,7 +465,7 @@ impl Provider for OpenAiCodexProvider {
                 },
                 reasoning: thinking.as_codex().map(|effort| CodexReasoning {
                     effort,
-                    summary: "auto",
+                    summary: "detailed",
                 }),
                 parallel_tool_calls: !_tools.is_empty(),
             };
