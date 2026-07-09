@@ -2326,6 +2326,21 @@ impl AgentState {
         Ok(())
     }
 
+    fn refresh_runtime_context(&mut self, config: &Config) -> Result<()> {
+        let message =
+            messages::Message::text(messages::Role::System, runtime_context(config, &self.cwd)?);
+        if self
+            .messages
+            .first()
+            .is_some_and(|message| matches!(message.role, messages::Role::System))
+        {
+            self.messages[0] = message.clone();
+        } else {
+            self.messages.insert(0, message.clone());
+        }
+        self.session.append_message(&message)
+    }
+
     fn set_title(&mut self, title: &str) -> Result<()> {
         let title = title.trim();
         if title.is_empty() {
@@ -4102,6 +4117,21 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn refresh_runtime_context_updates_model_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        config.model = "new-model".to_string();
+        config.provider_model = "new-provider-model".to_string();
+
+        state.refresh_runtime_context(&config).unwrap();
+
+        let text = state.messages[0].text_content();
+        assert!(text.contains("model: new-model"));
+        assert!(text.contains("provider_model: new-provider-model"));
+    }
+
+    #[test]
     fn resume_without_matching_session_creates_new_session() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = std::env::current_dir().unwrap();
@@ -5089,6 +5119,7 @@ fn handle_command(
                 config.set_model(model)?;
                 state.session.append_provider(&config.provider_name)?;
                 state.session.append_model(&config.model)?;
+                state.refresh_runtime_context(config)?;
             }
             println!("model: {}", config.model);
             if config.provider_model != config.model {
@@ -5113,6 +5144,7 @@ fn handle_command(
                 config.set_provider(provider)?;
                 state.session.append_provider(&config.provider_name)?;
                 state.session.append_model(&config.model)?;
+                state.refresh_runtime_context(config)?;
             }
             println!("provider: {}", config.provider_name);
             println!("model: {}", config.model);
@@ -5147,10 +5179,12 @@ fn handle_command(
                 Some("on") => {
                     config.mcp_enabled = true;
                     state.set_mcp_enabled(true)?;
+                    state.refresh_runtime_context(config)?;
                 }
                 Some("off") => {
                     config.mcp_enabled = false;
                     state.set_mcp_enabled(false)?;
+                    state.refresh_runtime_context(config)?;
                 }
                 Some(other) => anyhow::bail!("usage: /mcp [on|off|status|list], got: {other}"),
             }
@@ -5192,6 +5226,7 @@ fn handle_command(
             if let Some(thinking) = parts.next() {
                 config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
                 state.session.append_thinking(config.thinking.as_str())?;
+                state.refresh_runtime_context(config)?;
             }
             println!("thinking: {}", config.thinking.as_str());
             Ok(CommandAction::Continue)
@@ -5202,6 +5237,7 @@ fn handle_command(
                 config.safety = parsed;
                 state.safety = parsed;
                 state.session.append_safety(parsed.as_str())?;
+                state.refresh_runtime_context(config)?;
             }
             println!("safety: {}", state.safety.as_str());
             match state.safety {
@@ -5223,6 +5259,7 @@ fn handle_command(
                 config.diff_mode = parsed;
                 state.diff_mode = parsed;
                 state.session.append_diff_mode(parsed.as_str())?;
+                state.refresh_runtime_context(config)?;
             }
             println!("diff: {}", state.diff_mode.as_str());
             Ok(CommandAction::Continue)
