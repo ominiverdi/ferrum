@@ -9,35 +9,15 @@ pub struct EditSpec {
 }
 
 pub fn replace_exact(path: &Path, edits: &[EditSpec]) -> Result<String> {
-    let raw =
+    let original =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let (bom, original_without_bom) = strip_bom(&raw);
-    let line_ending = detect_line_ending(original_without_bom);
-    let original = normalize_to_lf(original_without_bom);
-    let normalized_edits = edits
-        .iter()
-        .map(|edit| EditSpec {
-            old_text: normalize_to_lf(&edit.old_text),
-            new_text: normalize_to_lf(&edit.new_text),
-        })
-        .collect::<Vec<_>>();
-    validate_edits(&original, &normalized_edits)?;
-
-    let mut replacements = Vec::new();
-    for edit in &normalized_edits {
-        let start = original
-            .find(&edit.old_text)
-            .expect("validated edit missing");
-        let end = start + edit.old_text.len();
-        replacements.push((start, end, edit.new_text.as_str()));
-    }
-    replacements.sort_by_key(|(start, _, _)| *start);
+    let replacements = validate_edits(&original, edits)?;
 
     let mut output = String::with_capacity(original.len());
     let mut cursor = 0;
-    for (start, end, new_text) in replacements {
+    for (start, end, index) in replacements {
         output.push_str(&original[cursor..start]);
-        output.push_str(new_text);
+        output.push_str(&edits[index].new_text);
         cursor = end;
     }
     output.push_str(&original[cursor..]);
@@ -49,8 +29,7 @@ pub fn replace_exact(path: &Path, edits: &[EditSpec]) -> Result<String> {
         );
     }
 
-    let final_output = format!("{bom}{}", restore_line_endings(&output, line_ending));
-    fs::write(path, final_output).with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(path, output).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(format!(
         "applied {} edit(s) to {}",
         edits.len(),
@@ -58,39 +37,7 @@ pub fn replace_exact(path: &Path, edits: &[EditSpec]) -> Result<String> {
     ))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LineEnding {
-    Lf,
-    Crlf,
-}
-
-fn strip_bom(content: &str) -> (&str, &str) {
-    content
-        .strip_prefix('\u{feff}')
-        .map_or(("", content), |text| ("\u{feff}", text))
-}
-
-fn detect_line_ending(content: &str) -> LineEnding {
-    let crlf = content.find("\r\n");
-    let lf = content.find('\n');
-    match (crlf, lf) {
-        (Some(crlf), Some(lf)) if crlf <= lf => LineEnding::Crlf,
-        _ => LineEnding::Lf,
-    }
-}
-
-fn normalize_to_lf(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\r', "\n")
-}
-
-fn restore_line_endings(text: &str, line_ending: LineEnding) -> String {
-    match line_ending {
-        LineEnding::Lf => text.to_string(),
-        LineEnding::Crlf => text.replace('\n', "\r\n"),
-    }
-}
-
-fn validate_edits(original: &str, edits: &[EditSpec]) -> Result<()> {
+fn validate_edits(original: &str, edits: &[EditSpec]) -> Result<Vec<(usize, usize, usize)>> {
     if edits.is_empty() {
         anyhow::bail!("edits must not be empty");
     }
@@ -122,7 +69,7 @@ fn validate_edits(original: &str, edits: &[EditSpec]) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(ranges)
 }
 
 #[cfg(test)]
@@ -166,5 +113,68 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("matched 2 times"));
+    }
+
+    #[test]
+    fn mixed_lf_crlf_file_preserves_unedited_line_endings() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp.path(), "alpha\r\nbeta\ngamma\r\n").unwrap();
+
+        replace_exact(
+            temp.path(),
+            &[EditSpec {
+                old_text: "beta\n".into(),
+                new_text: "BETA\n".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(temp.path()).unwrap(),
+            "alpha\r\nBETA\ngamma\r\n"
+        );
+    }
+
+    #[test]
+    fn bom_is_preserved() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp.path(), "\u{feff}alpha\nbeta\n").unwrap();
+
+        replace_exact(
+            temp.path(),
+            &[EditSpec {
+                old_text: "beta".into(),
+                new_text: "BETA".into(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(temp.path()).unwrap(),
+            "\u{feff}alpha\nBETA\n"
+        );
+    }
+
+    #[test]
+    fn overlapping_edits_rejected() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        fs::write(temp.path(), "abcdef\n").unwrap();
+
+        let error = replace_exact(
+            temp.path(),
+            &[
+                EditSpec {
+                    old_text: "abc".into(),
+                    new_text: "ABC".into(),
+                },
+                EditSpec {
+                    old_text: "bcd".into(),
+                    new_text: "BCD".into(),
+                },
+            ],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("overlaps"));
     }
 }
