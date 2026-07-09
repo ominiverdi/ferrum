@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use reqwest::{Client, Response};
+use reqwest::{Client, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -21,6 +21,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Duration,
 };
 
 pub struct OpenAiCompatProvider {
@@ -402,26 +403,19 @@ impl Provider for OpenAiCodexProvider {
                 parallel_tool_calls: !_tools.is_empty(),
             };
 
-            let response = self
-                .client
-                .post(self.responses_url())
-                .bearer_auth(api_key)
-                .header("chatgpt-account-id", account_id)
-                .header("originator", "ferrum")
-                .header("OpenAI-Beta", "responses=experimental")
-                .header("content-type", "application/json")
-                .json(&request)
-                .send()
-                .await
-                .context("OpenAI Codex request failed")?;
-            let status = response.status();
+            let response = send_codex_request_with_retries(
+                &self.client,
+                &self.responses_url(),
+                &api_key,
+                &account_id,
+                &request,
+                None,
+            )
+            .await?;
             let text = response
                 .text()
                 .await
                 .context("failed to read OpenAI Codex response")?;
-            if !status.is_success() {
-                anyhow::bail!("OpenAI Codex returned {status}: {text}");
-            }
             Ok(ProviderResponse::message(
                 extract_sse_responses_message(&text).unwrap_or_else(|| {
                     let content = serde_json::from_str::<serde_json::Value>(&text)
@@ -470,26 +464,15 @@ impl Provider for OpenAiCodexProvider {
                 parallel_tool_calls: !_tools.is_empty(),
             };
 
-            let response = self
-                .client
-                .post(self.responses_url())
-                .bearer_auth(api_key)
-                .header("chatgpt-account-id", account_id)
-                .header("originator", "ferrum")
-                .header("OpenAI-Beta", "responses=experimental")
-                .header("content-type", "application/json")
-                .json(&request)
-                .send()
-                .await
-                .context("OpenAI Codex request failed")?;
-            let status = response.status();
-            if !status.is_success() {
-                let text = response
-                    .text()
-                    .await
-                    .context("failed to read OpenAI Codex error response")?;
-                anyhow::bail!("OpenAI Codex returned {status}: {text}");
-            }
+            let response = send_codex_request_with_retries(
+                &self.client,
+                &self.responses_url(),
+                &api_key,
+                &account_id,
+                &request,
+                cancelled.as_ref(),
+            )
+            .await?;
 
             let mut parser = ResponsesSseParser::default();
             let mut buffer = String::new();
@@ -516,6 +499,98 @@ impl Provider for OpenAiCodexProvider {
             parser.finish()
         })
     }
+}
+
+const CODEX_MAX_RETRIES: usize = 3;
+const CODEX_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
+
+async fn send_codex_request_with_retries(
+    client: &Client,
+    url: &str,
+    api_key: &str,
+    account_id: &str,
+    request: &CodexResponsesRequest<'_>,
+    cancelled: Option<&Arc<AtomicBool>>,
+) -> Result<Response> {
+    let mut attempt = 0usize;
+    loop {
+        if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            anyhow::bail!("aborted");
+        }
+        let response = client
+            .post(url)
+            .bearer_auth(api_key)
+            .header("chatgpt-account-id", account_id)
+            .header("originator", "ferrum")
+            .header("OpenAI-Beta", "responses=experimental")
+            .header("content-type", "application/json")
+            .json(request)
+            .send()
+            .await;
+        match response {
+            Ok(response) if response.status().is_success() => return Ok(response),
+            Ok(response) => {
+                let status = response.status();
+                let retryable = is_retryable_codex_status(status);
+                let text = response
+                    .text()
+                    .await
+                    .context("failed to read OpenAI Codex error response")?;
+                if retryable && attempt < CODEX_MAX_RETRIES {
+                    attempt += 1;
+                    sleep_before_codex_retry(
+                        attempt,
+                        &format!("OpenAI Codex returned {status}: {text}"),
+                        cancelled,
+                    )
+                    .await?;
+                    continue;
+                }
+                anyhow::bail!("OpenAI Codex returned {status}: {text}");
+            }
+            Err(error) => {
+                let retryable = is_retryable_codex_send_error(&error);
+                if retryable && attempt < CODEX_MAX_RETRIES {
+                    attempt += 1;
+                    sleep_before_codex_retry(
+                        attempt,
+                        &format!("OpenAI Codex request failed: {error}"),
+                        cancelled,
+                    )
+                    .await?;
+                    continue;
+                }
+                return Err(error).context("OpenAI Codex request failed");
+            }
+        }
+    }
+}
+
+fn is_retryable_codex_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn is_retryable_codex_send_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout() || error.is_body()
+}
+
+async fn sleep_before_codex_retry(
+    attempt: usize,
+    reason: &str,
+    cancelled: Option<&Arc<AtomicBool>>,
+) -> Result<()> {
+    let delay = CODEX_RETRY_BASE_DELAY * (1 << (attempt - 1));
+    eprintln!(
+        "[provider] {reason}; retrying in {}s ({attempt}/{CODEX_MAX_RETRIES})",
+        delay.as_secs()
+    );
+    tokio::time::sleep(delay).await;
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        anyhow::bail!("aborted");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
