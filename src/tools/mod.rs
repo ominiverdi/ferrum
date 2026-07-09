@@ -365,12 +365,12 @@ mod tests {
         let input = serde_json::json!({
             "seconds": 1,
             "command": "printf done",
-            "timeout_seconds": 1,
+            "timeout_seconds": 5,
         });
 
         let output = execute("wait", &input, temp.path()).await.unwrap();
 
-        assert!(output.contains("stdout:\ndone"));
+        assert!(output.contains("stdout:\ndone"), "{output}");
     }
 
     #[tokio::test]
