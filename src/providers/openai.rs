@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     env,
     future::Future,
     path::PathBuf,
@@ -156,7 +157,23 @@ impl Provider for OpenAiCompatProvider {
         cancelled: Option<Arc<AtomicBool>>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         if !self.streaming {
-            return self.complete(model, messages, tools, thinking);
+            return Box::pin(async move {
+                if cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    anyhow::bail!("aborted");
+                }
+                let response = self.complete(model, messages, tools, thinking).await?;
+                if cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    anyhow::bail!("aborted");
+                }
+                emit_message_stream_events(&response.message, on_event);
+                Ok(response)
+            });
         }
         Box::pin(async move {
             let api_key = self
@@ -253,6 +270,20 @@ impl Provider for OpenAiCompatProvider {
             }
             parser.finish()
         })
+    }
+}
+
+fn emit_message_stream_events(message: &Message, on_event: &mut (dyn FnMut(StreamEvent) + Send)) {
+    for block in &message.content {
+        match block {
+            ContentBlock::Thinking { text, .. } if !text.is_empty() => {
+                on_event(StreamEvent::ThinkingDelta(text.clone()));
+            }
+            ContentBlock::Text { text } if !text.is_empty() => {
+                on_event(StreamEvent::TextDelta(text.clone()));
+            }
+            _ => {}
+        }
     }
 }
 
@@ -718,7 +749,7 @@ fn openai_tools(tools: &[ToolDefinition]) -> Vec<OpenAiTool> {
 
 fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Result<Message> {
     let Some(message) = message else {
-        return Ok(Message::text(Role::Assistant, ""));
+        anyhow::bail!("OpenAI-compatible response produced no choices");
     };
     let mut content = Vec::new();
     if let Some(text) = message
@@ -746,6 +777,9 @@ fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Result<Messag
             name: call.function.name,
             input,
         });
+    }
+    if content.is_empty() {
+        anyhow::bail!("OpenAI-compatible response produced no message content");
     }
     Ok(Message {
         role: Role::Assistant,
@@ -1111,7 +1145,7 @@ struct ResponsesSseParser {
     thinking_signature: Option<String>,
     usage: Option<TokenUsage>,
     tool_calls: Vec<(String, String, String, String)>,
-    current_call: Option<(String, String, String, String)>,
+    current_calls: BTreeMap<String, (String, String, String, String)>,
     error: Option<String>,
 }
 
@@ -1189,23 +1223,23 @@ impl ResponsesSseParser {
                     && item.get("type").and_then(|value| value.as_str()) == Some("function_call")
                 {
                     match parse_response_function_call_item(item) {
-                        Ok(call) => self.current_call = Some(call),
+                        Ok(call) => {
+                            let key = response_event_call_key(&event)
+                                .unwrap_or_else(|| response_call_key(item, &call));
+                            self.current_calls.insert(key, call);
+                        }
                         Err(error) => self.error = Some(error.to_string()),
                     }
                 }
             }
             Some("response.function_call_arguments.delta") => {
-                if let Some((_, _, _, args)) = &mut self.current_call
-                    && let Some(delta) = event.get("delta").and_then(|value| value.as_str())
-                {
-                    args.push_str(delta);
+                if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
+                    self.update_current_call_args(&event, |args| args.push_str(delta));
                 }
             }
             Some("response.function_call_arguments.done") => {
-                if let Some((_, _, _, args)) = &mut self.current_call
-                    && let Some(done) = event.get("arguments").and_then(|value| value.as_str())
-                {
-                    *args = done.to_string();
+                if let Some(done) = event.get("arguments").and_then(|value| value.as_str()) {
+                    self.update_current_call_args(&event, |args| *args = done.to_string());
                 }
             }
             Some("response.output_item.done") => {
@@ -1220,8 +1254,10 @@ impl ResponsesSseParser {
                     if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
                         match parse_response_function_call_item(item) {
                             Ok(call) => {
+                                let key = response_event_call_key(&event)
+                                    .unwrap_or_else(|| response_call_key(item, &call));
+                                self.current_calls.remove(&key);
                                 self.tool_calls.push(call);
-                                self.current_call = None;
                             }
                             Err(error) => self.error = Some(error.to_string()),
                         }
@@ -1246,6 +1282,33 @@ impl ResponsesSseParser {
             && let Some(on_event) = on_event
         {
             on_event(StreamEvent::TextDelta(delta));
+        }
+    }
+
+    fn update_current_call_args(
+        &mut self,
+        event: &serde_json::Value,
+        update: impl FnOnce(&mut String),
+    ) {
+        let Some(key) = response_event_call_key(event) else {
+            if self.current_calls.len() == 1 {
+                if let Some((_, _, _, args)) = self.current_calls.values_mut().next() {
+                    update(args);
+                }
+            } else if !self.current_calls.is_empty() {
+                self.error = Some(
+                    "OpenAI Codex function_call arguments event did not identify which parallel call to update"
+                        .to_string(),
+                );
+            }
+            return;
+        };
+        if let Some((_, _, _, args)) = self.current_calls.get_mut(&key) {
+            update(args);
+        } else {
+            self.error = Some(format!(
+                "OpenAI Codex function_call arguments event referenced unknown call `{key}`"
+            ));
         }
     }
 
@@ -1283,9 +1346,9 @@ impl ResponsesSseParser {
                             .iter()
                             .any(|existing| existing.0 == call.0 || existing.1 == call.1)
                         {
-                            self.tool_calls.push(call);
+                            self.tool_calls.push(call.clone());
                         }
-                        self.current_call = None;
+                        self.current_calls.remove(&response_call_key(item, &call));
                     }
                     Err(error) => self.error = Some(error.to_string()),
                 }
@@ -1297,8 +1360,14 @@ impl ResponsesSseParser {
         if let Some(error) = self.error.take() {
             anyhow::bail!(error);
         }
-        if let Some(call) = self.current_call.take() {
-            self.tool_calls.push(call);
+        for (_, call) in self.current_calls {
+            if !self
+                .tool_calls
+                .iter()
+                .any(|existing| existing.0 == call.0 || existing.1 == call.1)
+            {
+                self.tool_calls.push(call);
+            }
         }
 
         let mut content = Vec::new();
@@ -1333,6 +1402,28 @@ impl ResponsesSseParser {
             usage: self.usage,
         })
     }
+}
+
+fn response_call_key(item: &serde_json::Value, call: &(String, String, String, String)) -> String {
+    item.get("id")
+        .and_then(|value| value.as_str())
+        .or_else(|| item.get("item_id").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .unwrap_or_else(|| call.1.clone())
+}
+
+fn response_event_call_key(event: &serde_json::Value) -> Option<String> {
+    event
+        .get("item_id")
+        .and_then(|value| value.as_str())
+        .or_else(|| event.get("id").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .or_else(|| {
+            event
+                .get("output_index")
+                .and_then(|value| value.as_u64())
+                .map(|index| index.to_string())
+        })
 }
 
 fn emit_codex_usage_metrics_if_enabled(event_type: &str, event: &serde_json::Value) {
@@ -1503,6 +1594,97 @@ mod tests {
         assert_eq!(usage.output_tokens, Some(3));
         assert_eq!(usage.total_tokens, Some(13));
         assert_eq!(usage.cache_read_tokens, 4);
+    }
+
+    #[test]
+    fn rejects_empty_chat_response() {
+        let error = chat_response_to_message(None).unwrap_err();
+        assert!(error.to_string().contains("produced no choices"));
+
+        let empty = ChatChoiceMessage {
+            content: Some(String::new()),
+            reasoning_content: None,
+            reasoning: None,
+            tool_calls: None,
+        };
+        let error = chat_response_to_message(Some(empty)).unwrap_err();
+        assert!(error.to_string().contains("produced no message content"));
+    }
+
+    #[test]
+    fn non_streaming_event_emitter_replays_text_and_thinking() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "thought".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ],
+            usage: None,
+        };
+        let mut events = Vec::new();
+        emit_message_stream_events(&message, &mut |event| events.push(event));
+
+        assert!(matches!(
+            &events[0],
+            StreamEvent::ThinkingDelta(text) if text == "thought"
+        ));
+        assert!(matches!(
+            &events[1],
+            StreamEvent::TextDelta(text) if text == "answer"
+        ));
+    }
+
+    #[test]
+    fn extracts_interleaved_codex_function_calls() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"item_id\":\"fc_1\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"item_id\":\"fc_2\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_2\",\"id\":\"fc_2\",\"name\":\"ls\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"{\\\"path\\\":\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"Cargo.toml\\\"}\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"\\\"src\\\"}\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let message = extract_sse_responses_message(sse).unwrap();
+        let calls = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::ToolUse { id, name, input } => Some((id, name, input)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "call_1|fc_1");
+        assert_eq!(calls[0].1, "read");
+        assert_eq!(calls[0].2["path"], "Cargo.toml");
+        assert_eq!(calls[1].0, "call_2|fc_2");
+        assert_eq!(calls[1].1, "ls");
+        assert_eq!(calls[1].2["path"], "src");
+    }
+
+    #[test]
+    fn rejects_ambiguous_parallel_codex_argument_delta() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"item_id\":\"fc_1\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"item_id\":\"fc_2\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_2\",\"id\":\"fc_2\",\"name\":\"ls\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let error = extract_sse_responses_message_result(sse).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not identify which parallel call")
+        );
     }
 
     #[test]
