@@ -618,7 +618,12 @@ pub async fn run_interactive(
                 }
                 if input == "/compact" || input.starts_with("/compact ") {
                     let instructions = input.strip_prefix("/compact ").map(str::trim);
-                    match state.compact(config, instructions, false).await {
+                    let mut abort = ActiveTurnAbort::start(true);
+                    let result = state
+                        .compact(config, instructions, false, Some(abort.token()))
+                        .await;
+                    abort.stop();
+                    match result {
                         Ok(CompactionOutcome::Compacted {
                             before_tokens,
                             after_tokens,
@@ -632,6 +637,7 @@ pub async fn run_interactive(
                         }) => println!(
                             "compaction skipped: {reason} ({before_tokens} -> {after_tokens} estimated tokens)"
                         ),
+                        Err(error) if error.to_string() == "aborted" => println!("aborted"),
                         Err(error) => eprintln!("Error: {error}"),
                     }
                     continue;
@@ -1634,7 +1640,7 @@ impl AgentState {
                 "[session] context {percent}% used ({}/{} estimated tokens); compacting before limit",
                 stats.estimated_tokens, config.max_context_tokens
             );
-            let outcome = self.compact(config, None, true).await?;
+            let outcome = self.compact(config, None, true, None).await?;
             self.last_context_warning_bucket = None;
             match outcome {
                 CompactionOutcome::Compacted {
@@ -1763,7 +1769,7 @@ impl AgentState {
                     eprintln!(
                         "[session] provider reported context overflow; compacting and retrying once"
                     );
-                    let outcome = self.compact(config, None, true).await?;
+                    let outcome = self.compact(config, None, true, None).await?;
                     self.last_context_warning_bucket = None;
                     match outcome {
                         CompactionOutcome::Compacted {
@@ -2534,6 +2540,7 @@ impl AgentState {
         config: &Config,
         custom_instructions: Option<&str>,
         force: bool,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CompactionOutcome> {
         let before_tokens = estimated_tokens_for_messages(&self.messages);
         let (system_messages, conversation): (Vec<_>, Vec<_>) = self
@@ -2563,7 +2570,7 @@ impl AgentState {
         }
 
         let summary = compaction_summary_or_fallback(
-            self.generate_compaction_summary(config, to_summarize, custom_instructions)
+            self.generate_compaction_summary(config, to_summarize, custom_instructions, cancel)
                 .await,
             to_summarize,
             custom_instructions,
@@ -2604,6 +2611,7 @@ impl AgentState {
         config: &Config,
         messages: &[messages::Message],
         custom_instructions: Option<&str>,
+        cancel: Option<Arc<AtomicBool>>,
     ) -> Result<String> {
         let provider = providers::from_config(&config.provider);
         let prompt = compaction_prompt(messages, custom_instructions);
@@ -2614,12 +2622,15 @@ impl AgentState {
             ),
             messages::Message::text(messages::Role::User, prompt),
         ];
+        let mut on_event = |_event: providers::StreamEvent| {};
         let response = provider
-            .complete(
+            .complete_streaming(
                 &config.provider_model,
                 &request_messages,
                 &[],
                 config.thinking,
+                &mut on_event,
+                cancel,
             )
             .await?;
         Ok(response.message.text_content())
@@ -4207,6 +4218,33 @@ mod context_pressure_tests {
     }
 
     #[tokio::test]
+    async fn manual_compaction_summary_honors_precancelled_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 2;
+        let mut state = AgentState::new(&config).unwrap();
+        state
+            .messages
+            .push(messages::Message::text(messages::Role::User, "old message"));
+        state.messages.push(messages::Message::text(
+            messages::Role::Assistant,
+            "old response",
+        ));
+        state.messages.push(messages::Message::text(
+            messages::Role::User,
+            "recent message",
+        ));
+        let cancel = Arc::new(AtomicBool::new(true));
+
+        let error = state
+            .compact(&config, None, true, Some(cancel))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "aborted");
+    }
+
+    #[tokio::test]
     async fn parallel_builtin_batch_marks_precancelled_tools_aborted() {
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().to_path_buf());
@@ -4474,6 +4512,7 @@ fn compaction_summary_or_fallback(
             Ok(local_compaction_summary(messages, custom_instructions))
         }
         Ok(_) => anyhow::bail!("compaction summary was empty"),
+        Err(error) if error.to_string() == "aborted" => Err(error),
         Err(error) if force => {
             eprintln!("[session] model compaction failed: {error}; using local fallback summary");
             Ok(local_compaction_summary(messages, custom_instructions))

@@ -1,4 +1,4 @@
-use super::{Provider, ProviderResponse};
+use super::{Provider, ProviderResponse, StreamEvent};
 use crate::{
     agent::{
         messages::{ContentBlock, Message, Role},
@@ -7,7 +7,14 @@ use crate::{
     config::ThinkingLevel,
 };
 use anyhow::Result;
-use std::{future::Future, pin::Pin};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 pub struct FakeProvider;
 
@@ -35,6 +42,39 @@ impl Provider for FakeProvider {
                 Role::Assistant,
                 format!("fake provider response: {last_user}\n"),
             )))
+        })
+    }
+    fn complete_streaming<'a>(
+        &'a self,
+        model: &'a str,
+        messages: &'a [Message],
+        tools: &'a [ToolDefinition],
+        thinking: ThinkingLevel,
+        on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
+        Box::pin(async move {
+            if cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                anyhow::bail!("aborted");
+            }
+            let response = self.complete(model, messages, tools, thinking).await?;
+            if cancelled
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            {
+                anyhow::bail!("aborted");
+            }
+            for block in &response.message.content {
+                if let ContentBlock::Text { text } = block
+                    && !text.is_empty()
+                {
+                    on_event(StreamEvent::TextDelta(text.clone()));
+                }
+            }
+            Ok(response)
         })
     }
 }
