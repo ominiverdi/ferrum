@@ -512,6 +512,8 @@ pub async fn run_interactive(
     thinking_overridden: bool,
     safety_overridden: bool,
     tools_overridden: bool,
+    provider_overridden: bool,
+    model_overridden: bool,
 ) -> Result<()> {
     let show_resume_tail = session_ref.is_some() || resume.is_some() || continue_latest;
     let mut state = match (session_ref, resume, continue_latest) {
@@ -521,6 +523,8 @@ pub async fn run_interactive(
             !thinking_overridden,
             !safety_overridden,
             !tools_overridden,
+            !provider_overridden,
+            !model_overridden,
         )?,
         (None, Some(Some(reference)), _) => AgentState::resume_ref(
             config,
@@ -528,6 +532,8 @@ pub async fn run_interactive(
             !thinking_overridden,
             !safety_overridden,
             !tools_overridden,
+            !provider_overridden,
+            !model_overridden,
         )?,
         (None, Some(None), _) | (None, None, true) => AgentState::resume_ref(
             config,
@@ -535,6 +541,8 @@ pub async fn run_interactive(
             !thinking_overridden,
             !safety_overridden,
             !tools_overridden,
+            !provider_overridden,
+            !model_overridden,
         )?,
         (None, None, false) => AgentState::new(config)?,
     };
@@ -695,14 +703,16 @@ fn restore_session_preferences(
     restore_thinking: bool,
     restore_safety: bool,
     restore_tools: bool,
+    restore_provider: bool,
+    restore_model: bool,
 ) -> Result<Option<Vec<String>>> {
     let Some(info) = session::jsonl::session_info(path)? else {
         return Ok(None);
     };
-    if let Some(provider) = info.provider.as_deref() {
+    if restore_provider && let Some(provider) = info.provider.as_deref() {
         config.set_provider(provider)?;
     }
-    if let Some(model) = info.model.as_deref() {
+    if restore_model && let Some(model) = info.model.as_deref() {
         config.set_model(model)?;
     }
     if restore_thinking && let Some(thinking) = info.thinking.as_deref() {
@@ -1455,11 +1465,12 @@ impl AgentState {
             ));
         }
         Ok(Self {
-            session: session::JsonlSession::create(
+            session: session::JsonlSession::create_with_color_mode(
                 config.sessions_dir(),
                 Some(config.provider_name.clone()),
                 Some(config.model.clone()),
                 Some(config.thinking.as_str().to_string()),
+                Some(config.color_mode.as_str().to_string()),
                 Some(config.diff_mode.as_str().to_string()),
                 Some(config.safety.as_str().to_string()),
                 None,
@@ -1487,6 +1498,8 @@ impl AgentState {
         restore_thinking: bool,
         restore_safety: bool,
         restore_tools: bool,
+        restore_provider: bool,
+        restore_model: bool,
     ) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let path = match reference {
@@ -1510,6 +1523,8 @@ impl AgentState {
             restore_thinking,
             restore_safety,
             restore_tools,
+            restore_provider,
+            restore_model,
         )?;
         Self::open_session(config, path)
     }
@@ -1523,13 +1538,15 @@ impl AgentState {
             Some(config.provider_name.clone()),
             Some(config.model.clone()),
             Some(config.thinking.as_str().to_string()),
+            Some(config.color_mode.as_str().to_string()),
             Some(config.diff_mode.as_str().to_string()),
             Some(config.safety.as_str().to_string()),
             None,
         )?;
         match resolution {
             session::jsonl::SessionRefResolution::Existing(path) => {
-                let _restored_tools = restore_session_preferences(config, &path, true, true, true)?;
+                let _restored_tools =
+                    restore_session_preferences(config, &path, true, true, true, true, true)?;
                 let state = Self::open_session(config, path.clone())?;
                 println!(
                     "resumed {} ({} messages)",
@@ -2357,7 +2374,8 @@ impl AgentState {
             return Ok(());
         }
         self.remove_empty_session()?;
-        let _restored_tools = restore_session_preferences(config, &path, true, true, true)?;
+        let _restored_tools =
+            restore_session_preferences(config, &path, true, true, true, true, true)?;
         let next = Self::open_session(config, path)?;
         *self = next;
         print_current_session_header(self)?;
@@ -3737,7 +3755,8 @@ mod context_pressure_tests {
         drop(session);
         let mut config = test_config(temp.path().to_path_buf());
 
-        let restored = restore_session_preferences(&mut config, &path, true, true, true).unwrap();
+        let restored =
+            restore_session_preferences(&mut config, &path, true, true, true, true, true).unwrap();
         let tools = resolve_available_tools(builtin_tools::definitions(), &config).unwrap();
         let names = tools
             .iter()
@@ -4043,6 +4062,32 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn restore_session_preferences_respects_provider_model_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = session::JsonlSession::create(
+            temp.path().to_path_buf(),
+            Some("fake".to_string()),
+            Some("session-model".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let path = session.path().clone();
+        drop(session);
+        let mut config = test_config(temp.path().to_path_buf());
+        config.model = "cli-model".to_string();
+        config.provider_model = "cli-model".to_string();
+
+        restore_session_preferences(&mut config, &path, true, true, true, false, false).unwrap();
+
+        assert_eq!(config.provider_name, "fake");
+        assert_eq!(config.model, "cli-model");
+        assert_eq!(config.provider_model, "cli-model");
+    }
+
+    #[test]
     fn runtime_context_uses_config_system_md_when_present() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -4062,7 +4107,8 @@ mod context_pressure_tests {
         let cwd = std::env::current_dir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
 
-        let state = AgentState::resume_ref(&mut config, None, true, true, true).unwrap();
+        let state =
+            AgentState::resume_ref(&mut config, None, true, true, true, true, true).unwrap();
 
         assert_eq!(state.cwd, cwd);
         assert!(state.session.path().exists());
@@ -5041,6 +5087,7 @@ fn handle_command(
         "/model" => {
             if let Some(model) = parts.next() {
                 config.set_model(model)?;
+                state.session.append_provider(&config.provider_name)?;
                 state.session.append_model(&config.model)?;
             }
             println!("model: {}", config.model);

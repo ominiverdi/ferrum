@@ -82,6 +82,8 @@ async fn main() -> Result<()> {
         args.thinking.is_some(),
         args.safety.is_some(),
         tools_overridden,
+        args.provider.is_some(),
+        args.model.is_some(),
     )
     .await
 }

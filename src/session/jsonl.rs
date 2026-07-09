@@ -28,6 +28,8 @@ pub enum SessionEntry {
         provider: Option<String>,
         model: Option<String>,
         thinking: Option<String>,
+        #[serde(default)]
+        color_mode: Option<String>,
         diff_mode: Option<String>,
         safety: Option<String>,
         tools: Option<Vec<String>>,
@@ -70,6 +72,22 @@ impl JsonlSession {
         safety: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
+        Self::create_with_color_mode(
+            dir, provider, model, thinking, None, diff_mode, safety, tools,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_color_mode(
+        dir: PathBuf,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+        color_mode: Option<String>,
+        diff_mode: Option<String>,
+        safety: Option<String>,
+        tools: Option<Vec<String>>,
+    ) -> Result<Self> {
         Self::create_with_header_id(
             dir,
             format!("{}.jsonl", now_ms()),
@@ -77,6 +95,7 @@ impl JsonlSession {
             provider,
             model,
             thinking,
+            color_mode,
             diff_mode,
             safety,
             tools,
@@ -94,6 +113,23 @@ impl JsonlSession {
         safety: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
+        Self::create_named_with_color_mode(
+            dir, id, provider, model, thinking, None, diff_mode, safety, tools,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_named_with_color_mode(
+        dir: PathBuf,
+        id: &str,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+        color_mode: Option<String>,
+        diff_mode: Option<String>,
+        safety: Option<String>,
+        tools: Option<Vec<String>>,
+    ) -> Result<Self> {
         validate_user_session_id(id)?;
         Self::create_with_header_id(
             dir,
@@ -102,6 +138,7 @@ impl JsonlSession {
             provider,
             model,
             thinking,
+            color_mode,
             diff_mode,
             safety,
             tools,
@@ -116,6 +153,7 @@ impl JsonlSession {
         provider: Option<String>,
         model: Option<String>,
         thinking: Option<String>,
+        color_mode: Option<String>,
         diff_mode: Option<String>,
         safety: Option<String>,
         tools: Option<Vec<String>>,
@@ -138,6 +176,7 @@ impl JsonlSession {
             provider,
             model,
             thinking,
+            color_mode,
             diff_mode,
             safety,
             tools,
@@ -717,6 +756,7 @@ pub fn resolve_or_create_session_ref(
     provider: Option<String>,
     model: Option<String>,
     thinking: Option<String>,
+    color_mode: Option<String>,
     diff_mode: Option<String>,
     safety: Option<String>,
     tools: Option<Vec<String>>,
@@ -728,12 +768,13 @@ pub fn resolve_or_create_session_ref(
             if path.exists() {
                 return Ok(SessionRefResolution::Existing(path));
             }
-            JsonlSession::create_named(
+            JsonlSession::create_named_with_color_mode(
                 dir.to_path_buf(),
                 reference,
                 provider,
                 model,
                 thinking,
+                color_mode,
                 diff_mode,
                 safety,
                 tools,
@@ -784,6 +825,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 provider: header_provider,
                 model: header_model,
                 thinking: header_thinking,
+                color_mode: header_color_mode,
                 diff_mode: header_diff_mode,
                 safety: header_safety,
                 tools: header_tools,
@@ -796,6 +838,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 provider = header_provider;
                 model = header_model;
                 explicit_thinking = header_thinking;
+                explicit_color_mode = header_color_mode;
                 explicit_diff_mode = header_diff_mode;
                 explicit_safety = header_safety;
                 explicit_tools = header_tools;
@@ -1037,6 +1080,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         match path {
@@ -1051,6 +1095,7 @@ mod tests {
             temp.path(),
             &cwd,
             "named-session",
+            None,
             None,
             None,
             None,
@@ -1388,6 +1433,24 @@ mod tests {
         session.append_thinking("off").unwrap();
         let info = session_info(session.path()).unwrap().unwrap();
         assert_eq!(info.thinking.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn stores_initial_color_mode_in_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create_with_color_mode(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            Some("off".to_string()),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.color_mode.as_deref(), Some("off"));
     }
 
     #[test]
