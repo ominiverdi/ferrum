@@ -128,7 +128,22 @@ impl Message {
 }
 
 pub fn sanitize_thinking_text(text: &str) -> String {
-    text.replace("<!-- -->", "")
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let Some(start) = rest.find("<!--") else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(&rest[..start]);
+        let after_start = &rest[start + "<!--".len()..];
+        let Some(end) = after_start.find("-->") else {
+            output.push_str(&rest[start..]);
+            break;
+        };
+        rest = &after_start[end + "-->".len()..];
+    }
+    output
 }
 
 pub fn image_from_data_uri(data_uri: &str) -> Result<ContentBlock> {
@@ -296,7 +311,7 @@ mod tests {
     #[test]
     fn sanitizes_provider_thinking_separator_comments() {
         assert_eq!(
-            sanitize_thinking_text("**Switching** <!-- -->"),
+            sanitize_thinking_text("**Switching** <!-- separator -->"),
             "**Switching** "
         );
     }

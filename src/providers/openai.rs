@@ -1150,6 +1150,7 @@ struct ResponsesSseParser {
     usage: Option<TokenUsage>,
     tool_calls: Vec<(String, String, String, String)>,
     current_calls: BTreeMap<String, (String, String, String, String)>,
+    pending_call_args: BTreeMap<String, String>,
     error: Option<String>,
 }
 
@@ -1215,10 +1216,13 @@ impl ResponsesSseParser {
                 if let Some(item) = event.get("item")
                     && item.get("type").and_then(|value| value.as_str()) == Some("function_call")
                 {
-                    match parse_response_function_call_item(item) {
-                        Ok(call) => {
+                    match parse_response_function_call_added_item(item) {
+                        Ok(mut call) => {
                             let key = response_event_call_key(&event)
                                 .unwrap_or_else(|| response_call_key(item, &call));
+                            if let Some(args) = self.pending_call_args.remove(&key) {
+                                call.3.push_str(&args);
+                            }
                             self.current_calls.insert(key, call);
                         }
                         Err(error) => self.error = Some(error.to_string()),
@@ -1267,12 +1271,12 @@ impl ResponsesSseParser {
         on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     ) {
         let text = sanitize_thinking_text(text);
-        if text.is_empty() {
+        let delta = self.merge_thinking_text(&text);
+        if delta.is_empty() {
             return;
         }
-        self.thinking.push_str(&text);
         if let Some(on_event) = on_event.as_deref_mut() {
-            on_event(StreamEvent::ThinkingDelta(text));
+            on_event(StreamEvent::ThinkingDelta(delta));
         }
     }
 
@@ -1282,19 +1286,36 @@ impl ResponsesSseParser {
         on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     ) {
         let text = sanitize_thinking_text(text);
-        if text.is_empty() || self.thinking == text {
-            return;
-        }
-        let delta = text
-            .strip_prefix(&self.thinking)
-            .unwrap_or(&text)
-            .to_string();
-        self.thinking = text;
+        let delta = self.merge_thinking_text(&text);
         if !delta.is_empty()
             && let Some(on_event) = on_event.as_deref_mut()
         {
             on_event(StreamEvent::ThinkingDelta(delta));
         }
+    }
+
+    fn merge_thinking_text(&mut self, incoming: &str) -> String {
+        if incoming.is_empty() {
+            return String::new();
+        }
+        let current = self.thinking.as_str();
+        if current == incoming || current.trim() == incoming.trim() {
+            self.thinking = incoming.to_string();
+            return String::new();
+        }
+        if current.ends_with(incoming) || current.trim_end().ends_with(incoming.trim()) {
+            return String::new();
+        }
+        if let Some(delta) = incoming.strip_prefix(current) {
+            self.thinking.push_str(delta);
+            return delta.to_string();
+        }
+        if let Some(delta) = incoming.trim_start().strip_prefix(current.trim_start()) {
+            self.thinking = incoming.to_string();
+            return delta.to_string();
+        }
+        self.thinking.push_str(incoming);
+        incoming.to_string()
     }
 
     fn append_completed_output(
@@ -1335,9 +1356,8 @@ impl ResponsesSseParser {
         if let Some((_, _, _, args)) = self.current_calls.get_mut(&key) {
             update(args);
         } else {
-            self.error = Some(format!(
-                "OpenAI Codex function_call arguments event referenced unknown call `{key}`"
-            ));
+            let args = self.pending_call_args.entry(key).or_default();
+            update(args);
         }
     }
 
@@ -1445,7 +1465,19 @@ fn response_event_call_key(event: &serde_json::Value) -> Option<String> {
     event
         .get("item_id")
         .and_then(|value| value.as_str())
-        .or_else(|| event.get("id").and_then(|value| value.as_str()))
+        .or_else(|| {
+            event
+                .get("item")
+                .and_then(|item| item.get("id"))
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| event.get("call_id").and_then(|value| value.as_str()))
+        .or_else(|| {
+            event
+                .get("item")
+                .and_then(|item| item.get("call_id"))
+                .and_then(|value| value.as_str())
+        })
         .map(str::to_string)
         .or_else(|| {
             event
@@ -1513,6 +1545,20 @@ fn extract_sse_responses_message_result(text: &str) -> Result<Message> {
 
 fn extract_sse_responses_message(text: &str) -> Option<Message> {
     extract_sse_responses_message_result(text).ok()
+}
+
+fn parse_response_function_call_added_item(
+    item: &serde_json::Value,
+) -> Result<(String, String, String, String)> {
+    let call_id = required_non_empty_string(item, "call_id")?.to_string();
+    let item_id = required_non_empty_string(item, "id")?.to_string();
+    let name = required_non_empty_string(item, "name")?.to_string();
+    let arguments = item
+        .get("arguments")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Ok((call_id, item_id, name, arguments))
 }
 
 fn parse_response_function_call_item(
@@ -1698,6 +1744,29 @@ mod tests {
         assert_eq!(calls[1].0, "call_2|fc_2");
         assert_eq!(calls[1].1, "ls");
         assert_eq!(calls[1].2["path"], "src");
+    }
+
+    #[test]
+    fn accepts_codex_argument_delta_before_call_item() {
+        let sse = concat!(
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\"}\n\n",
+            "data: {\"type\":\"response.output_item.added\",\"item_id\":\"fc_1\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"Cargo.toml\\\"}\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let message = extract_sse_responses_message(sse).unwrap();
+        let Some(ContentBlock::ToolUse { id, name, input }) = message
+            .content
+            .iter()
+            .find(|block| matches!(block, ContentBlock::ToolUse { .. }))
+        else {
+            panic!("missing tool call");
+        };
+
+        assert_eq!(id, "call_1|fc_1");
+        assert_eq!(name, "read");
+        assert_eq!(input["path"], "Cargo.toml");
     }
 
     #[test]
@@ -1896,6 +1965,90 @@ mod tests {
             message
                 .thinking_text()
                 .matches("Switching to fixed directory usage")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_summary_cumulative_deltas_do_not_duplicate() {
+        let sse = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Planning response verification approach**\\n\\n<!-- -->\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Planning response verification approach**\\n\\n<!-- -->**Checking Ferrum version post-restart**\\n\\n<!-- -->\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut events = Vec::new();
+        let mut parser = ResponsesSseParser::default();
+        for line in sse.lines() {
+            parser.process_line(line, Some(&mut |event| events.push(event)));
+        }
+        let message = parser.finish().unwrap().message;
+        let thinking = message.thinking_text();
+        let rendered = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ThinkingDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+
+        assert_eq!(
+            thinking
+                .matches("Planning response verification approach")
+                .count(),
+            1
+        );
+        assert_eq!(
+            thinking
+                .matches("Checking Ferrum version post-restart")
+                .count(),
+            1
+        );
+        assert!(!thinking.contains("<!--"));
+        assert_eq!(
+            rendered
+                .matches("Planning response verification approach")
+                .count(),
+            1
+        );
+        assert_eq!(
+            rendered
+                .matches("Checking Ferrum version post-restart")
+                .count(),
+            1
+        );
+        assert!(!rendered.contains("<!--"));
+    }
+
+    #[test]
+    fn codex_reasoning_summary_done_does_not_duplicate_trim_equivalent_delta() {
+        let sse = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Planning response verification approach**\\n\\n<!-- -->\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"**Planning response verification approach**\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut events = Vec::new();
+        let mut parser = ResponsesSseParser::default();
+        for line in sse.lines() {
+            parser.process_line(line, Some(&mut |event| events.push(event)));
+        }
+        let message = parser.finish().unwrap().message;
+
+        assert_eq!(
+            message.thinking_text().trim(),
+            "**Planning response verification approach**"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    StreamEvent::ThinkingDelta(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+                .matches("Planning response verification approach")
                 .count(),
             1
         );
