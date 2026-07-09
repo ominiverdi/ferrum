@@ -3995,6 +3995,52 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn image_blocks_have_pessimistic_context_cost() {
+        let image = messages::Message {
+            role: messages::Role::User,
+            content: vec![messages::ContentBlock::Image {
+                mime_type: "image/png".to_string(),
+                data_base64: "A".repeat(4 * 1024 * 1024),
+                sha256: "hash".to_string(),
+                source: "test".to_string(),
+            }],
+            usage: None,
+        };
+
+        assert!(estimated_tokens_for_message(&image) > IMAGE_BASE_TOKEN_ESTIMATE);
+        assert!(estimated_tokens_for_message(&image) > 10_000);
+    }
+
+    #[test]
+    fn large_image_turn_triggers_context_pressure_before_provider_rejects() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        state.messages.push(messages::Message {
+            role: messages::Role::User,
+            content: vec![
+                messages::ContentBlock::Text {
+                    text: "analyze this".to_string(),
+                },
+                messages::ContentBlock::Image {
+                    mime_type: "image/png".to_string(),
+                    data_base64: "A".repeat(4 * 1024 * 1024),
+                    sha256: "hash".to_string(),
+                    source: "test".to_string(),
+                },
+            ],
+            usage: None,
+        });
+
+        let stats = state.stats();
+
+        assert!(should_auto_compact(
+            stats.estimated_tokens,
+            config.max_context_tokens
+        ));
+    }
+
+    #[test]
     fn loaded_compaction_summary_is_context_boundary() {
         let messages = vec![
             assistant_with_usage(237_351),
@@ -4580,11 +4626,44 @@ fn message_is_compaction_summary(message: &messages::Message) -> bool {
         })
 }
 
+const IMAGE_BASE_TOKEN_ESTIMATE: usize = 1_200;
+const IMAGE_BYTES_PER_TOKEN_ESTIMATE: usize = 512;
+const IMAGE_MEGABYTE_TOKEN_ESTIMATE: usize = 1_000;
+
 fn estimated_tokens_for_message(message: &messages::Message) -> usize {
-    message_text_for_compaction(message)
-        .chars()
-        .count()
-        .div_ceil(4)
+    message
+        .content
+        .iter()
+        .map(estimated_tokens_for_content_block)
+        .sum::<usize>()
+}
+
+fn estimated_tokens_for_content_block(block: &messages::ContentBlock) -> usize {
+    match block {
+        messages::ContentBlock::Text { text } | messages::ContentBlock::Thinking { text, .. } => {
+            text.chars().count().div_ceil(4)
+        }
+        messages::ContentBlock::ToolUse { name, input, .. } => name
+            .chars()
+            .count()
+            .saturating_add(input.to_string().chars().count())
+            .div_ceil(4),
+        messages::ContentBlock::ToolResult { content, .. } => content.chars().count().div_ceil(4),
+        messages::ContentBlock::Image { data_base64, .. } => {
+            estimated_tokens_for_image(data_base64)
+        }
+    }
+}
+
+fn estimated_tokens_for_image(data_base64: &str) -> usize {
+    let approx_bytes = data_base64.len().saturating_mul(3) / 4;
+    let size_tokens = approx_bytes.div_ceil(IMAGE_BYTES_PER_TOKEN_ESTIMATE);
+    let megabyte_tokens = approx_bytes
+        .div_ceil(1024 * 1024)
+        .saturating_mul(IMAGE_MEGABYTE_TOKEN_ESTIMATE);
+    IMAGE_BASE_TOKEN_ESTIMATE
+        .saturating_add(size_tokens)
+        .saturating_add(megabyte_tokens)
 }
 
 fn compaction_prompt(messages: &[messages::Message], custom_instructions: Option<&str>) -> String {
