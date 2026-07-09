@@ -605,7 +605,14 @@ pub async fn run_interactive(
                 }
                 if input == "/models" {
                     match providers::list_models(&config.provider).await {
-                        Ok(providers::ModelList::Live { source, models }) => {
+                        Ok(providers::ModelList::Live {
+                            source,
+                            models,
+                            notices,
+                        }) => {
+                            for notice in notices {
+                                println!("{notice}");
+                            }
                             println!("models from {source}:");
                             for model in models {
                                 let marker = if model == config.model { "*" } else { " " };
@@ -2128,13 +2135,27 @@ impl AgentState {
             .all(|(_, name, _)| self.is_parallel_safe_builtin_tool(name));
         let color_mode = self.color_mode;
         if can_parallelize && tool_uses.len() > 1 {
+            for (_, name, input) in &tool_uses {
+                eprintln!();
+                render_tool_call(name, input, self.diff_mode, color_mode, &self.colors);
+            }
             let mut abort = ActiveTurnAbort::start(interactive);
             let cancel = Some(abort.token());
-            let results = self
-                .execute_parallel_builtin_tools(tool_uses, color_mode, self.colors.clone(), cancel)
-                .await;
+            let results = self.run_parallel_builtin_tools(tool_uses, cancel).await;
             abort.stop();
-            return results;
+            let mut executed = Vec::new();
+            for result in results {
+                render_tool_result(
+                    &result.name,
+                    &result.content,
+                    result.is_error,
+                    color_mode,
+                    &self.colors,
+                );
+                emit_tool_metrics_if_enabled(&result);
+                executed.push(result);
+            }
+            return executed;
         }
         self.execute_sequential_tools(tool_uses, color_mode, self.colors.clone(), interactive)
             .await
@@ -2147,18 +2168,11 @@ impl AgentState {
         matches!(name, "read" | "ls" | "grep" | "find")
     }
 
-    async fn execute_parallel_builtin_tools(
+    async fn run_parallel_builtin_tools(
         &self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
-        color_mode: ColorMode,
-        colors: ColorPalette,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Vec<ExecutedToolUse> {
-        for (_, name, input) in &tool_uses {
-            eprintln!();
-            render_tool_call(name, input, self.diff_mode, color_mode, &colors);
-        }
-
         let cwd = self.cwd.clone();
         let active_tool_names = self.active_tool_names.clone();
         let safety = self.safety;
@@ -2230,19 +2244,7 @@ impl AgentState {
             }
         }
         results.sort_by_key(|(index, _)| *index);
-        let mut executed = Vec::new();
-        for (_, result) in results {
-            render_tool_result(
-                &result.name,
-                &result.content,
-                result.is_error,
-                color_mode,
-                &colors,
-            );
-            emit_tool_metrics_if_enabled(&result);
-            executed.push(result);
-        }
-        executed
+        results.into_iter().map(|(_, result)| result).collect()
     }
 
     async fn execute_sequential_tools(
@@ -4440,12 +4442,7 @@ mod context_pressure_tests {
         ];
 
         let results = state
-            .execute_parallel_builtin_tools(
-                tool_uses,
-                ColorMode::Auto,
-                ColorPalette::default(),
-                Some(cancel),
-            )
+            .run_parallel_builtin_tools(tool_uses, Some(cancel))
             .await;
 
         assert_eq!(results.len(), 2);

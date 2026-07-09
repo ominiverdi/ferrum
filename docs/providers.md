@@ -41,10 +41,10 @@ default_model = "gpt-5.5"
 GET https://chatgpt.com/backend-api/codex/models?client_version=<version>
 ```
 
-The compatibility version defaults to the current tested Codex CLI version and can be overridden:
+Ferrum queries the latest stable Codex CLI release for each `/models` command and uses that version for model discovery. If the release lookup or model request fails, it falls back to the current tested Codex CLI version. Set `FERRUM_CODEX_CLIENT_VERSION` to bypass release discovery and force a specific compatibility version:
 
 ```bash
-export FERRUM_CODEX_CLIENT_VERSION=0.135.0
+export FERRUM_CODEX_CLIENT_VERSION=0.144.0
 ```
 
 You can override the base URL with:

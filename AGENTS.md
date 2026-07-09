@@ -37,6 +37,23 @@ Ferrum is a new project, not a compatibility port.
   git push github main vX.Y.Z
   ```
 - Create the Codeberg release locally with `tea` and upload locally built assets. This is the primary and preferred release path.
+- For tagged Linux releases, always build release assets with:
+  ```bash
+  cargo build --release
+  scripts/package-linux.sh vX.Y.Z
+  ```
+- Upload all generated `dist/` release assets to Codeberg:
+  - `ferrum-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+  - `ferrum-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz.sha256`
+  - `ferrum_X.Y.Z_amd64.deb`
+  - `ferrum_X.Y.Z_amd64.deb.sha256`
+  - `ferrum-X.Y.Z-1.x86_64.rpm`
+  - `ferrum-X.Y.Z-1.x86_64.rpm.sha256`
+- Verify uploaded release assets with:
+  ```bash
+  tea releases assets ls vX.Y.Z --repo ominiverdi/ferrum --login codeberg.org
+  ```
+- Do not manually package only the tarball unless the user explicitly approves a degraded release.
 - GitHub tag push may still trigger mirror release automation if configured, but Codeberg is the primary release host.
 
 ## Codeberg collaboration
