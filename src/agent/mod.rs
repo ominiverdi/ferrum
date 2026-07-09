@@ -1039,10 +1039,6 @@ impl LiveRenderState {
         io::stdout().flush()?;
         Ok(())
     }
-
-    fn started(&self) -> bool {
-        self.thinking_started || self.text_started
-    }
 }
 
 fn print_raw_mode_text_styled(
@@ -1821,7 +1817,7 @@ impl AgentState {
             if interactive {
                 live_render.finish()?;
             }
-            if !interactive || !live_render.started() {
+            if !interactive || !live_render.text_started {
                 render_assistant_response(&response, interactive, self.color_mode, &self.colors)?;
             }
             self.session.append_message(&response)?;
@@ -1948,7 +1944,7 @@ impl AgentState {
                     if interactive {
                         live_render.finish()?;
                     }
-                    break (response, live_render.started());
+                    break (response, live_render.text_started);
                 }
                 Err(error) if error.to_string() == "aborted" => {
                     println!("aborted");
@@ -1985,7 +1981,8 @@ impl AgentState {
                 Err(error) => return Err(error),
             }
         };
-        let (final_response, final_was_rendered_live) = final_response;
+        let (final_response, final_text_was_rendered_live) = final_response;
+
         let provider_usage = final_response.usage;
         let mut final_response = final_response.message;
         let token_usage = usage_for_response(
@@ -2011,7 +2008,7 @@ impl AgentState {
                 source: token_usage.source.clone(),
             },
         );
-        if !interactive || !final_was_rendered_live {
+        if !interactive || !final_text_was_rendered_live {
             render_assistant_response(&final_response, interactive, self.color_mode, &self.colors)?;
         }
         self.session.append_message(&final_response)?;
@@ -3996,15 +3993,6 @@ mod context_pressure_tests {
             context_tokens_from_usage(&messages),
             Some(12_000 + trailing)
         );
-    }
-
-    #[test]
-    fn live_render_counts_thinking_as_rendered_content() {
-        let mut render = LiveRenderState::new(ColorMode::Off, ColorPalette::default());
-        render.thinking_started = true;
-
-        assert!(render.started());
-        assert!(!render.text_started);
     }
 
     #[test]
