@@ -428,6 +428,20 @@ impl Config {
     }
 
     pub fn set_provider(&mut self, provider: &str) -> Result<()> {
+        let mut visited_providers = BTreeSet::new();
+        let mut visited_models = BTreeSet::new();
+        self.set_provider_inner(provider, &mut visited_providers, &mut visited_models)
+    }
+
+    fn set_provider_inner(
+        &mut self,
+        provider: &str,
+        visited_providers: &mut BTreeSet<String>,
+        visited_models: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if !visited_providers.insert(provider.to_string()) {
+            anyhow::bail!("provider/model configuration cycle involving provider `{provider}`");
+        }
         if self.offline && provider != "fake" {
             anyhow::bail!("cannot override provider to {provider} while FERRUM_OFFLINE is set");
         }
@@ -438,22 +452,36 @@ impl Config {
             .get(provider)
             .and_then(|definition| definition.default_model.clone())
         {
-            self.apply_model_name(default_model)?;
+            self.apply_model_name_inner(default_model, visited_providers, visited_models)?;
         }
         Ok(())
     }
 
     pub fn set_model(&mut self, model: &str) -> Result<()> {
-        self.apply_model_name(model.to_string())
+        let mut visited_providers = BTreeSet::new();
+        let mut visited_models = BTreeSet::new();
+        self.apply_model_name_inner(
+            model.to_string(),
+            &mut visited_providers,
+            &mut visited_models,
+        )
     }
 
-    fn apply_model_name(&mut self, model: String) -> Result<()> {
+    fn apply_model_name_inner(
+        &mut self,
+        model: String,
+        visited_providers: &mut BTreeSet<String>,
+        visited_models: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if !visited_models.insert(model.clone()) {
+            anyhow::bail!("provider/model configuration cycle involving model `{model}`");
+        }
         if let Some(model_provider) = self
             .models
             .get(&model)
             .and_then(|definition| definition.provider.clone())
         {
-            self.set_provider(&model_provider)?;
+            self.set_provider_inner(&model_provider, visited_providers, visited_models)?;
         }
         self.provider_model = provider_model_for(&model, &self.models);
         self.max_context_tokens = self
@@ -860,6 +888,60 @@ max_context_tokens = 100000
         assert_eq!(config.model, "mini");
         assert_eq!(config.provider_model, "MiniMax-M2");
         assert_eq!(config.max_context_tokens, 100000);
+    }
+
+    #[test]
+    fn provider_default_model_self_cycle_errors() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "fake"
+
+[providers.loop]
+type = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+default_model = "loop-model"
+
+[models.loop-model]
+provider = "loop"
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let error = config.set_provider("loop").unwrap_err();
+        assert!(error.to_string().contains("configuration cycle"));
+    }
+
+    #[test]
+    fn provider_model_cross_cycle_errors() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "fake"
+
+[providers.a]
+type = "openai-compatible"
+base_url = "http://localhost:8080/v1"
+default_model = "model-b"
+
+[providers.b]
+type = "openai-compatible"
+base_url = "http://localhost:8081/v1"
+default_model = "model-a"
+
+[models.model-a]
+provider = "a"
+
+[models.model-b]
+provider = "b"
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let error = config.set_provider("a").unwrap_err();
+        assert!(error.to_string().contains("configuration cycle"));
     }
 
     #[test]

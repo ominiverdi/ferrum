@@ -63,6 +63,7 @@ pub enum SessionEntry {
 }
 
 impl JsonlSession {
+    #[allow(dead_code)]
     pub fn create(
         dir: PathBuf,
         provider: Option<String>,
@@ -102,6 +103,7 @@ impl JsonlSession {
         )
     }
 
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub fn create_named(
         dir: PathBuf,
