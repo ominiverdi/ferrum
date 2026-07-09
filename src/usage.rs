@@ -21,7 +21,12 @@ pub struct UsageRecord {
     pub cache_read_tokens: u64,
     #[serde(default)]
     pub cache_write_tokens: u64,
+    #[serde(default = "default_usage_source")]
     pub source: String,
+}
+
+fn default_usage_source() -> String {
+    "unknown".to_string()
 }
 
 impl UsageRecord {
@@ -75,6 +80,7 @@ pub struct UsageSummary {
     pub requests: u64,
     pub provider_records: u64,
     pub estimated_records: u64,
+    pub unknown_records: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
@@ -127,6 +133,8 @@ pub fn summarize_usage(
             summary.provider_records = summary.provider_records.saturating_add(1);
         } else if record.source == "estimated" {
             summary.estimated_records = summary.estimated_records.saturating_add(1);
+        } else {
+            summary.unknown_records = summary.unknown_records.saturating_add(1);
         }
         summary.input_tokens = summary
             .input_tokens
@@ -167,8 +175,12 @@ fn read_usage_records(data_dir: &Path) -> Result<Vec<UsageRecord>> {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(record) = serde_json::from_str::<UsageRecord>(&line) {
-            records.push(record);
+        match serde_json::from_str::<UsageRecord>(&line) {
+            Ok(record) => records.push(record),
+            Err(error) => eprintln!(
+                "[usage] skipped malformed usage record in {}: {error}",
+                path.display()
+            ),
         }
     }
     Ok(records)
@@ -276,6 +288,25 @@ mod tests {
         assert_eq!(rows[0].summary.requests, 1);
         assert_eq!(rows[0].summary.estimated_records, 0);
         assert_eq!(rows[0].summary.provider_records, 0);
+        assert_eq!(rows[0].summary.unknown_records, 1);
         assert_eq!(rows[0].summary.total_tokens, 14);
+    }
+
+    #[test]
+    fn usage_jsonl_record_without_source_is_counted_as_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("usage.jsonl"),
+            r#"{"timestamp_unix":100,"provider":"p","model":"m","input_tokens":1,"output_tokens":2,"total_tokens":3}
+"#,
+        )
+        .unwrap();
+
+        let rows = summarize_usage(temp.path(), UsagePeriod::Day, 100).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].summary.requests, 1);
+        assert_eq!(rows[0].summary.unknown_records, 1);
+        assert_eq!(rows[0].summary.total_tokens, 3);
     }
 }

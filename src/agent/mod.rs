@@ -843,6 +843,16 @@ fn emit_model_metrics_end(request: usize, duration: Duration, response: &message
     );
 }
 
+static USAGE_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
+
+fn append_usage_record_with_warning(data_dir: &Path, record: &usage::UsageRecord) {
+    if let Err(error) = usage::append_usage_record(data_dir, record)
+        && !USAGE_WARNING_PRINTED.swap(true, Ordering::Relaxed)
+    {
+        eprintln!("[usage] failed to persist usage: {error}");
+    }
+}
+
 fn usage_for_response(
     provider_usage: Option<messages::TokenUsage>,
     request_messages: &[messages::Message],
@@ -1780,7 +1790,7 @@ impl AgentState {
             if response.usage.is_none() {
                 response.usage = Some(token_usage.clone());
             }
-            let _ = usage::append_usage_record(
+            append_usage_record_with_warning(
                 &config.data_dir,
                 &usage::UsageRecord {
                     timestamp_unix: usage::now_unix(),
@@ -1905,7 +1915,7 @@ impl AgentState {
         if final_response.usage.is_none() {
             final_response.usage = Some(token_usage.clone());
         }
-        let _ = usage::append_usage_record(
+        append_usage_record_with_warning(
             &config.data_dir,
             &usage::UsageRecord {
                 timestamp_unix: usage::now_unix(),
@@ -3209,17 +3219,19 @@ fn print_usage_summary(period: usage::UsagePeriod, rows: &[usage::UsageSummaryRo
         return;
     }
     println!(
-        "{:<32} {:>4} {:>7} {:>10} {:>10} {:>8} {:>10}",
-        "provider/model", "req", "exact/est", "input", "output", "cached", "total"
+        "{:<32} {:>4} {:>9} {:>10} {:>10} {:>8} {:>10}",
+        "provider/model", "req", "exact/est/?", "input", "output", "cached", "total"
     );
     for row in rows {
         println!(
-            "{:<32} {:>4} {:>7} {:>10} {:>10} {:>8} {:>10}",
+            "{:<32} {:>4} {:>9} {:>10} {:>10} {:>8} {:>10}",
             truncate_chars(&format!("{}/{}", row.provider, row.model), 32),
             row.summary.requests,
             format!(
-                "{}/{}",
-                row.summary.provider_records, row.summary.estimated_records
+                "{}/{}/{}",
+                row.summary.provider_records,
+                row.summary.estimated_records,
+                row.summary.unknown_records
             ),
             format_token_count(row.summary.input_tokens),
             format_token_count(row.summary.output_tokens),

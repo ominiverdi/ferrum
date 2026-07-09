@@ -398,14 +398,22 @@ pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let reader = BufReader::new(file);
     let mut messages = Vec::new();
-    for line in reader.lines() {
+    for (index, line) in reader.lines().enumerate() {
+        let line_number = index + 1;
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         let entry: SessionEntry = match serde_json::from_str(&line) {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(error) => {
+                eprintln!(
+                    "[session] skipped malformed JSONL line {} in {}: {error}",
+                    line_number,
+                    path.display()
+                );
+                continue;
+            }
         };
         match entry {
             SessionEntry::Message { message, .. } => messages.push(message),
@@ -604,7 +612,14 @@ fn parsed_session_entries(path: &Path) -> Result<Vec<ParsedSessionEntry>> {
         }
         let entry: SessionEntry = match serde_json::from_str(&line) {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(error) => {
+                eprintln!(
+                    "[session] skipped malformed JSONL line {} in {}: {error}",
+                    line_number,
+                    path.display()
+                );
+                continue;
+            }
         };
         entries.push(ParsedSessionEntry { line_number, entry });
     }
@@ -1415,6 +1430,34 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(message_text(&messages[0]), "before");
         assert_eq!(message_text(&messages[1]), "after");
+    }
+
+    #[test]
+    fn session_message_with_old_usage_without_source_loads() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("old-usage.jsonl");
+        let header = serde_json::to_string(&SessionEntry::Header {
+            id: "old-usage".to_string(),
+            parent_id: None,
+            timestamp_ms: 1,
+            version: 1,
+            provider: None,
+            model: None,
+            thinking: None,
+            color_mode: None,
+            diff_mode: None,
+            safety: None,
+            tools: None,
+            cwd: None,
+        })
+        .unwrap();
+        let message = r#"{"type":"message","id":"m1","parent_id":null,"timestamp_ms":2,"message":{"role":"assistant","content":[{"type":"text","text":"old usage"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}"#;
+        std::fs::write(&path, format!("{header}\n{message}\n")).unwrap();
+
+        let messages = load_messages(&path).unwrap();
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].usage.as_ref().unwrap().source, "unknown");
     }
 
     #[test]

@@ -60,7 +60,12 @@ pub struct TokenUsage {
     pub cache_read_tokens: u64,
     #[serde(default)]
     pub cache_write_tokens: u64,
+    #[serde(default = "default_usage_source")]
     pub source: String,
+}
+
+fn default_usage_source() -> String {
+    "unknown".to_string()
 }
 
 impl TokenUsage {
