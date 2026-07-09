@@ -184,7 +184,7 @@ impl JsonlSession {
             tools,
             cwd: std::env::current_dir()
                 .ok()
-                .map(|path| path.display().to_string()),
+                .map(|path| canonical_display_path(&path)),
         })?;
         Ok(session)
     }
@@ -194,6 +194,7 @@ impl JsonlSession {
     }
 
     pub fn open(path: PathBuf) -> Result<Self> {
+        validate_session_file(&path)?;
         tighten_file_permissions(&path);
         let file = OpenOptions::new()
             .append(true)
@@ -449,10 +450,15 @@ pub fn latest_session_for_cwd(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>>
 }
 
 pub fn list_sessions_for_cwd(dir: &Path, cwd: &Path) -> Result<Vec<SessionInfo>> {
-    let cwd = cwd.display().to_string();
+    let cwd = canonical_display_path(cwd);
     let mut sessions = list_sessions(dir)?
         .into_iter()
-        .filter(|session| session.cwd.as_deref() == Some(cwd.as_str()))
+        .filter(|session| {
+            session
+                .cwd
+                .as_deref()
+                .is_some_and(|session_cwd| canonical_display_str(session_cwd) == cwd)
+        })
         .collect::<Vec<_>>();
     sort_sessions_newest_first(&mut sessions);
     Ok(sessions)
@@ -476,12 +482,12 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
-pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<PathBuf> {
+pub fn resolve_session_ref(dir: &Path, _cwd: &Path, reference: &str) -> Result<PathBuf> {
     let path = PathBuf::from(reference);
-    if reference.contains('/') || reference.ends_with(".jsonl") {
+    if is_explicit_session_path(reference, &path) {
         return Ok(path);
     }
-    let matches = list_sessions_for_cwd(dir, cwd)?
+    let matches = list_sessions(dir)?
         .into_iter()
         .filter(|session| {
             session.id.starts_with(reference) || session.short_id.starts_with(reference)
@@ -489,7 +495,7 @@ pub fn resolve_session_ref(dir: &Path, cwd: &Path, reference: &str) -> Result<Pa
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [session] => Ok(session.path.clone()),
-        [] => anyhow::bail!("no session matches '{reference}' in current directory"),
+        [] => anyhow::bail!("no session matches '{reference}'"),
         _ => anyhow::bail!("session reference '{reference}' is ambiguous"),
     }
 }
@@ -942,6 +948,45 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     }))
 }
 
+fn is_explicit_session_path(reference: &str, path: &Path) -> bool {
+    reference.contains('/')
+        || reference.starts_with("./")
+        || reference.starts_with("../")
+        || reference.starts_with('/')
+        || path.exists()
+}
+
+fn canonical_display_path(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn canonical_display_str(path: &str) -> String {
+    canonical_display_path(Path::new(path))
+}
+
+fn validate_session_file(path: &Path) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<SessionEntry>(&line) {
+            Ok(SessionEntry::Header { .. }) => return Ok(()),
+            Ok(_) => anyhow::bail!("{} is not a Ferrum session: missing header", path.display()),
+            Err(error) => anyhow::bail!(
+                "{} is not a Ferrum session: invalid header: {error}",
+                path.display()
+            ),
+        }
+    }
+    anyhow::bail!("{} is not a Ferrum session: empty file", path.display())
+}
+
 fn validate_user_session_id(id: &str) -> Result<()> {
     if is_valid_user_session_id(id) {
         return Ok(());
@@ -1112,6 +1157,108 @@ mod tests {
             }
             SessionRefResolution::Created(_) => panic!("expected existing named session"),
         }
+    }
+
+    #[test]
+    fn named_session_created_in_dir_a_resolves_from_dir_b() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir_a = temp.path().join("a");
+        let dir_b = temp.path().join("b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        write_test_header(
+            &temp.path().join("global-name.jsonl"),
+            "global-name",
+            Some(&dir_a),
+        );
+
+        let resolved = resolve_session_ref(temp.path(), &dir_b, "global-name").unwrap();
+
+        assert_eq!(resolved, temp.path().join("global-name.jsonl"));
+    }
+
+    #[test]
+    fn ambiguous_global_session_prefix_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        write_test_header(&temp.path().join("abc-one.jsonl"), "abc-one", None);
+        write_test_header(&temp.path().join("abc-two.jsonl"), "abc-two", None);
+        let error = resolve_session_ref(temp.path(), temp.path(), "abc").unwrap_err();
+        assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn session_ref_ending_jsonl_creates_named_session_when_not_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let resolution = resolve_or_create_session_ref(
+            temp.path(),
+            temp.path(),
+            "foo.jsonl",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        match resolution {
+            SessionRefResolution::Created(path) => {
+                assert_eq!(path, temp.path().join("foo.jsonl.jsonl"));
+                assert!(path.exists());
+            }
+            SessionRefResolution::Existing(_) => panic!("expected named session creation"),
+        }
+    }
+
+    #[test]
+    fn opening_non_session_file_does_not_chmod_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("not-session.jsonl");
+        std::fs::write(&path, "not json\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let error = JsonlSession::open(path.clone()).unwrap_err();
+
+        assert!(error.to_string().contains("not a Ferrum session"));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    #[test]
+    fn same_directory_via_symlink_resolves_same_latest_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_test_header(&temp.path().join("linked.jsonl"), "linked", Some(&link));
+
+        let sessions = list_sessions_for_cwd(temp.path(), &real).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "linked");
+    }
+
+    fn write_test_header(path: &Path, id: &str, cwd: Option<&Path>) {
+        let header = SessionEntry::Header {
+            id: id.to_string(),
+            parent_id: None,
+            timestamp_ms: 1,
+            version: 1,
+            provider: None,
+            model: None,
+            thinking: None,
+            color_mode: None,
+            diff_mode: None,
+            safety: None,
+            tools: None,
+            cwd: cwd.map(|path| path.display().to_string()),
+        };
+        let text = serde_json::to_string(&header).unwrap();
+        std::fs::write(path, format!("{text}\n")).unwrap();
     }
 
     #[test]
