@@ -1,5 +1,7 @@
 use crate::text_truncate::truncate_tail_to_max_bytes;
 use anyhow::{Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
+use ignore::WalkBuilder;
 use regex::RegexBuilder;
 use std::{path::Path, process::Command};
 
@@ -70,7 +72,6 @@ pub fn grep(pattern: &str, path: &Path, options: GrepOptions<'_>) -> Result<Stri
 }
 
 fn grep_fallback(pattern: &str, path: &Path, options: GrepOptions<'_>) -> Result<String> {
-    let mut matches = Vec::new();
     let limit = options.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let matcher = (!options.literal)
         .then(|| {
@@ -80,55 +81,89 @@ fn grep_fallback(pattern: &str, path: &Path, options: GrepOptions<'_>) -> Result
                 .with_context(|| format!("invalid grep pattern: {pattern}"))
         })
         .transpose()?;
+    let globset = build_globset(options.glob)?;
+    let mut matches = FallbackMatches::default();
     visit(
         path,
         pattern,
         matcher.as_ref(),
+        &globset,
         options,
         limit,
         &mut matches,
     )?;
-    if matches.is_empty() {
+    if matches.lines.is_empty() {
         return Ok("no matches".to_string());
     }
-    Ok(format_grep_output(&matches.join("\n"), limit))
+    Ok(format_grep_output(&matches.lines.join("\n"), limit))
+}
+
+#[derive(Default)]
+struct FallbackMatches {
+    lines: Vec<String>,
+    real_match_count: usize,
 }
 
 fn visit(
     path: &Path,
     pattern: &str,
     matcher: Option<&regex::Regex>,
+    globset: &Option<GlobSet>,
     options: GrepOptions<'_>,
     limit: usize,
-    matches: &mut Vec<String>,
+    matches: &mut FallbackMatches,
 ) -> Result<()> {
-    if matches.len() >= limit {
-        return Ok(());
-    }
     if path.is_dir() {
-        for entry in
-            std::fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?
-        {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if should_skip_dir_entry(&name) {
-                continue;
+        let mut walker = WalkBuilder::new(path);
+        walker.hidden(false).require_git(false);
+        walker.filter_entry(|entry| {
+            !entry
+                .file_name()
+                .to_str()
+                .is_some_and(should_skip_dir_entry)
+        });
+        for entry in walker.build() {
+            if matches.real_match_count >= limit {
+                break;
             }
-            visit(&entry.path(), pattern, matcher, options, limit, matches)?;
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry_path.is_file() {
+                let match_path = entry_path.strip_prefix(path).unwrap_or(entry_path);
+                visit_file(
+                    entry_path, match_path, pattern, matcher, globset, options, limit, matches,
+                )?;
+            }
         }
         return Ok(());
     }
 
-    if let Some(glob) = options.glob {
-        let glob = glob.trim_start_matches("**/");
-        if !glob.is_empty()
-            && !path
-                .to_string_lossy()
-                .ends_with(glob.trim_start_matches('*'))
-        {
-            return Ok(());
-        }
+    visit_file(
+        path, path, pattern, matcher, globset, options, limit, matches,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn visit_file(
+    path: &Path,
+    match_path: &Path,
+    pattern: &str,
+    matcher: Option<&regex::Regex>,
+    globset: &Option<GlobSet>,
+    options: GrepOptions<'_>,
+    limit: usize,
+    matches: &mut FallbackMatches,
+) -> Result<()> {
+    if matches.real_match_count >= limit {
+        return Ok(());
+    }
+    if let Some(globset) = globset
+        && !globset.is_match(match_path)
+        && !match_path
+            .file_name()
+            .is_some_and(|name| globset.is_match(name))
+    {
+        return Ok(());
     }
 
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -147,6 +182,9 @@ fn visit(
     let lines = text.lines().collect::<Vec<_>>();
     let search_lines = haystack.lines().collect::<Vec<_>>();
     for index in 0..lines.len() {
+        if matches.real_match_count >= limit {
+            break;
+        }
         let search_line = search_lines.get(index).copied().unwrap_or("");
         let matched = if options.literal {
             search_line.contains(&needle)
@@ -154,13 +192,20 @@ fn visit(
             matcher.is_some_and(|matcher| matcher.is_match(lines.get(index).copied().unwrap_or("")))
         };
         if matched {
+            matches.real_match_count += 1;
             push_fallback_match(path, &lines, index, options.context.unwrap_or(0), matches);
-            if count_match_lines(matches) >= limit {
-                break;
-            }
         }
     }
     Ok(())
+}
+
+fn build_globset(glob: Option<&str>) -> Result<Option<GlobSet>> {
+    let Some(glob) = glob.filter(|glob| !glob.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let mut builder = GlobSetBuilder::new();
+    builder.add(Glob::new(glob)?);
+    Ok(Some(builder.build()?))
 }
 
 fn push_fallback_match(
@@ -168,7 +213,7 @@ fn push_fallback_match(
     lines: &[&str],
     match_index: usize,
     context: usize,
-    matches: &mut Vec<String>,
+    matches: &mut FallbackMatches,
 ) {
     let start = match_index.saturating_sub(context);
     let end = (match_index + context + 1).min(lines.len());
@@ -181,8 +226,8 @@ fn push_fallback_match(
             index + 1,
             truncate_line(line)
         );
-        if !matches.contains(&rendered) {
-            matches.push(rendered);
+        if !matches.lines.contains(&rendered) {
+            matches.lines.push(rendered);
         }
     }
 }
@@ -257,5 +302,106 @@ mod tests {
         .unwrap();
         assert!(output.contains("cause line"));
         assert!(output.contains("CRITICAL_FAILURE paste failed"));
+    }
+
+    #[test]
+    fn fallback_does_not_return_gitignored_file() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(temp.path().join("ignored.txt"), "needle\n").unwrap();
+        std::fs::write(temp.path().join("kept.txt"), "needle\n").unwrap();
+
+        let output = grep_fallback("needle", temp.path(), GrepOptions::default()).unwrap();
+
+        assert!(output.contains("kept.txt"));
+        assert!(!output.contains("ignored.txt"));
+    }
+
+    #[test]
+    fn fallback_glob_src_star_rs_matches_src_main_rs() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("main.rs"), "needle\n").unwrap();
+        std::fs::write(temp.path().join("main.rs"), "needle\n").unwrap();
+
+        let output = grep_fallback(
+            "needle",
+            temp.path(),
+            GrepOptions {
+                glob: Some("src/*.rs"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(output.contains("src/main.rs"));
+        assert!(!output.contains(&format!("{}:1", temp.path().join("main.rs").display())));
+    }
+
+    #[test]
+    fn fallback_glob_src_double_star_rs_matches_nested_rs() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("src/a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("lib.rs"), "needle\n").unwrap();
+
+        let output = grep_fallback(
+            "needle",
+            temp.path(),
+            GrepOptions {
+                glob: Some("src/**/*.rs"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(output.contains("lib.rs"));
+    }
+
+    #[test]
+    fn fallback_glob_star_md_matches_readme() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("README.md"), "needle\n").unwrap();
+        std::fs::write(temp.path().join("main.rs"), "needle\n").unwrap();
+
+        let output = grep_fallback(
+            "needle",
+            temp.path(),
+            GrepOptions {
+                glob: Some("*.md"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(output.contains("README.md"));
+        assert!(!output.contains("main.rs"));
+    }
+
+    #[test]
+    fn fallback_context_limit_two_returns_two_real_matches_even_with_context_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("app.log");
+        std::fs::write(
+            &file,
+            "before one\nneedle one\nafter one\nbefore two\nneedle two\nafter two\nbefore three\nneedle three\nafter three\n",
+        )
+        .unwrap();
+
+        let output = grep_fallback(
+            "needle",
+            temp.path(),
+            GrepOptions {
+                context: Some(1),
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(output.contains("needle one"));
+        assert!(output.contains("needle two"));
+        assert!(!output.contains("needle three"));
     }
 }
