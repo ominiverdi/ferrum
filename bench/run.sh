@@ -10,11 +10,32 @@ fi
 agent="$1"
 task="$2"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-task_dir="$root/bench/tasks/$task"
-if [ ! -d "$task_dir" ]; then
+
+case "$agent" in
+  ferrum-codex|ferrum-codex-bash|pi-codex|opencode) ;;
+  *)
+    echo "unknown agent profile: $agent" >&2
+    exit 2
+    ;;
+esac
+
+if ! [[ "$task" =~ ^[0-9]{3}-[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+  echo "invalid task ID: $task" >&2
+  exit 2
+fi
+
+tasks_root="$(realpath -e -- "$root/bench/tasks")"
+if ! task_dir="$(realpath -e -- "$tasks_root/$task" 2>/dev/null)" || [ ! -d "$task_dir" ]; then
   echo "unknown task: $task" >&2
   exit 2
 fi
+case "$task_dir/" in
+  "$tasks_root"/*/) ;;
+  *)
+    echo "task escapes benchmark root: $task" >&2
+    exit 2
+    ;;
+esac
 
 stamp="$(date +%Y%m%d-%H%M%S)"
 runs_root="${BENCH_RUN_ROOT:-/tmp/ferrum-bench-runs}"

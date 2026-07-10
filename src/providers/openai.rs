@@ -290,12 +290,12 @@ impl Provider for OpenAiCompatProvider {
                 while let Some(index) = buffer.find('\n') {
                     let line = buffer[..index].trim_end_matches('\r').to_string();
                     buffer.drain(..=index);
-                    parser.process_line(&line, Some(on_event));
+                    parser.process_line(&line, Some(on_event))?;
                 }
             }
             if !buffer.is_empty() {
                 let line = buffer.trim_end_matches('\r').to_string();
-                parser.process_line(&line, Some(on_event));
+                parser.process_line(&line, Some(on_event))?;
             }
             parser.finish()
         })
@@ -950,6 +950,8 @@ fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Result<Messag
     })
 }
 
+const MAX_PARALLEL_TOOL_CALLS: usize = 128;
+
 #[derive(Default)]
 struct ChatSseParser {
     output: String,
@@ -970,15 +972,15 @@ impl ChatSseParser {
         &mut self,
         line: &str,
         mut on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
-    ) {
+    ) -> Result<()> {
         let Some(data) = line.strip_prefix("data: ") else {
-            return;
+            return Ok(());
         };
         if data == "[DONE]" {
-            return;
+            return Ok(());
         }
         let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
-            return;
+            return Ok(());
         };
         if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null())
             && let Ok(parsed) = serde_json::from_value::<OpenAiUsage>(usage.clone())
@@ -1020,11 +1022,25 @@ impl ChatSseParser {
                 .into_iter()
                 .flatten()
             {
-                let index = tool_call
+                let raw_index = tool_call
                     .get("index")
                     .and_then(|value| value.as_u64())
-                    .unwrap_or(self.tool_calls.len() as u64) as usize;
-                while self.tool_calls.len() <= index {
+                    .unwrap_or(self.tool_calls.len() as u64);
+                let index = usize::try_from(raw_index)
+                    .context("streamed tool-call index does not fit in memory")?;
+                if index >= MAX_PARALLEL_TOOL_CALLS {
+                    anyhow::bail!(
+                        "streamed tool-call index {index} exceeds maximum {}",
+                        MAX_PARALLEL_TOOL_CALLS - 1
+                    );
+                }
+                if index > self.tool_calls.len() {
+                    anyhow::bail!(
+                        "streamed tool-call index {index} is sparse; next valid index is {}",
+                        self.tool_calls.len()
+                    );
+                }
+                if index == self.tool_calls.len() {
                     self.tool_calls.push(ChatStreamToolCall::default());
                 }
                 let current = &mut self.tool_calls[index];
@@ -1043,6 +1059,7 @@ impl ChatSseParser {
                 }
             }
         }
+        Ok(())
     }
 
     fn finish(self) -> Result<ProviderResponse> {
@@ -1884,12 +1901,18 @@ mod tests {
     #[test]
     fn extracts_chat_stream_usage() {
         let mut parser = ChatSseParser::default();
-        parser.process_line(r#"data: {"choices":[{"delta":{"content":"hel"}}]}"#, None);
-        parser.process_line(r#"data: {"choices":[{"delta":{"content":"lo"}}]}"#, None);
-        parser.process_line(
-            r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13,"prompt_tokens_details":{"cached_tokens":4}}}"#,
-            None,
-        );
+        parser
+            .process_line(r#"data: {"choices":[{"delta":{"content":"hel"}}]}"#, None)
+            .unwrap();
+        parser
+            .process_line(r#"data: {"choices":[{"delta":{"content":"lo"}}]}"#, None)
+            .unwrap();
+        parser
+            .process_line(
+                r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3,"total_tokens":13,"prompt_tokens_details":{"cached_tokens":4}}}"#,
+                None,
+            )
+            .unwrap();
 
         let response = parser.finish().unwrap();
 
@@ -2080,10 +2103,12 @@ mod tests {
     #[test]
     fn rejects_malformed_stream_tool_call_json() {
         let mut parser = ChatSseParser::default();
-        parser.process_line(
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{not-json"}}]}}]}"#,
-            None,
-        );
+        parser
+            .process_line(
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{not-json"}}]}}]}"#,
+                None,
+            )
+            .unwrap();
         let error = parser.finish().unwrap_err();
         assert!(
             error
@@ -2095,14 +2120,18 @@ mod tests {
     #[test]
     fn extracts_chat_stream_tool_call() {
         let mut parser = ChatSseParser::default();
-        parser.process_line(
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\"pa"}}]}}]}"#,
-            None,
-        );
-        parser.process_line(
-            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"Cargo.toml\"}"}}]}}]}"#,
-            None,
-        );
+        parser
+            .process_line(
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\"pa"}}]}}]}"#,
+                None,
+            )
+            .unwrap();
+        parser
+            .process_line(
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"Cargo.toml\"}"}}]}}]}"#,
+                None,
+            )
+            .unwrap();
 
         let response = parser.finish().unwrap();
 
@@ -2113,6 +2142,34 @@ mod tests {
         assert_eq!(id, "call_1");
         assert_eq!(name, "read");
         assert_eq!(input["path"], "Cargo.toml");
+    }
+
+    #[test]
+    fn rejects_out_of_range_chat_stream_tool_call_index() {
+        let mut parser = ChatSseParser::default();
+        let error = parser
+            .process_line(
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":128,"function":{"name":"read","arguments":"{}"}}]}}]}"#,
+                None,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exceeds maximum"));
+        assert!(parser.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn rejects_sparse_chat_stream_tool_call_index() {
+        let mut parser = ChatSseParser::default();
+        let error = parser
+            .process_line(
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"name":"read","arguments":"{}"}}]}}]}"#,
+                None,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("is sparse"));
+        assert!(parser.tool_calls.is_empty());
     }
 
     #[test]

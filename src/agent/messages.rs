@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{fs, io::Read, path::Path};
 
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_IMAGE_BASE64_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -158,6 +159,13 @@ pub fn image_from_data_uri(data_uri: &str) -> Result<ContentBlock> {
     if !matches!(mime_type, "image/png" | "image/jpeg" | "image/webp") {
         anyhow::bail!("unsupported image data URI type: {mime_type}");
     }
+    if encoded.len() > MAX_IMAGE_BASE64_BYTES {
+        anyhow::bail!(
+            "image data URI is too large: encoded payload is {} bytes > {} bytes",
+            encoded.len(),
+            MAX_IMAGE_BASE64_BYTES
+        );
+    }
     let data = STANDARD
         .decode(encoded)
         .context("failed to decode image data URI")?;
@@ -256,7 +264,6 @@ pub fn strip_think_blocks(text: &str) -> String {
         output.push_str(&rest[..start]);
         let after_start = &rest[start + "<think>".len()..];
         let Some(end) = after_start.find("</think>") else {
-            output.push_str(after_start);
             break;
         };
         rest = &after_start[end + "</think>".len()..];
@@ -267,7 +274,10 @@ pub fn strip_think_blocks(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_from_data_uri, image_from_path, sanitize_thinking_text, strip_think_blocks};
+    use super::{
+        MAX_IMAGE_BASE64_BYTES, image_from_data_uri, image_from_path, sanitize_thinking_text,
+        strip_think_blocks,
+    };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nminimal";
@@ -308,6 +318,13 @@ mod tests {
     }
 
     #[test]
+    fn rejects_oversized_data_uri_before_decoding() {
+        let encoded = "!".repeat(MAX_IMAGE_BASE64_BYTES + 1);
+        let error = image_from_data_uri(&format!("data:image/png;base64,{encoded}")).unwrap_err();
+        assert!(error.to_string().contains("encoded payload"));
+    }
+
+    #[test]
     fn sanitizes_provider_thinking_separator_comments() {
         assert_eq!(
             sanitize_thinking_text("**Switching** <!-- separator -->"),
@@ -322,9 +339,7 @@ mod tests {
             "visible"
         );
         assert_eq!(strip_think_blocks("a<think>b</think>c"), "ac");
-        assert_eq!(
-            strip_think_blocks("hello <think>oops visible"),
-            "hello oops visible"
-        );
+        assert_eq!(strip_think_blocks("hello <think>oops visible"), "hello ");
+        assert_eq!(strip_think_blocks("<think>secret"), "");
     }
 }

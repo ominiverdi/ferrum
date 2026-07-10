@@ -608,13 +608,19 @@ fn xterm_color_index(name: &str) -> Option<u8> {
 }
 
 fn parse_hex_rgb(hex: &str) -> Option<(u8, u8, u8)> {
-    if hex.len() != 6 {
+    let bytes = hex.as_bytes();
+    if bytes.len() != 6 || !bytes.iter().all(u8::is_ascii_hexdigit) {
         return None;
     }
-    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-    Some((r, g, b))
+    let component = |pair: &[u8]| {
+        let text = std::str::from_utf8(pair).ok()?;
+        u8::from_str_radix(text, 16).ok()
+    };
+    Some((
+        component(&bytes[0..2])?,
+        component(&bytes[2..4])?,
+        component(&bytes[4..6])?,
+    ))
 }
 
 #[cfg(test)]
@@ -651,6 +657,8 @@ mod tests {
             vec!["2", "38;5;245"]
         );
         assert!(AnsiStyle::parse("not-a-color").is_none());
+        assert!(AnsiStyle::parse("#aéxxx").is_none());
+        assert!(AnsiStyle::parse("#１２３").is_none());
     }
 
     #[test]

@@ -29,6 +29,14 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Test benchmark scripts
+        run: bash bench/test.sh
+
+      - name: Audit dependencies
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit
+
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
 

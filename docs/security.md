@@ -55,15 +55,15 @@ shell remains exposed.
 
 - `low`: permissive. Allows common shell syntax; blocks destructive commands and
   obvious obfuscation.
-- `medium`: default. Allows normal coding commands; blocks destructive commands
-  and ambiguous shell tricks like command substitution.
+- `medium`: default. Allows normal coding commands; blocks destructive commands,
+  inline interpreter payloads, and ambiguous shell tricks like command substitution.
 - `high`: strict. Allows simple inspection/build commands; also blocks common
   direct network-capable commands, inline interpreters, direct scripts, and broad disk writes.
 
 Tier differences:
 
 - `echo "$(date)"`: allowed at `low`, rejected at `medium` and `high`.
-- `python3 -c 'print(1)'`: allowed at `low` and `medium`, rejected at `high`.
+- `python3 -c 'print(1)'`: allowed at `low`, rejected at `medium` and `high`.
 - `curl https://example.com`: allowed at `low` and `medium`, rejected at `high`.
 - `rm -rf /`: rejected at all tiers.
 

@@ -265,12 +265,19 @@ fn dedup_project_overrides(skills: Vec<Skill>) -> Vec<Skill> {
 }
 
 fn project_ancestors(cwd: &Path) -> Vec<PathBuf> {
+    project_ancestors_with_boundary(cwd, None)
+}
+
+fn project_ancestors_with_boundary(cwd: &Path, boundary: Option<&Path>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let mut current = Some(cwd);
     while let Some(dir) = current {
         dirs.push(dir.to_path_buf());
         if is_project_marker(dir) {
             return dirs;
+        }
+        if boundary == Some(dir) {
+            break;
         }
         current = dir.parent();
     }
@@ -324,7 +331,7 @@ mod tests {
         let cwd = parent.join("child");
         fs::create_dir_all(&cwd).unwrap();
 
-        let ancestors = project_ancestors(&cwd);
+        let ancestors = project_ancestors_with_boundary(&cwd, Some(parent));
 
         assert_eq!(ancestors, vec![cwd]);
     }
