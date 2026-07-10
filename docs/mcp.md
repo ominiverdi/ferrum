@@ -31,6 +31,7 @@ Interactive:
 - `notifications/initialized`
 - `tools/list`
 - `tools/call`
+- standard `notifications/cancelled` for aborted or timed-out tool calls
 - tool discovery at first model turn
 - MCP tool output truncation
 - bounded MCP frame size before allocation
@@ -97,6 +98,8 @@ MCP servers run as local child processes with your user permissions. Ferrum does
 Do not configure MCP servers with secrets unless you trust the server and its dependencies.
 
 MCP tool output is truncated to a bounded tail before it is returned to the model.
+
+When an interactive MCP tool call is aborted with `Esc` or `Ctrl-C`, or reaches Ferrum's MCP request timeout, Ferrum stops waiting and sends the standard `notifications/cancelled` notification with the in-flight request ID. Cancellation is best-effort: MCP servers may ignore the notification or finish before receiving it.
 
 Ferrum writes MCP stdio requests as newline-delimited JSON for compatibility with the local stdio servers used by Ferrum. Incoming messages may be newline-delimited JSON or `Content-Length` frames. Incoming frames with `Content-Length` larger than Ferrum's internal frame limit are rejected before allocating the body buffer. This protects the Ferrum process from oversized MCP frames, but it does not sandbox the MCP server process itself.
 

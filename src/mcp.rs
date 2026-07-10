@@ -1,4 +1,8 @@
-use crate::{agent::tools::ToolDefinition, config::McpServerConfig};
+use crate::{
+    agent::tools::ToolDefinition,
+    cancel::{self, WaitError},
+    config::McpServerConfig,
+};
 use anyhow::{Context, Result};
 use futures_util::future::join_all;
 use serde::Deserialize;
@@ -7,7 +11,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io,
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     time::Duration,
 };
 use thiserror::Error;
@@ -25,6 +29,7 @@ const MAX_MCP_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_MCP_SCHEMA_CHARS: usize = 8_000;
 const MCP_START_TIMEOUT: Duration = Duration::from_secs(10);
 const MCP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MCP_CANCEL_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const MCP_DIAGNOSTIC_MESSAGES: usize = 20;
 const MCP_DIAGNOSTIC_CHARS: usize = 4_000;
 
@@ -149,14 +154,19 @@ impl McpManager {
         self.tool_routes.contains_key(name)
     }
 
-    pub async fn call(&mut self, exposed_name: &str, arguments: &Value) -> Result<String> {
+    pub async fn call(
+        &mut self,
+        exposed_name: &str,
+        arguments: &Value,
+        cancelled: Option<&Arc<AtomicBool>>,
+    ) -> Result<String> {
         let (server_index, tool_name) = self
             .tool_routes
             .get(exposed_name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("unknown MCP tool: {exposed_name}"))?;
         self.servers[server_index]
-            .call_tool(&tool_name, arguments)
+            .call_tool(&tool_name, arguments, cancelled)
             .await
     }
 }
@@ -232,23 +242,47 @@ impl McpServer {
             .context("failed to parse MCP tools/list response")
     }
 
-    async fn call_tool(&mut self, name: &str, arguments: &Value) -> Result<String> {
-        let value = timeout(
-            MCP_REQUEST_TIMEOUT,
-            self.request(
+    async fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: &Value,
+        cancelled: Option<&Arc<AtomicBool>>,
+    ) -> Result<String> {
+        let id = self
+            .send_request(
                 "tools/call",
                 json!({
                     "name": name,
                     "arguments": arguments,
                 }),
-            ),
+            )
+            .await?;
+        let result = cancel::race_timeout(
+            self.read_response(id, "tools/call"),
+            cancelled,
+            MCP_REQUEST_TIMEOUT,
         )
-        .await
-        .with_context(|| format!("MCP tool `{name}` timed out"))??;
+        .await;
+        let value = match result {
+            Ok(result) => result?,
+            Err(WaitError::Cancelled) => {
+                self.cancel_request(id, "User aborted MCP tool call").await;
+                anyhow::bail!("aborted");
+            }
+            Err(WaitError::TimedOut) => {
+                self.cancel_request(id, "MCP tool call timed out").await;
+                anyhow::bail!("MCP tool `{name}` timed out");
+            }
+        };
         mcp_tool_result_to_output(&value)
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.send_request(method, params).await?;
+        self.read_response(id, method).await
+    }
+
+    async fn send_request(&mut self, method: &str, params: Value) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
         self.write_message(&json!({
@@ -258,7 +292,10 @@ impl McpServer {
             "params": params,
         }))
         .await?;
+        Ok(id)
+    }
 
+    async fn read_response(&mut self, id: u64, method: &str) -> Result<Value> {
         loop {
             let message = self.read_message().await?;
             if message.get("id").and_then(Value::as_u64) != Some(id) {
@@ -274,6 +311,33 @@ impl McpServer {
                 anyhow::bail!("MCP {method} failed: {error}{context}");
             }
             return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    async fn cancel_request(&mut self, id: u64, reason: &str) {
+        let notification = self.notification(
+            "notifications/cancelled",
+            json!({
+                "requestId": id,
+                "reason": reason,
+            }),
+        );
+        match timeout(MCP_CANCEL_WRITE_TIMEOUT, notification).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                self.diagnostics
+                    .push(format!(
+                        "failed to send cancellation for MCP request {id}: {error}"
+                    ))
+                    .await;
+            }
+            Err(_) => {
+                self.diagnostics
+                    .push(format!(
+                        "timed out sending cancellation for MCP request {id}"
+                    ))
+                    .await;
+            }
         }
     }
 
@@ -575,6 +639,7 @@ fn sanitize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn accepts_lowercase_content_length() {
@@ -672,6 +737,79 @@ mod tests {
             "content": [{"type": "text", "text": "tool ok"}]
         });
         assert_eq!(mcp_tool_result_to_output(&value).unwrap(), "tool ok");
+    }
+
+    #[tokio::test]
+    async fn cancelled_tool_call_sends_standard_mcp_notification() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("cancel_server.py");
+        let marker = temp.path().join("cancelled.json");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+marker = pathlib.Path(sys.argv[1])
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"cancel-test","version":"1"}}})
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":msg["id"],"result":{"tools":[{"name":"slow","description":"wait for cancellation","inputSchema":{"type":"object"}}]}})
+    elif method == "tools/call":
+        continue
+    elif method == "notifications/cancelled":
+        marker.write_text(json.dumps(msg["params"]))
+"#,
+        )
+        .unwrap();
+        let config = McpServerConfig {
+            name: "cancel".to_string(),
+            command: "python3".to_string(),
+            args: vec![script.display().to_string(), marker.display().to_string()],
+            enabled: true,
+        };
+        let mut manager = McpManager::start(&[config]).await.unwrap();
+        let exposed_name = manager.definitions()[0].name.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            trigger.store(true, Ordering::Relaxed);
+        });
+
+        let error = manager
+            .call(&exposed_name, &json!({}), Some(&cancel))
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "aborted");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        while !marker.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let notification: Value =
+            serde_json::from_str(&std::fs::read_to_string(marker).unwrap()).unwrap();
+        assert!(
+            notification
+                .get("requestId")
+                .and_then(Value::as_u64)
+                .is_some()
+        );
+        assert_eq!(
+            notification.get("reason").and_then(Value::as_str),
+            Some("User aborted MCP tool call")
+        );
     }
 
     #[tokio::test]

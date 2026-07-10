@@ -5,6 +5,7 @@ use crate::{
         tools::ToolDefinition,
     },
     auth::openai_codex,
+    cancel::{self, WaitError},
     config::ThinkingLevel,
 };
 use anyhow::{Context, Result};
@@ -23,6 +24,9 @@ use std::{
     },
     time::Duration,
 };
+
+const PROVIDER_INITIAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub struct OpenAiCompatProvider {
     api_key_env: Option<String>,
@@ -165,7 +169,13 @@ impl Provider for OpenAiCompatProvider {
                 {
                     anyhow::bail!("aborted");
                 }
-                let response = self.complete(model, messages, tools, thinking).await?;
+                let response = cancel::race(
+                    self.complete(model, messages, tools, thinking),
+                    cancelled.as_ref(),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("aborted"))??;
+
                 if cancelled
                     .as_ref()
                     .is_some_and(|flag| flag.load(Ordering::Relaxed))
@@ -188,8 +198,11 @@ impl Provider for OpenAiCompatProvider {
                 model,
                 messages,
                 tools,
-                thinking,
-                self.stream_usage,
+                CompatStreamOptions {
+                    thinking,
+                    include_usage: self.stream_usage,
+                    cancelled: cancelled.as_ref(),
+                },
             )
             .await?;
             let status = response.status();
@@ -205,8 +218,11 @@ impl Provider for OpenAiCompatProvider {
                         model,
                         messages,
                         tools,
-                        thinking,
-                        false,
+                        CompatStreamOptions {
+                            thinking,
+                            include_usage: false,
+                            cancelled: cancelled.as_ref(),
+                        },
                     )
                     .await?;
                     let retry_status = response.status();
@@ -228,8 +244,11 @@ impl Provider for OpenAiCompatProvider {
                         model,
                         messages,
                         tools,
-                        ThinkingLevel::Off,
-                        self.stream_usage,
+                        CompatStreamOptions {
+                            thinking: ThinkingLevel::Off,
+                            include_usage: self.stream_usage,
+                            cancelled: cancelled.as_ref(),
+                        },
                     )
                     .await?;
                     let retry_status = response.status();
@@ -250,13 +269,22 @@ impl Provider for OpenAiCompatProvider {
             let mut parser = ChatSseParser::default();
             let mut buffer = String::new();
             let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                if cancelled
-                    .as_ref()
-                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                {
-                    anyhow::bail!("aborted");
-                }
+            loop {
+                let next = cancel::race_timeout(
+                    stream.next(),
+                    cancelled.as_ref(),
+                    PROVIDER_STREAM_IDLE_TIMEOUT,
+                )
+                .await;
+                let chunk = match next {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
+                    Err(WaitError::TimedOut) => anyhow::bail!(
+                        "OpenAI-compatible stream idle for {}s",
+                        PROVIDER_STREAM_IDLE_TIMEOUT.as_secs()
+                    ),
+                };
                 let chunk = chunk.context("failed to read OpenAI-compatible stream")?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(index) = buffer.find('\n') {
@@ -288,15 +316,26 @@ fn emit_message_stream_events(message: &Message, on_event: &mut (dyn FnMut(Strea
     }
 }
 
+struct CompatStreamOptions<'a> {
+    thinking: ThinkingLevel,
+    include_usage: bool,
+    cancelled: Option<&'a Arc<AtomicBool>>,
+}
+
 async fn send_openai_compat_stream_request(
     provider: &OpenAiCompatProvider,
     api_key: Option<&str>,
     model: &str,
     messages: &[Message],
     tools: &[ToolDefinition],
-    thinking: ThinkingLevel,
-    include_usage: bool,
+    options: CompatStreamOptions<'_>,
 ) -> Result<Response> {
+    let CompatStreamOptions {
+        thinking,
+        include_usage,
+        cancelled,
+    } = options;
+
     let request = ChatRequest {
         model,
         messages: messages.iter().map(ChatMessage::from_message).collect(),
@@ -315,11 +354,20 @@ async fn send_openai_compat_stream_request(
     if let Some(api_key) = api_key {
         http_request = http_request.bearer_auth(api_key);
     }
-    http_request
-        .json(&request)
-        .send()
-        .await
-        .context("OpenAI-compatible streaming request failed")
+    cancel::race_timeout(
+        http_request.json(&request).send(),
+        cancelled,
+        PROVIDER_INITIAL_RESPONSE_TIMEOUT,
+    )
+    .await
+    .map_err(|error| match error {
+        WaitError::Cancelled => anyhow::anyhow!("aborted"),
+        WaitError::TimedOut => anyhow::anyhow!(
+            "OpenAI-compatible provider did not respond within {}s",
+            PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
+        ),
+    })?
+    .context("OpenAI-compatible streaming request failed")
 }
 
 fn is_stream_usage_unsupported_error(text: &str) -> bool {
@@ -412,10 +460,15 @@ impl Provider for OpenAiCodexProvider {
                 None,
             )
             .await?;
-            let text = response
-                .text()
+            let text = cancel::race_timeout(response.text(), None, PROVIDER_STREAM_IDLE_TIMEOUT)
                 .await
-                .context("failed to read OpenAI Codex response")?;
+                .map_err(|error| match error {
+                    WaitError::Cancelled => anyhow::anyhow!("aborted"),
+                    WaitError::TimedOut => anyhow::anyhow!(
+                        "OpenAI Codex response idle for {}s",
+                        PROVIDER_STREAM_IDLE_TIMEOUT.as_secs()
+                    ),
+                })??;
             Ok(ProviderResponse::message(
                 extract_sse_responses_message(&text).unwrap_or_else(|| {
                     let content = serde_json::from_str::<serde_json::Value>(&text)
@@ -477,13 +530,22 @@ impl Provider for OpenAiCodexProvider {
             let mut parser = ResponsesSseParser::default();
             let mut buffer = String::new();
             let mut stream = response.bytes_stream();
-            while let Some(chunk) = stream.next().await {
-                if cancelled
-                    .as_ref()
-                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                {
-                    anyhow::bail!("aborted");
-                }
+            loop {
+                let next = cancel::race_timeout(
+                    stream.next(),
+                    cancelled.as_ref(),
+                    PROVIDER_STREAM_IDLE_TIMEOUT,
+                )
+                .await;
+                let chunk = match next {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break,
+                    Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
+                    Err(WaitError::TimedOut) => anyhow::bail!(
+                        "OpenAI Codex stream idle for {}s",
+                        PROVIDER_STREAM_IDLE_TIMEOUT.as_secs()
+                    ),
+                };
                 let chunk = chunk.context("failed to read OpenAI Codex stream")?;
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
                 while let Some(index) = buffer.find('\n') {
@@ -517,16 +579,41 @@ async fn send_codex_request_with_retries(
         if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             anyhow::bail!("aborted");
         }
-        let response = client
-            .post(url)
-            .bearer_auth(api_key)
-            .header("chatgpt-account-id", account_id)
-            .header("originator", "ferrum")
-            .header("OpenAI-Beta", "responses=experimental")
-            .header("content-type", "application/json")
-            .json(request)
-            .send()
-            .await;
+        let response = cancel::race_timeout(
+            client
+                .post(url)
+                .bearer_auth(api_key)
+                .header("chatgpt-account-id", account_id)
+                .header("originator", "ferrum")
+                .header("OpenAI-Beta", "responses=experimental")
+                .header("content-type", "application/json")
+                .json(request)
+                .send(),
+            cancelled,
+            PROVIDER_INITIAL_RESPONSE_TIMEOUT,
+        )
+        .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
+            Err(WaitError::TimedOut) if attempt < CODEX_MAX_RETRIES => {
+                attempt += 1;
+                sleep_before_codex_retry(
+                    attempt,
+                    &format!(
+                        "OpenAI Codex did not respond within {}s",
+                        PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
+                    ),
+                    cancelled,
+                )
+                .await?;
+                continue;
+            }
+            Err(WaitError::TimedOut) => anyhow::bail!(
+                "OpenAI Codex did not respond within {}s",
+                PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
+            ),
+        };
         match response {
             Ok(response) if response.status().is_success() => return Ok(response),
             Ok(response) => {
@@ -586,11 +673,11 @@ async fn sleep_before_codex_retry(
         "[provider] {reason}; retrying in {}s ({attempt}/{CODEX_MAX_RETRIES})",
         delay.as_secs()
     );
-    tokio::time::sleep(delay).await;
-    if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
-        anyhow::bail!("aborted");
+    match cancel::race(tokio::time::sleep(delay), cancelled).await {
+        Ok(()) => Ok(()),
+        Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
+        Err(WaitError::TimedOut) => unreachable!("cancellation race has no timeout"),
     }
-    Ok(())
 }
 
 #[derive(Debug, Serialize)]

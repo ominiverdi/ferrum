@@ -2,6 +2,7 @@ pub mod messages;
 pub mod tools;
 
 use crate::{
+    cancel,
     config::{ColorMode, Config, DiffMode, SafetyLevel, ToolSelection},
     context, mcp, providers, session, skills, tools as builtin_tools, ui_colors, usage,
 };
@@ -604,12 +605,18 @@ pub async fn run_interactive(
                     continue;
                 }
                 if input == "/models" {
-                    match providers::list_models(&config.provider).await {
-                        Ok(providers::ModelList::Live {
+                    let mut abort = ActiveTurnAbort::start(true);
+                    let token = abort.token();
+                    let model_list =
+                        cancel::race(providers::list_models(&config.provider), Some(&token)).await;
+                    abort.stop();
+                    match model_list {
+                        Err(_) => println!("aborted"),
+                        Ok(Ok(providers::ModelList::Live {
                             source,
                             models,
                             notices,
-                        }) => {
+                        })) => {
                             for notice in notices {
                                 println!("{notice}");
                             }
@@ -619,7 +626,7 @@ pub async fn run_interactive(
                                 println!("{marker} {model}");
                             }
                         }
-                        Err(error) => eprintln!("Error: {error}"),
+                        Ok(Err(error)) => eprintln!("Error: {error}"),
                     }
                     continue;
                 }
@@ -1744,16 +1751,23 @@ impl AgentState {
                 let _ = live_render.render_event(event);
             };
             let response_result = if interactive {
-                provider
-                    .complete_streaming(
+                let token = abort.token();
+                match cancel::race(
+                    provider.complete_streaming(
                         &config.provider_model,
                         &self.messages,
                         &tools,
                         config.thinking,
                         &mut on_event,
-                        Some(abort.token()),
-                    )
-                    .await
+                        Some(Arc::clone(&token)),
+                    ),
+                    Some(&token),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!("aborted")),
+                }
             } else {
                 provider
                     .complete(
@@ -1918,16 +1932,23 @@ impl AgentState {
                 let _ = live_render.render_event(event);
             };
             let response_result = if interactive {
-                provider
-                    .complete_streaming(
+                let token = abort.token();
+                match cancel::race(
+                    provider.complete_streaming(
                         &config.provider_model,
                         &final_messages,
                         &[],
                         config.thinking,
                         &mut on_event,
-                        Some(abort.token()),
-                    )
-                    .await
+                        Some(Arc::clone(&token)),
+                    ),
+                    Some(&token),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(anyhow::anyhow!("aborted")),
+                }
             } else {
                 provider
                     .complete(
@@ -2311,7 +2332,7 @@ impl AgentState {
             && let Some(mcp) = &mut self.mcp
             && mcp.has_tool(name)
         {
-            return mcp.call(name, input).await;
+            return mcp.call(name, input, cancel.as_ref()).await;
         }
         builtin_tools::execute_with_cancel_and_safety(
             name,
@@ -5386,8 +5407,26 @@ async fn handle_bang_command(
 
     eprintln!("[bash] {command}");
     builtin_tools::shell_guard::validate(command, state.safety)?;
-    let output = builtin_tools::bash::run(command, &state.cwd, Duration::from_secs(120)).await?;
+    let mut abort = ActiveTurnAbort::start(true);
+    let token = abort.token();
+    let output = builtin_tools::bash::run_with_cancel(
+        command,
+        &state.cwd,
+        Duration::from_secs(120),
+        Some(token),
+    )
+    .await?;
+    let cancelled = abort.is_cancelled();
+    abort.stop();
     let rendered = render_bash_output(command, &output);
+
+    if cancelled {
+        print!("{rendered}");
+        if !rendered.ends_with('\n') {
+            println!();
+        }
+        return Ok(CommandAction::Continue);
+    }
 
     if send_to_model {
         state.run_turn(rendered, config, true).await?;

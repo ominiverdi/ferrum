@@ -47,6 +47,8 @@ Ferrum queries the latest stable Codex CLI release for each `/models` command an
 export FERRUM_CODEX_CLIENT_VERSION=0.144.0
 ```
 
+Ferrum bounds Codex and streaming OpenAI-compatible requests with a 60-second initial-response timeout and a 90-second idle timeout between stream chunks. Initial Codex timeouts use the normal transient retry policy; a stalled stream fails without replaying partial output.
+
 You can override the base URL with:
 
 ```bash

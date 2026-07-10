@@ -1,5 +1,6 @@
 mod agent;
 mod auth;
+mod cancel;
 mod cli;
 mod config;
 mod context;

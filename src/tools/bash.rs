@@ -7,8 +7,9 @@ use std::{
     path::Path,
     process::{Command, Stdio},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
     },
     thread,
     time::{Duration, Instant},
@@ -19,6 +20,7 @@ use uuid::Uuid;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const TERMINATE_GRACE: Duration = Duration::from_millis(200);
+const PIPE_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug)]
 pub struct BashOutput {
@@ -28,6 +30,7 @@ pub struct BashOutput {
     pub timed_out: bool,
 }
 
+#[cfg(test)]
 pub async fn run(command: &str, cwd: &Path, timeout: Duration) -> Result<BashOutput> {
     run_with_cancel(command, cwd, timeout, None).await
 }
@@ -111,8 +114,8 @@ fn run_blocking(
 fn finish_interrupted_child(
     pid: u32,
     mut child: std::process::Child,
-    stdout_reader: thread::JoinHandle<Result<Vec<u8>>>,
-    stderr_reader: thread::JoinHandle<Result<Vec<u8>>>,
+    stdout_reader: OutputReader,
+    stderr_reader: OutputReader,
     message: &str,
 ) -> Result<BashOutput> {
     terminate_process_group(pid);
@@ -144,21 +147,49 @@ fn finish_interrupted_child(
     })
 }
 
-fn spawn_reader(pipe: Option<impl Read + Send + 'static>) -> thread::JoinHandle<Result<Vec<u8>>> {
-    thread::spawn(move || {
-        let mut output = Vec::new();
-        if let Some(mut pipe) = pipe {
-            pipe.read_to_end(&mut output)
-                .context("failed to read bash output")?;
-        }
-        Ok(output)
-    })
+struct OutputReader {
+    output: Arc<Mutex<Vec<u8>>>,
+    done: Receiver<Result<()>>,
 }
 
-fn join_reader(handle: thread::JoinHandle<Result<Vec<u8>>>) -> Result<Vec<u8>> {
-    handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("bash output reader panicked"))?
+fn spawn_reader(pipe: Option<impl Read + Send + 'static>) -> OutputReader {
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader_output = Arc::clone(&output);
+    let (sender, done) = mpsc::channel();
+    thread::spawn(move || {
+        let result = (|| {
+            let Some(mut pipe) = pipe else {
+                return Ok(());
+            };
+            let mut chunk = [0_u8; 8192];
+            loop {
+                let count = pipe
+                    .read(&mut chunk)
+                    .context("failed to read bash output")?;
+                if count == 0 {
+                    return Ok(());
+                }
+                reader_output
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend_from_slice(&chunk[..count]);
+            }
+        })();
+        let _ = sender.send(result);
+    });
+    OutputReader { output, done }
+}
+
+fn join_reader(reader: OutputReader) -> Result<Vec<u8>> {
+    match reader.done.recv_timeout(PIPE_DRAIN_TIMEOUT) {
+        Ok(result) => result?,
+        Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {}
+    }
+    Ok(reader
+        .output
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone())
 }
 
 fn terminate_process_group(pid: u32) {
@@ -268,10 +299,27 @@ mod tests {
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
+        let cancelled_at = Instant::now();
         cancel.store(true, Ordering::Relaxed);
         let output = handle.await.unwrap();
+        assert!(cancelled_at.elapsed() < Duration::from_secs(2));
         assert!(!output.timed_out);
         assert!(output.stderr.contains("aborted"));
+    }
+
+    #[tokio::test]
+    async fn escaped_descendant_cannot_hold_output_pipe_forever() {
+        let temp = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let output = run(
+            "setsid sh -c 'sleep 3' & echo done",
+            temp.path(),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(output.stdout, "done\n");
     }
 
     #[tokio::test]

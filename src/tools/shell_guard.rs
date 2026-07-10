@@ -53,7 +53,8 @@ pub fn evaluate(command: &str, safety: SafetyLevel) -> ShellGuardDecision {
         match token {
             Token::Word(word) => {
                 if pending_redirection {
-                    if is_sensitive_path(&word.to_ascii_lowercase()) {
+                    let normalized = word.to_ascii_lowercase();
+                    if is_sensitive_path(&normalized) && normalized != "/dev/null" {
                         return deny("redirection targeting sensitive path");
                     }
                     pending_redirection = false;
@@ -881,6 +882,12 @@ mod tests {
         assert_denied("printf bad > ~/.ssh/config");
         assert_denied("cat key >> ~/.aws/credentials");
         assert_denied("printf bad > /etc/hosts");
+        assert_denied("printf bad > /dev/sda");
+        assert_allowed("command </dev/null >/dev/null 2>&1");
+        assert_allowed_at(
+            "nohup curl -L --output download-test.bin https://example.com/file > download.log 2>&1 </dev/null & echo $!",
+            SafetyLevel::Low,
+        );
     }
 
     #[test]

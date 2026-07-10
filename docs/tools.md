@@ -6,7 +6,7 @@ Native tools are available by default, then narrowed by `--tools` and `[tools]` 
 
 Interactive mode renders tool calls in a readable multiline format and prints a bounded preview of tool results. Full tool results remain in the model/session context unless the underlying tool output itself was bounded.
 
-For providers that support streaming, Ferrum streams provider events live. If thinking is enabled and the provider returns displayable reasoning text, Ferrum streams that provider-supplied thinking before the assistant answer; it does not synthesize thinking or expose hidden chain-of-thought. Press `Esc` during an active interactive turn to abort the current model/tool turn and return to the prompt. `Ctrl-C` also aborts foreground tool execution such as `wait`.
+For providers that support streaming, Ferrum streams provider events live. If thinking is enabled and the provider returns displayable reasoning text, Ferrum streams that provider-supplied thinking before the assistant answer; it does not synthesize thinking or expose hidden chain-of-thought. Press `Esc` or `Ctrl-C` during an active interactive operation to immediately abort the current model request, retry delay, `/models` lookup, MCP call, foreground tool, or `!`/`!!` shell command and return to the prompt.
 
 When a turn continues after tool execution, Ferrum prints a simple separator before the post-tool assistant response.
 
