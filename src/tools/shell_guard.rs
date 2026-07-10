@@ -357,29 +357,6 @@ fn evaluate_command_inner(command: &[String], safety: SafetyLevel, depth: usize)
         return Some("shell compound control syntax".to_string());
     }
 
-    if matches!(base.as_str(), "command" | "builtin")
-        && args.first().is_some_and(|arg| {
-            let command = command_name(arg);
-            is_dynamic_shell_builtin(command)
-                || is_shell_control_word(command)
-                || is_shell_interpreter(command)
-        })
-    {
-        return Some("shell builtin or wrapper bypass command".to_string());
-    }
-
-    if base == "env" && env_s_payload_is_dangerous(args, safety, depth) {
-        return Some("shell launcher through env -S".to_string());
-    }
-
-    if is_command_wrapper(&base)
-        && args
-            .iter()
-            .any(|arg| is_shell_interpreter(command_name(arg)))
-    {
-        return Some("shell launcher through wrapper command".to_string());
-    }
-
     if base == "busybox" && args.first().is_some_and(|arg| is_shell_interpreter(arg)) {
         return Some("shell interpreter invocation".to_string());
     }
@@ -794,51 +771,11 @@ fn is_dynamic_shell_builtin(command: &str) -> bool {
     matches!(command, "eval" | "exec" | "source" | ".")
 }
 
-fn is_command_wrapper(command: &str) -> bool {
-    matches!(
-        command,
-        "env" | "command" | "nohup" | "timeout" | "nice" | "setsid" | "stdbuf"
-    )
-}
-
 fn is_detacher_command(command: &str) -> bool {
     matches!(
         command,
         "setsid" | "nohup" | "daemonize" | "disown" | "systemd-run" | "at" | "batch"
     )
-}
-
-fn env_s_payload_is_dangerous(args: &[String], safety: SafetyLevel, depth: usize) -> bool {
-    if depth >= 4 {
-        return true;
-    }
-    for (index, arg) in args.iter().enumerate() {
-        let payload = if arg == "-S" {
-            args.get(index + 1).map(String::as_str)
-        } else {
-            arg.strip_prefix("-S").filter(|payload| !payload.is_empty())
-        };
-        let Some(payload) = payload else {
-            continue;
-        };
-        let words = tokenize(payload)
-            .into_iter()
-            .filter_map(|token| match token {
-                Token::Word(word) => Some(word),
-                Token::Operator(_) => None,
-            })
-            .collect::<Vec<_>>();
-        if words.is_empty() {
-            continue;
-        }
-        if is_shell_interpreter(command_name(&words[0])) {
-            return true;
-        }
-        if evaluate_command_inner(&words, safety, depth + 1).is_some() {
-            return true;
-        }
-    }
-    false
 }
 
 fn generated_code_execution(command: &str, args: &[String]) -> bool {
