@@ -22,7 +22,7 @@ use std::{
     collections::BTreeMap,
     env,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         Arc,
@@ -120,6 +120,9 @@ fn provider_status_error(label: &str, status: StatusCode, body: &[u8]) -> anyhow
     let message = format!("{label} returned {status}: {text}");
     if is_structured_context_overflow(status, body) {
         return ProviderFailure::ContextOverflow { message }.into();
+    }
+    if status == StatusCode::UNAUTHORIZED {
+        return ProviderFailure::Authentication { message }.into();
     }
     anyhow::anyhow!(message)
 }
@@ -613,10 +616,6 @@ impl Provider for OpenAiCodexProvider {
         thinking: ThinkingLevel,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
-            let api_key = openai_codex::get_api_key_from_path(self.auth_path.clone())
-                .await?
-                .context("OpenAI Codex auth not found; run `ferrum login openai`")?;
-            let account_id = openai_codex::extract_account_id(&api_key)?;
             let instructions = codex_instructions(messages);
             let request = CodexResponsesRequest {
                 model,
@@ -639,11 +638,10 @@ impl Provider for OpenAiCodexProvider {
                 parallel_tool_calls: !_tools.is_empty(),
             };
 
-            let response = send_codex_request_with_retries(
+            let response = send_codex_authenticated_request(
                 &self.client,
                 &self.responses_url(),
-                &api_key,
-                &account_id,
+                &self.auth_path,
                 &request,
                 None,
             )
@@ -680,10 +678,6 @@ impl Provider for OpenAiCodexProvider {
         cancelled: Option<Arc<AtomicBool>>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
-            let api_key = openai_codex::get_api_key_from_path(self.auth_path.clone())
-                .await?
-                .context("OpenAI Codex auth not found; run `ferrum login openai`")?;
-            let account_id = openai_codex::extract_account_id(&api_key)?;
             let instructions = codex_instructions(messages);
             let request = CodexResponsesRequest {
                 model,
@@ -706,11 +700,10 @@ impl Provider for OpenAiCodexProvider {
                 parallel_tool_calls: !_tools.is_empty(),
             };
 
-            let response = send_codex_request_with_retries(
+            let response = send_codex_authenticated_request(
                 &self.client,
                 &self.responses_url(),
-                &api_key,
-                &account_id,
+                &self.auth_path,
                 &request,
                 cancelled.as_ref(),
             )
@@ -736,6 +729,40 @@ impl Provider for OpenAiCodexProvider {
                 .finish()
                 .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))
         })
+    }
+}
+
+async fn send_codex_authenticated_request(
+    client: &Client,
+    url: &str,
+    auth_path: &Path,
+    request: &CodexResponsesRequest<'_>,
+    cancelled: Option<&Arc<AtomicBool>>,
+) -> Result<Response> {
+    let api_key = openai_codex::get_api_key_from_path(auth_path.to_path_buf())
+        .await?
+        .context("OpenAI Codex auth not found; run `ferrum login openai`")?;
+    let account_id = openai_codex::extract_account_id(&api_key)?;
+    match send_codex_request_with_retries(client, url, &api_key, &account_id, request, cancelled)
+        .await
+    {
+        Err(error) if crate::providers::is_authentication_error(&error) => {
+            let refreshed_api_key =
+                openai_codex::refresh_after_rejection(auth_path.to_path_buf(), &api_key)
+                    .await?
+                    .context("OpenAI Codex auth not found; run `ferrum login openai`")?;
+            let account_id = openai_codex::extract_account_id(&refreshed_api_key)?;
+            send_codex_request_with_retries(
+                client,
+                url,
+                &refreshed_api_key,
+                &account_id,
+                request,
+                cancelled,
+            )
+            .await
+        }
+        result => result,
     }
 }
 
@@ -2516,6 +2543,16 @@ mod tests {
             br#"{"error":{"code":"bad_request","message":"too many tokens"}}"#,
         );
         assert!(!crate::providers::is_context_overflow_error(&unstructured));
+    }
+
+    #[test]
+    fn unauthorized_status_is_typed_for_refresh_recovery() {
+        let error = provider_status_error(
+            "test provider",
+            StatusCode::UNAUTHORIZED,
+            br#"{"error":{"code":"invalid_token"}}"#,
+        );
+        assert!(crate::providers::is_authentication_error(&error));
     }
 
     #[test]

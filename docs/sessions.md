@@ -15,7 +15,9 @@ Entry types:
 - `metadata`
 - `compaction`
 
-Sessions are append-oriented and human-inspectable. New session files are created with user-private permissions (`0600`), and Ferrum tightens existing session file permissions on open when possible.
+Sessions are append-oriented and human-inspectable. New session files are created with user-private permissions (`0600`), and Ferrum tightens existing session file permissions on open when possible. Anonymous filenames include a timestamp plus UUID entropy.
+
+Each JSONL append is serialized before locking, bounded to 16 MiB, written with its newline while holding an exclusive advisory file lock, flushed, and synced before Ferrum reports success. Readers take a shared lock and process bounded records incrementally. When a writer opens or appends to a session, it removes an incomplete trailing record under the exclusive lock before adding new data. Complete prior records remain intact.
 
 ## Resume and named sessions
 
@@ -92,7 +94,7 @@ When an interactive session is resumed with `--resume`, `--continue`, or `--sess
 
 `/sessions` lists recent sessions for the current directory. `/sessions pick` opens a lightweight numbered picker where entering a number opens that session and entering text filters the list. `/sessions del` opens a deletion picker. `/sessions new` starts a fresh session.
 
-Empty interactive sessions are removed automatically when you quit, switch sessions, or start a new session. A session is kept once it contains at least one message beyond the header. `/sessions` hides old empty sessions by default, while still showing the current empty session so you can see where you are.
+Header-only and metadata-only sessions are retained so a failed start or state transition never unlinks an active file handle. `/sessions` hides old empty sessions by default, while still showing the current empty session so you can see where you are. Automatic latest-session selection skips abandoned anonymous header-only sessions.
 
 `/title` shows the current session title. `/title <text>` sets an explicit title used by `/sessions`. `--title <text>` sets the title when starting, resuming, or running a print-mode session. If no title is set, Ferrum falls back to a title inferred from the first user message.
 
@@ -108,7 +110,11 @@ Interactive input supports completion and hints for slash commands, selected com
 
 The resolved tool list is stored in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
-Model-facing history tools, `history_search` and `history_read`, can search and read the current session JSONL by line number, including tool calls/results and entries archived before compaction. They are tools only; there is no slash command for them. See [`tools.md`](tools.md).
+Model-facing history tools, `history_search` and `history_read`, stream bounded current-session JSONL records by line number, including tool calls/results and entries archived before compaction. They stop when their result limit is met rather than loading the complete session into memory. They are tools only; there is no slash command for them. See [`tools.md`](tools.md).
+
+## Durability checkpoints
+
+A successfully returned session append is a durability checkpoint: the complete JSON record and newline have been flushed and synced. Session creation also syncs the containing session directory after its header is durable. Normal exit and session switching issue an additional sync checkpoint before dropping the old session. Filesystem or hardware behavior can still affect guarantees below the operating system's `fsync` contract.
 
 `/session` shows:
 

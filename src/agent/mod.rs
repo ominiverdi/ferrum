@@ -584,7 +584,7 @@ pub async fn run_interactive(
                     match handle_bang_command(input, config, &mut state).await {
                         Ok(CommandAction::Continue) => continue,
                         Ok(CommandAction::Quit) => {
-                            state.remove_empty_session()?;
+                            state.checkpoint_session()?;
                             save_history_private(&mut rl, &history);
                             return Ok(());
                         }
@@ -660,7 +660,7 @@ pub async fn run_interactive(
                     match handle_command(input, config, &mut state) {
                         Ok(CommandAction::Continue) => continue,
                         Ok(CommandAction::Quit) => {
-                            state.remove_empty_session()?;
+                            state.checkpoint_session()?;
                             save_history_private(&mut rl, &history);
                             return Ok(());
                         }
@@ -698,7 +698,7 @@ pub async fn run_interactive(
                     .is_some_and(|last| now.duration_since(last) <= Duration::from_millis(900))
                 {
                     println!("^C^C");
-                    state.remove_empty_session()?;
+                    state.checkpoint_session()?;
                     save_history_private(&mut rl, &history);
                     return Ok(());
                 }
@@ -708,7 +708,7 @@ pub async fn run_interactive(
             }
             Err(ReadlineError::Eof) => {
                 println!();
-                state.remove_empty_session()?;
+                state.checkpoint_session()?;
                 save_history_private(&mut rl, &history);
                 return Ok(());
             }
@@ -1564,8 +1564,9 @@ impl AgentState {
                 }
             },
         };
+        let mut candidate = config.clone();
         let _restored_tools = restore_session_preferences(
-            config,
+            &mut candidate,
             &path,
             restore_thinking,
             restore_safety,
@@ -1573,7 +1574,9 @@ impl AgentState {
             restore_provider,
             restore_model,
         )?;
-        Self::open_session(config, path)
+        let state = Self::open_session(&candidate, path)?;
+        *config = candidate;
+        Ok(state)
     }
 
     fn resume_or_create_ref(config: &mut Config, reference: &str) -> Result<Self> {
@@ -1592,9 +1595,18 @@ impl AgentState {
         )?;
         match resolution {
             session::jsonl::SessionRefResolution::Existing(path) => {
-                let _restored_tools =
-                    restore_session_preferences(config, &path, true, true, true, true, true)?;
-                let state = Self::open_session(config, path.clone())?;
+                let mut candidate = config.clone();
+                let _restored_tools = restore_session_preferences(
+                    &mut candidate,
+                    &path,
+                    true,
+                    true,
+                    true,
+                    true,
+                    true,
+                )?;
+                let state = Self::open_session(&candidate, path.clone())?;
+                *config = candidate;
                 println!(
                     "resumed {} ({} messages)",
                     path.display(),
@@ -1621,6 +1633,7 @@ impl AgentState {
         show_preview: bool,
     ) -> Result<Self> {
         let cwd = std::env::current_dir()?;
+        let session = session::JsonlSession::open(path.clone())?;
         let saved_tool_names = session::jsonl::session_info(&path)?.and_then(|info| info.tools);
         let mut messages = session::jsonl::load_messages(&path)?;
         if show_preview {
@@ -1644,7 +1657,7 @@ impl AgentState {
             ));
         }
         Ok(Self {
-            session: session::JsonlSession::open(path)?,
+            session,
             messages,
             skills,
             cwd,
@@ -2474,26 +2487,44 @@ impl AgentState {
         self.last_context_warning_bucket = Some(bucket);
     }
 
-    fn remove_empty_session(&mut self) -> Result<()> {
-        if self.session.remove_if_empty()? {
-            self.last_session_list.clear();
-        }
-        Ok(())
+    fn checkpoint_session(&mut self) -> Result<()> {
+        self.session.sync_checkpoint()
     }
 
-    fn refresh_runtime_context(&mut self, config: &Config) -> Result<()> {
-        let message =
-            messages::Message::text(messages::Role::System, runtime_context(config, &self.cwd)?);
+    fn replace_runtime_context_message(&mut self, message: messages::Message) {
         if self
             .messages
             .first()
             .is_some_and(|message| matches!(message.role, messages::Role::System))
         {
-            self.messages[0] = message.clone();
+            self.messages[0] = message;
         } else {
-            self.messages.insert(0, message.clone());
+            self.messages.insert(0, message);
         }
-        self.session.append_message(&message)
+    }
+
+    fn refresh_runtime_context(&mut self, config: &Config) -> Result<()> {
+        let message =
+            messages::Message::text(messages::Role::System, runtime_context(config, &self.cwd)?);
+        self.session.append_message(&message)?;
+        self.replace_runtime_context_message(message);
+        Ok(())
+    }
+
+    fn commit_provider_model_transition(
+        &mut self,
+        config: &mut Config,
+        candidate: Config,
+    ) -> Result<()> {
+        let message = messages::Message::text(
+            messages::Role::System,
+            runtime_context(&candidate, &self.cwd)?,
+        );
+        self.session
+            .append_provider_model_transition(&candidate.provider_name, &candidate.model)?;
+        self.replace_runtime_context_message(message);
+        *config = candidate;
+        Ok(())
     }
 
     fn set_title(&mut self, title: &str) -> Result<()> {
@@ -2543,11 +2574,13 @@ impl AgentState {
             println!("Already on session {}", path.display());
             return Ok(());
         }
-        self.remove_empty_session()?;
+        let mut candidate = config.clone();
         let _restored_tools =
-            restore_session_preferences(config, &path, true, true, true, true, true)?;
-        let next = Self::open_session(config, path)?;
+            restore_session_preferences(&mut candidate, &path, true, true, true, true, true)?;
+        let next = Self::open_session(&candidate, path)?;
+        self.checkpoint_session()?;
         *self = next;
+        *config = candidate;
         print_current_session_header(self)?;
         Ok(())
     }
@@ -2572,8 +2605,8 @@ impl AgentState {
     }
 
     fn new_session(&mut self, config: &Config) -> Result<()> {
-        self.remove_empty_session()?;
         let next = Self::new(config)?;
+        self.checkpoint_session()?;
         println!("started new session {}", next.session.path().display());
         *self = next;
         print_current_session_header(self)?;
@@ -4555,6 +4588,89 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn failed_session_switch_preserves_active_state_and_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        let active_path = state.session.path().clone();
+        let target = session::JsonlSession::create(
+            config.sessions_dir(),
+            Some("missing-provider".to_string()),
+            Some("target-model".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let target_path = target.path().clone();
+        drop(target);
+        state.last_session_list =
+            vec![session::jsonl::session_info(&target_path).unwrap().unwrap()];
+        let before = (
+            config.provider_name.clone(),
+            config.model.clone(),
+            config.provider_model.clone(),
+        );
+
+        let error = state.open_session_by_index(&mut config, 1).unwrap_err();
+
+        assert!(error.to_string().contains("provider"), "{error:#}");
+        assert_eq!(state.session.path(), &active_path);
+        assert!(active_path.exists());
+        assert_eq!(
+            before,
+            (
+                config.provider_name.clone(),
+                config.model.clone(),
+                config.provider_model.clone(),
+            )
+        );
+    }
+
+    #[test]
+    fn failed_target_open_preserves_active_session_and_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        let active_path = state.session.path().clone();
+        let target = session::JsonlSession::create(
+            config.sessions_dir(),
+            Some("fake".to_string()),
+            Some("target-model".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let target_path = target.path().clone();
+        drop(target);
+        state.last_session_list =
+            vec![session::jsonl::session_info(&target_path).unwrap().unwrap()];
+        std::fs::write(config.config_dir.join("system.md"), [0xff]).unwrap();
+        let before = (
+            config.provider_name.clone(),
+            config.model.clone(),
+            config.provider_model.clone(),
+        );
+
+        let error = state.open_session_by_index(&mut config, 1).unwrap_err();
+
+        assert!(error.to_string().contains("system.md"), "{error:#}");
+        assert_eq!(state.session.path(), &active_path);
+        assert!(active_path.exists());
+        assert_eq!(
+            before,
+            (
+                config.provider_name.clone(),
+                config.model.clone(),
+                config.provider_model.clone(),
+            )
+        );
+    }
+
+    #[test]
     fn resume_without_matching_session_creates_new_session() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = std::env::current_dir().unwrap();
@@ -5836,10 +5952,9 @@ fn handle_command(
         }
         "/model" => {
             if let Some(model) = parts.next() {
-                config.set_model(model)?;
-                state.session.append_provider(&config.provider_name)?;
-                state.session.append_model(&config.model)?;
-                state.refresh_runtime_context(config)?;
+                let mut candidate = config.clone();
+                candidate.set_model(model)?;
+                state.commit_provider_model_transition(config, candidate)?;
             }
             println!("model: {}", config.model);
             if config.provider_model != config.model {
@@ -5861,10 +5976,9 @@ fn handle_command(
         }
         "/provider" => {
             if let Some(provider) = parts.next() {
-                config.set_provider(provider)?;
-                state.session.append_provider(&config.provider_name)?;
-                state.session.append_model(&config.model)?;
-                state.refresh_runtime_context(config)?;
+                let mut candidate = config.clone();
+                candidate.set_provider(provider)?;
+                state.commit_provider_model_transition(config, candidate)?;
             }
             println!("provider: {}", config.provider_name);
             println!("model: {}", config.model);

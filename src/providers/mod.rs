@@ -28,6 +28,8 @@ const MAX_MODEL_ERROR_DISPLAY_BYTES: usize = 8 * 1024;
 pub enum ProviderFailure {
     #[error("{message}")]
     ContextOverflow { message: String },
+    #[error("{message}")]
+    Authentication { message: String },
 }
 
 pub fn is_context_overflow_error(error: &anyhow::Error) -> bool {
@@ -35,6 +37,15 @@ pub fn is_context_overflow_error(error: &anyhow::Error) -> bool {
         matches!(
             cause.downcast_ref::<ProviderFailure>(),
             Some(ProviderFailure::ContextOverflow { .. })
+        )
+    })
+}
+
+pub fn is_authentication_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<ProviderFailure>(),
+            Some(ProviderFailure::Authentication { .. })
         )
     })
 }
@@ -141,10 +152,6 @@ pub async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
             base_url,
             auth_path,
         } => {
-            let api_key = openai_codex::get_api_key_from_path(auth_path.clone())
-                .await?
-                .context("OpenAI Codex auth not found; run `ferrum login openai`")?;
-            let account_id = openai_codex::extract_account_id(&api_key)?;
             let client = Client::builder()
                 .timeout(Duration::from_secs(20))
                 .redirect(Policy::none())
@@ -179,7 +186,7 @@ pub async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
             };
 
             let mut url = codex_models_url(base_url, &client_version);
-            let models = match fetch_codex_models(&client, &url, &api_key, &account_id).await {
+            let models = match fetch_codex_models_with_auth(&client, &url, auth_path).await {
                 Ok(models) => models,
                 Err(error)
                     if should_retry_codex_models_with_fallback(
@@ -192,7 +199,7 @@ pub async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
                         "Codex model listing with client version {client_version} failed: {error:#}; retrying with tested fallback {DEFAULT_CODEX_CLIENT_VERSION}"
                     ));
                     url = codex_models_url(base_url, DEFAULT_CODEX_CLIENT_VERSION);
-                    fetch_codex_models(&client, &url, &api_key, &account_id).await?
+                    fetch_codex_models_with_auth(&client, &url, auth_path).await?
                 }
                 Err(error) => return Err(error),
             };
@@ -286,6 +293,28 @@ fn validate_codex_client_version(version: &str) -> Result<String> {
     Ok(version.to_string())
 }
 
+async fn fetch_codex_models_with_auth(
+    client: &Client,
+    url: &str,
+    auth_path: &std::path::Path,
+) -> Result<Vec<String>> {
+    let api_key = openai_codex::get_api_key_from_path(auth_path.to_path_buf())
+        .await?
+        .context("OpenAI Codex auth not found; run `ferrum login openai`")?;
+    let account_id = openai_codex::extract_account_id(&api_key)?;
+    match fetch_codex_models(client, url, &api_key, &account_id).await {
+        Err(error) if is_authentication_error(&error) => {
+            let refreshed_api_key =
+                openai_codex::refresh_after_rejection(auth_path.to_path_buf(), &api_key)
+                    .await?
+                    .context("OpenAI Codex auth not found; run `ferrum login openai`")?;
+            let account_id = openai_codex::extract_account_id(&refreshed_api_key)?;
+            fetch_codex_models(client, url, &refreshed_api_key, &account_id).await
+        }
+        result => result,
+    }
+}
+
 async fn fetch_codex_models(
     client: &Client,
     url: &str,
@@ -309,6 +338,12 @@ async fn fetch_codex_models(
             return Err(CodexModelCompatibilityError {
                 status,
                 body: body_text,
+            }
+            .into());
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(ProviderFailure::Authentication {
+                message: format!("OpenAI Codex model listing failed: {status}: {body_text}"),
             }
             .into());
         }

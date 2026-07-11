@@ -1,9 +1,13 @@
+use crate::persistence::{
+    BoundedLine, MAX_JSONL_RECORD_BYTES, ensure_record_size, lock_exclusive, lock_shared,
+    read_bounded_line, repair_incomplete_tail,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufReader, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -35,8 +39,6 @@ impl UsageRecord {
             self.input_tokens
                 .unwrap_or(0)
                 .saturating_add(self.output_tokens.unwrap_or(0))
-                .saturating_add(self.cache_read_tokens)
-                .saturating_add(self.cache_write_tokens)
         })
     }
 }
@@ -105,12 +107,22 @@ pub fn append_usage_record(data_dir: &Path, record: &UsageRecord) -> Result<()> 
     tighten_file_permissions(&path);
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .mode(0o600)
         .open(&path)
         .with_context(|| format!("failed to open {}", path.display()))?;
-    let json = serde_json::to_string(record)?;
-    writeln!(file, "{json}").with_context(|| format!("failed to write {}", path.display()))
+    let mut json = serde_json::to_vec(record)?;
+    ensure_record_size(&json, "usage")?;
+    json.push(b'\n');
+    let _lock = lock_exclusive(&file)?;
+    repair_incomplete_tail(&mut file)?;
+    file.write_all(&json)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed to flush {}", path.display()))?;
+    file.sync_data()
+        .with_context(|| format!("failed to sync {}", path.display()))
 }
 
 pub fn summarize_usage(
@@ -119,12 +131,11 @@ pub fn summarize_usage(
     now: u64,
 ) -> Result<Vec<UsageSummaryRow>> {
     let since = now.saturating_sub(period.seconds());
-    let records = read_usage_records(data_dir)?;
     let mut grouped: BTreeMap<(String, String), UsageSummary> = BTreeMap::new();
-    for record in records
-        .into_iter()
-        .filter(|record| record.timestamp_unix >= since && record.timestamp_unix <= now)
-    {
+    for_each_usage_record(data_dir, |record| {
+        if record.timestamp_unix < since || record.timestamp_unix > now {
+            return;
+        }
         let summary = grouped
             .entry((record.provider.clone(), record.model.clone()))
             .or_default();
@@ -151,7 +162,7 @@ pub fn summarize_usage(
         summary.total_tokens = summary
             .total_tokens
             .saturating_add(record.normalized_total());
-    }
+    })?;
     Ok(grouped
         .into_iter()
         .map(|((provider, model), summary)| UsageSummaryRow {
@@ -162,28 +173,70 @@ pub fn summarize_usage(
         .collect())
 }
 
-fn read_usage_records(data_dir: &Path) -> Result<Vec<UsageRecord>> {
+fn for_each_usage_record(data_dir: &Path, mut visit: impl FnMut(UsageRecord)) -> Result<()> {
     let path = usage_path(data_dir);
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let file = File::open(&path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut records = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let _lock = lock_shared(&file)?;
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    let mut line_number = 0usize;
+    let mut diagnostics = 0usize;
+    loop {
+        let line = read_bounded_line(&mut reader, &mut bytes, MAX_JSONL_RECORD_BYTES)?;
+        if line == BoundedLine::Eof {
+            break;
+        }
+        line_number += 1;
+        let BoundedLine::Line { terminated } = line else {
+            if diagnostics < 10 {
+                eprintln!(
+                    "[usage] skipped oversized usage record at line {} in {}",
+                    line_number,
+                    path.display()
+                );
+            }
+            diagnostics += 1;
+            continue;
+        };
+        if !terminated {
+            if diagnostics < 10 {
+                eprintln!(
+                    "[usage] skipped incomplete trailing record at line {} in {}",
+                    line_number,
+                    path.display()
+                );
+            }
+            diagnostics += 1;
+            break;
+        }
+        if bytes.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        match serde_json::from_str::<UsageRecord>(&line) {
-            Ok(record) => records.push(record),
-            Err(error) => eprintln!(
-                "[usage] skipped malformed usage record in {}: {error}",
-                path.display()
-            ),
+        match serde_json::from_slice::<UsageRecord>(&bytes) {
+            Ok(record) => visit(record),
+            Err(error) => {
+                if diagnostics < 10 {
+                    eprintln!(
+                        "[usage] skipped malformed usage record at line {} in {}: {error}",
+                        line_number,
+                        path.display()
+                    );
+                }
+                diagnostics += 1;
+            }
         }
     }
-    Ok(records)
+    if diagnostics > 10 {
+        eprintln!(
+            "[usage] omitted {} additional corruption diagnostics for {}",
+            diagnostics - 10,
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 pub fn now_unix() -> u64 {
@@ -289,7 +342,63 @@ mod tests {
         assert_eq!(rows[0].summary.estimated_records, 0);
         assert_eq!(rows[0].summary.provider_records, 0);
         assert_eq!(rows[0].summary.unknown_records, 1);
-        assert_eq!(rows[0].summary.total_tokens, 14);
+        assert_eq!(rows[0].summary.total_tokens, 5);
+    }
+
+    #[test]
+    fn usage_append_process_child() {
+        let Ok(dir) = std::env::var("FERRUM_USAGE_STRESS_DIR") else {
+            return;
+        };
+        let writer = std::env::var("FERRUM_USAGE_STRESS_WRITER").unwrap();
+        for index in 0..32 {
+            append_usage_record(
+                Path::new(&dir),
+                &UsageRecord {
+                    timestamp_unix: index,
+                    provider: format!("provider-{writer}"),
+                    model: "model".to_string(),
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    total_tokens: Some(2),
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    source: "test".to_string(),
+                },
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn multiprocess_usage_appends_remain_valid_jsonl() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let mut children = Vec::new();
+        for writer in 0..8 {
+            children.push(
+                std::process::Command::new(&executable)
+                    .arg("--exact")
+                    .arg("usage::tests::usage_append_process_child")
+                    .arg("--nocapture")
+                    .env("FERRUM_USAGE_STRESS_DIR", temp.path())
+                    .env("FERRUM_USAGE_STRESS_WRITER", writer.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for mut child in children {
+            assert!(child.wait().unwrap().success());
+        }
+
+        let text = fs::read_to_string(temp.path().join("usage.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 8 * 32);
+        assert!(
+            text.lines()
+                .all(|line| serde_json::from_str::<UsageRecord>(line).is_ok())
+        );
     }
 
     #[test]

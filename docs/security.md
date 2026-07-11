@@ -32,7 +32,10 @@ Ferrum also hardens adjacent tool plumbing: MCP inbound `Content-Length` frames
 are capped before allocation, sanitized MCP tool-name collisions are rejected,
 MCP metadata is bounded before it reaches model tool definitions, malformed
 provider tool-call JSON is treated as an error, and session, usage, and OAuth
-auth files are created or tightened private to the user.
+auth files are created or tightened private to the user. Session and usage JSONL
+appends use advisory interprocess locks, bounded records, incomplete-tail repair,
+and durable sync checkpoints. OAuth storage fails closed on malformed JSON and
+uses locked merge plus synced atomic replacement.
 
 ## How to think about risk
 

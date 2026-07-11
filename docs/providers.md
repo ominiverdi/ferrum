@@ -15,7 +15,9 @@ Authentication uses OAuth and stores credentials in:
 ~/.config/ferrum/auth.json
 ```
 
-The auth file is created with user-only write permissions where possible.
+The auth file is created with user-only write permissions where possible. Updates fail closed if existing storage is malformed, lock and reread the latest JSON before merging the Codex credential, write through a random private temporary file, sync it, atomically rename it, and sync the containing directory. Unrelated provider entries are preserved across concurrent updates.
+
+Ferrum refreshes credentials before expiry. Refresh is single-flight across cooperating Ferrum processes, preserves the existing refresh token when the server omits a rotated token, and retries one HTTP 401 with a freshly resolved credential. OAuth HTTP requests and callback handling have deadlines and size limits. The callback listener ignores unrelated or wrong-state localhost requests while waiting for the valid state/code, and falls back from registered port 1455 to registered port 1457 if needed.
 
 Login:
 

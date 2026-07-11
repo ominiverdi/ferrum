@@ -1,10 +1,16 @@
-use crate::agent::messages::{Message, Role};
+use crate::{
+    agent::messages::{Message, Role},
+    persistence::{
+        BoundedLine, MAX_JSONL_RECORD_BYTES, ensure_record_size, lock_exclusive, lock_shared,
+        read_bounded_line, repair_incomplete_tail,
+    },
+};
 use anyhow::{Context, Result};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufReader, Write},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -89,18 +95,31 @@ impl JsonlSession {
         safety: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
-        Self::create_with_header_id(
-            dir,
-            format!("{}.jsonl", now_ms()),
-            Uuid::new_v4().to_string(),
-            provider,
-            model,
-            thinking,
-            color_mode,
-            diff_mode,
-            safety,
-            tools,
-        )
+        for _ in 0..16 {
+            let filename = format!("{}-{}.jsonl", now_ms(), Uuid::new_v4());
+            match Self::create_with_header_id(
+                dir.clone(),
+                filename,
+                Uuid::new_v4().to_string(),
+                provider.clone(),
+                model.clone(),
+                thinking.clone(),
+                color_mode.clone(),
+                diff_mode.clone(),
+                safety.clone(),
+                tools.clone(),
+            ) {
+                Ok(session) => return Ok(session),
+                Err(error)
+                    if error.chain().any(|cause| {
+                        cause
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists)
+                    }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        anyhow::bail!("failed to allocate a unique anonymous session filename")
     }
 
     #[allow(dead_code)]
@@ -165,12 +184,13 @@ impl JsonlSession {
         let path = dir.join(filename);
         let file = OpenOptions::new()
             .create_new(true)
-            .write(true)
+            .read(true)
+            .append(true)
             .mode(0o600)
             .open(&path)
             .with_context(|| format!("failed to create {}", path.display()))?;
         let mut session = Self { path, file };
-        session.append(&SessionEntry::Header {
+        let header = SessionEntry::Header {
             id: header_id,
             parent_id: None,
             timestamp_ms: now_ms(),
@@ -185,7 +205,16 @@ impl JsonlSession {
             cwd: std::env::current_dir()
                 .ok()
                 .map(|path| canonical_display_path(&path)),
-        })?;
+        };
+        if let Err(error) = session.append(&header) {
+            drop(session.file);
+            let _ = fs::remove_file(&session.path);
+            return Err(error);
+        }
+        File::open(&dir)
+            .with_context(|| format!("failed to open {}", dir.display()))?
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", dir.display()))?;
         Ok(session)
     }
 
@@ -196,11 +225,19 @@ impl JsonlSession {
     pub fn open(path: PathBuf) -> Result<Self> {
         validate_session_file(&path)?;
         tighten_file_permissions(&path);
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
+            .read(true)
             .append(true)
             .mode(0o600)
             .open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
+        {
+            let _lock = lock_exclusive(&file)?;
+            if repair_incomplete_tail(&mut file)? {
+                file.sync_data()
+                    .context("failed to sync repaired session")?;
+            }
+        }
         Ok(Self { path, file })
     }
 
@@ -318,29 +355,13 @@ impl JsonlSession {
         })
     }
 
-    pub fn append_provider(&mut self, provider: &str) -> Result<()> {
+    pub fn append_provider_model_transition(&mut self, provider: &str, model: &str) -> Result<()> {
         self.append(&SessionEntry::Metadata {
             id: Uuid::new_v4().to_string(),
             parent_id: None,
             timestamp_ms: now_ms(),
             title: None,
             provider: Some(provider.to_string()),
-            model: None,
-            thinking: None,
-            color_mode: None,
-            diff_mode: None,
-            safety: None,
-            tools: None,
-        })
-    }
-
-    pub fn append_model(&mut self, model: &str) -> Result<()> {
-        self.append(&SessionEntry::Metadata {
-            id: Uuid::new_v4().to_string(),
-            parent_id: None,
-            timestamp_ms: now_ms(),
-            title: None,
-            provider: None,
             model: Some(model.to_string()),
             thinking: None,
             color_mode: None,
@@ -350,71 +371,114 @@ impl JsonlSession {
         })
     }
 
-    pub fn remove_if_empty(&mut self) -> Result<bool> {
+    pub fn sync_checkpoint(&mut self) -> Result<()> {
         self.file.flush().context("failed to flush session")?;
-        if !session_has_entries_after_header(&self.path)? {
-            fs::remove_file(&self.path).with_context(|| {
-                format!("failed to remove empty session {}", self.path.display())
-            })?;
-            return Ok(true);
-        }
-        Ok(false)
+        self.file.sync_data().context("failed to sync session")
     }
 
     fn append(&mut self, entry: &SessionEntry) -> Result<()> {
-        serde_json::to_writer(&mut self.file, entry)
-            .context("failed to serialize session entry")?;
+        self.append_entries(std::slice::from_ref(entry))
+    }
+
+    fn append_entries(&mut self, entries: &[SessionEntry]) -> Result<()> {
+        let mut records = Vec::new();
+        for entry in entries {
+            let record = serde_json::to_vec(entry).context("failed to serialize session entry")?;
+            ensure_record_size(&record, "session")?;
+            records.extend_from_slice(&record);
+            records.push(b'\n');
+        }
+        let _lock = lock_exclusive(&self.file)?;
+        repair_incomplete_tail(&mut self.file)?;
         self.file
-            .write_all(b"\n")
-            .context("failed to write session newline")?;
+            .write_all(&records)
+            .context("failed to write session entry")?;
         self.file.flush().context("failed to flush session")?;
+        self.file.sync_data().context("failed to sync session")?;
         Ok(())
     }
 }
 
-fn session_has_entries_after_header(path: &Path) -> Result<bool> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let entry: SessionEntry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
-        if matches!(
-            entry,
-            SessionEntry::Message { .. } | SessionEntry::Compaction { .. }
-        ) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+fn for_each_session_entry(
+    path: &Path,
+    visit: impl FnMut(usize, SessionEntry) -> Result<bool>,
+) -> Result<()> {
+    for_each_session_entry_with_diagnostics(path, true, visit)
 }
 
-pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
+fn for_each_session_entry_with_diagnostics(
+    path: &Path,
+    diagnose: bool,
+    mut visit: impl FnMut(usize, SessionEntry) -> Result<bool>,
+) -> Result<()> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut messages = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
-        let line_number = index + 1;
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+    let _lock = lock_shared(&file)?;
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::new();
+    let mut line_number = 0usize;
+    let mut diagnostics = 0usize;
+    loop {
+        let line = read_bounded_line(&mut reader, &mut bytes, MAX_JSONL_RECORD_BYTES)?;
+        if line == BoundedLine::Eof {
+            break;
         }
-        let entry: SessionEntry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(error) => {
+        line_number += 1;
+        let BoundedLine::Line { terminated } = line else {
+            if diagnose && diagnostics < 10 {
                 eprintln!(
-                    "[session] skipped malformed JSONL line {} in {}: {error}",
+                    "[session] skipped oversized JSONL record at line {} in {}",
                     line_number,
                     path.display()
                 );
+            }
+            diagnostics += 1;
+            continue;
+        };
+        if !terminated {
+            if diagnose && diagnostics < 10 {
+                eprintln!(
+                    "[session] skipped incomplete trailing JSONL record at line {} in {}",
+                    line_number,
+                    path.display()
+                );
+            }
+            diagnostics += 1;
+            break;
+        }
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let entry: SessionEntry = match serde_json::from_slice(&bytes) {
+            Ok(entry) => entry,
+            Err(error) => {
+                if diagnose && diagnostics < 10 {
+                    eprintln!(
+                        "[session] skipped malformed JSONL line {} in {}: {error}",
+                        line_number,
+                        path.display()
+                    );
+                }
+                diagnostics += 1;
                 continue;
             }
         };
+        if !visit(line_number, entry)? {
+            break;
+        }
+    }
+    if diagnose && diagnostics > 10 {
+        eprintln!(
+            "[session] omitted {} additional corruption diagnostics for {}",
+            diagnostics - 10,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
+    let mut messages = Vec::new();
+    for_each_session_entry(path, |_, entry| {
         match entry {
             SessionEntry::Message { message, .. } => messages.push(message),
             SessionEntry::Compaction { summary, .. } => {
@@ -426,7 +490,8 @@ pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
             }
             SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => {}
         }
-    }
+        Ok(true)
+    })?;
     Ok(messages)
 }
 
@@ -453,8 +518,9 @@ pub struct SessionInfo {
 
 pub fn latest_session_for_cwd(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
     Ok(list_sessions_for_cwd(dir, cwd)?
-        .first()
-        .map(|info| info.path.clone()))
+        .into_iter()
+        .find(|info| info.message_count > 0 || info.title != "(empty session)")
+        .map(|info| info.path))
 }
 
 pub fn list_sessions_for_cwd(dir: &Path, cwd: &Path) -> Result<Vec<SessionInfo>> {
@@ -477,17 +543,57 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
         return Ok(Vec::new());
     }
     let mut sessions = Vec::new();
+    let mut diagnostics = 0usize;
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if diagnostics < 10 {
+                    eprintln!("[session] skipped unreadable directory entry: {error}");
+                }
+                diagnostics += 1;
+                continue;
+            }
+        };
+        let path = entry.path();
         if path.extension().is_none_or(|ext| ext != "jsonl") {
             continue;
         }
-        if let Some(info) = session_info(&path)? {
-            sessions.push(info);
+        match session_info_with_diagnostics(&path, false) {
+            Ok(Some(info)) => sessions.push(info),
+            Ok(None) => {
+                if diagnostics < 10 {
+                    eprintln!("[session] skipped invalid session {}", path.display());
+                }
+                diagnostics += 1;
+            }
+            Err(error) => {
+                if diagnostics < 10 {
+                    eprintln!(
+                        "[session] skipped unreadable session {}: {error}",
+                        path.display()
+                    );
+                }
+                diagnostics += 1;
+            }
         }
+    }
+    if diagnostics > 10 {
+        eprintln!(
+            "[session] omitted {} additional session discovery diagnostics",
+            diagnostics - 10
+        );
     }
     sort_sessions_newest_first(&mut sessions);
     Ok(sessions)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionRefError {
+    #[error("no session matches '{0}'")]
+    NoMatch(String),
+    #[error("session reference '{0}' is ambiguous")]
+    Ambiguous(String),
 }
 
 pub fn resolve_session_ref(dir: &Path, _cwd: &Path, reference: &str) -> Result<PathBuf> {
@@ -503,8 +609,8 @@ pub fn resolve_session_ref(dir: &Path, _cwd: &Path, reference: &str) -> Result<P
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [session] => Ok(session.path.clone()),
-        [] => anyhow::bail!("no session matches '{reference}'"),
-        _ => anyhow::bail!("session reference '{reference}' is ambiguous"),
+        [] => Err(SessionRefError::NoMatch(reference.to_string()).into()),
+        _ => Err(SessionRefError::Ambiguous(reference.to_string()).into()),
     }
 }
 
@@ -521,33 +627,27 @@ const HISTORY_SNIPPET_CHARS: usize = 240;
 pub fn search_history(path: &Path, options: HistorySearchOptions) -> Result<String> {
     let matcher = HistoryMatcher::new(&options.query, options.literal, options.ignore_case)?;
     let limit = options.limit.clamp(1, 50);
-    let entries = parsed_session_entries(path)?;
-    let archive_cutoff = latest_compaction_line(&entries).unwrap_or(0);
+    let archive_cutoff = latest_compaction_line(path)?.unwrap_or(0);
     let mut out = String::new();
     let mut count = 0usize;
 
-    for entry in entries {
-        let Some((role, text)) = searchable_entry_text(&entry.entry) else {
-            continue;
+    for_each_session_entry(path, |line_number, entry| {
+        let Some((role, text)) = searchable_entry_text(&entry) else {
+            return Ok(true);
         };
         let Some((start, end)) = matcher.find(&text) else {
-            continue;
+            return Ok(true);
         };
-        let status = if entry.line_number < archive_cutoff {
+        let status = if line_number < archive_cutoff {
             "archived"
         } else {
             "active"
         };
         let snippet = history_snippet(&text, start, end, HISTORY_SNIPPET_CHARS);
-        out.push_str(&format!(
-            "line {} {status} {role}: {snippet}\n",
-            entry.line_number
-        ));
+        out.push_str(&format!("line {line_number} {status} {role}: {snippet}\n"));
         count += 1;
-        if count >= limit {
-            break;
-        }
-    }
+        Ok(count < limit)
+    })?;
 
     if out.is_empty() {
         out.push_str("no history matches\n");
@@ -558,36 +658,33 @@ pub fn search_history(path: &Path, options: HistorySearchOptions) -> Result<Stri
 pub fn read_history(path: &Path, offset: usize, limit: usize) -> Result<String> {
     let offset = offset.max(1);
     let limit = limit.clamp(1, 100);
-    let entries = parsed_session_entries(path)?;
-    let archive_cutoff = latest_compaction_line(&entries).unwrap_or(0);
+    let archive_cutoff = latest_compaction_line(path)?.unwrap_or(0);
     let mut out = String::new();
     let mut count = 0usize;
 
-    for entry in entries
-        .into_iter()
-        .filter(|entry| entry.line_number >= offset)
-    {
-        let status = if entry.line_number < archive_cutoff {
+    for_each_session_entry(path, |line_number, entry| {
+        if line_number < offset {
+            return Ok(true);
+        }
+        let status = if line_number < archive_cutoff {
             "archived"
         } else {
             "active"
         };
-        match render_history_entry(&entry.entry) {
+        match render_history_entry(&entry) {
             Some((kind, text)) => {
-                out.push_str(&format!("line {} {status} {kind}:\n", entry.line_number));
+                out.push_str(&format!("line {line_number} {status} {kind}:\n"));
                 for line in text.lines() {
                     out.push_str("  ");
                     out.push_str(line);
                     out.push('\n');
                 }
             }
-            None => out.push_str(&format!("line {} {status}: metadata\n", entry.line_number)),
+            None => out.push_str(&format!("line {line_number} {status}: metadata\n")),
         }
         count += 1;
-        if count >= limit {
-            break;
-        }
-    }
+        Ok(count < limit)
+    })?;
 
     if out.is_empty() {
         out.push_str("no history lines\n");
@@ -595,43 +692,15 @@ pub fn read_history(path: &Path, offset: usize, limit: usize) -> Result<String> 
     Ok(out)
 }
 
-struct ParsedSessionEntry {
-    line_number: usize,
-    entry: SessionEntry,
-}
-
-fn parsed_session_entries(path: &Path) -> Result<Vec<ParsedSessionEntry>> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut entries = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
-        let line_number = index + 1;
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
+fn latest_compaction_line(path: &Path) -> Result<Option<usize>> {
+    let mut latest = None;
+    for_each_session_entry(path, |line_number, entry| {
+        if matches!(entry, SessionEntry::Compaction { .. }) {
+            latest = Some(line_number);
         }
-        let entry: SessionEntry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(error) => {
-                eprintln!(
-                    "[session] skipped malformed JSONL line {} in {}: {error}",
-                    line_number,
-                    path.display()
-                );
-                continue;
-            }
-        };
-        entries.push(ParsedSessionEntry { line_number, entry });
-    }
-    Ok(entries)
-}
-
-fn latest_compaction_line(entries: &[ParsedSessionEntry]) -> Option<usize> {
-    entries
-        .iter()
-        .filter(|entry| matches!(entry.entry, SessionEntry::Compaction { .. }))
-        .map(|entry| entry.line_number)
-        .next_back()
+        Ok(true)
+    })?;
+    Ok(latest)
 }
 
 fn searchable_entry_text(entry: &SessionEntry) -> Option<(&'static str, String)> {
@@ -766,6 +835,7 @@ fn history_snippet(text: &str, start: usize, end: usize, max_chars: usize) -> St
     snippet
 }
 
+#[derive(Debug)]
 pub enum SessionRefResolution {
     Existing(PathBuf),
     Created(PathBuf),
@@ -786,7 +856,12 @@ pub fn resolve_or_create_session_ref(
 ) -> Result<SessionRefResolution> {
     match resolve_session_ref(dir, cwd, reference) {
         Ok(path) => Ok(SessionRefResolution::Existing(path)),
-        Err(_) if is_valid_user_session_id(reference) => {
+        Err(error)
+            if matches!(
+                error.downcast_ref::<SessionRefError>(),
+                Some(SessionRefError::NoMatch(_))
+            ) && is_valid_user_session_id(reference) =>
+        {
             let path = dir.join(format!("{reference}.jsonl"));
             if path.exists() {
                 return Ok(SessionRefResolution::Existing(path));
@@ -809,8 +884,10 @@ pub fn resolve_or_create_session_ref(
 }
 
 pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
+    session_info_with_diagnostics(path, true)
+}
+
+fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<SessionInfo>> {
     let modified = fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .unwrap_or(UNIX_EPOCH);
@@ -833,15 +910,7 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
     let mut compaction_count = 0usize;
     let mut last_compaction_timestamp_ms = None;
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let entry: SessionEntry = match serde_json::from_str(&line) {
-            Ok(entry) => entry,
-            Err(_) => continue,
-        };
+    for_each_session_entry_with_diagnostics(path, diagnose, |_, entry| {
         match entry {
             SessionEntry::Header {
                 id: header_id,
@@ -934,7 +1003,8 @@ pub fn session_info(path: &Path) -> Result<Option<SessionInfo>> {
                 last_compaction_timestamp_ms = Some(timestamp_ms);
             }
         }
-    }
+        Ok(true)
+    })?;
 
     let Some(id) = id else {
         return Ok(None);
@@ -983,23 +1053,19 @@ fn canonical_display_str(path: &str) -> String {
 }
 
 fn validate_session_file(path: &Path) -> Result<()> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
-    let reader = BufReader::new(file);
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<SessionEntry>(&line) {
-            Ok(SessionEntry::Header { .. }) => return Ok(()),
-            Ok(_) => anyhow::bail!("{} is not a Ferrum session: missing header", path.display()),
-            Err(error) => anyhow::bail!(
-                "{} is not a Ferrum session: invalid header: {error}",
-                path.display()
-            ),
-        }
+    let mut first = None;
+    for_each_session_entry(path, |_, entry| {
+        first = Some(entry);
+        Ok(false)
+    })?;
+    match first {
+        Some(SessionEntry::Header { .. }) => Ok(()),
+        Some(_) => anyhow::bail!("{} is not a Ferrum session: missing header", path.display()),
+        None => anyhow::bail!(
+            "{} is not a Ferrum session: empty or corrupt file",
+            path.display()
+        ),
     }
-    anyhow::bail!("{} is not a Ferrum session: empty file", path.display())
 }
 
 fn validate_user_session_id(id: &str) -> Result<()> {
@@ -1512,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_empty_header_only_session() {
+    fn preserves_header_only_session_for_crash_safe_discovery() {
         let temp = tempfile::tempdir().unwrap();
         let mut session = JsonlSession::create(
             temp.path().to_path_buf(),
@@ -1526,8 +1592,8 @@ mod tests {
         .unwrap();
         let path = session.path().clone();
         assert!(path.exists());
-        assert!(session.remove_if_empty().unwrap());
-        assert!(!path.exists());
+        session.sync_checkpoint().unwrap();
+        assert!(path.exists());
     }
 
     #[test]
@@ -1547,7 +1613,7 @@ mod tests {
             .append_message(&Message::text(Role::User, "hello"))
             .unwrap();
         let path = session.path().clone();
-        assert!(!session.remove_if_empty().unwrap());
+        session.sync_checkpoint().unwrap();
         assert!(path.exists());
     }
 
@@ -1715,6 +1781,202 @@ mod tests {
         session.append_safety("high").unwrap();
         let info = session_info(session.path()).unwrap().unwrap();
         assert_eq!(info.safety.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn ambiguous_reference_never_creates_a_session() {
+        let temp = tempfile::tempdir().unwrap();
+        write_test_header(&temp.path().join("abc-one.jsonl"), "abc-one", None);
+        write_test_header(&temp.path().join("abc-two.jsonl"), "abc-two", None);
+
+        let error = resolve_or_create_session_ref(
+            temp.path(),
+            temp.path(),
+            "abc",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous"));
+        assert!(!temp.path().join("abc.jsonl").exists());
+    }
+
+    #[test]
+    fn latest_session_skips_abandoned_anonymous_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let mut useful = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        useful
+            .append_message(&Message::text(Role::User, "keep me"))
+            .unwrap();
+        let useful_path = useful.path().clone();
+        drop(useful);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let abandoned = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        drop(abandoned);
+
+        assert_eq!(
+            latest_session_for_cwd(temp.path(), &cwd).unwrap(),
+            Some(useful_path)
+        );
+    }
+
+    #[test]
+    fn session_open_repairs_incomplete_tail_before_append() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let path = session.path().clone();
+        drop(session);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(br#"{"type":"message""#)
+            .unwrap();
+
+        let mut reopened = JsonlSession::open(path.clone()).unwrap();
+        reopened
+            .append_message(&Message::text(Role::User, "after repair"))
+            .unwrap();
+
+        let messages = load_messages(&path).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text_content(), "after repair");
+        assert!(fs::read(&path).unwrap().ends_with(b"\n"));
+    }
+
+    #[test]
+    fn unreadable_session_entry_does_not_break_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let valid = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir(temp.path().join("broken.jsonl")).unwrap();
+
+        let sessions = list_sessions(temp.path()).unwrap();
+
+        assert!(sessions.iter().any(|info| info.path == *valid.path()));
+    }
+
+    #[test]
+    fn anonymous_session_filenames_are_unique_under_concurrency() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = std::sync::Arc::new(temp.path().to_path_buf());
+        let mut threads = Vec::new();
+        for _ in 0..64 {
+            let dir = std::sync::Arc::clone(&dir);
+            threads.push(std::thread::spawn(move || {
+                JsonlSession::create((*dir).clone(), None, None, None, None, None, None)
+                    .unwrap()
+                    .path()
+                    .clone()
+            }));
+        }
+        let paths = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(paths.len(), 64);
+    }
+
+    #[test]
+    fn session_append_process_child() {
+        let Ok(path) = std::env::var("FERRUM_SESSION_STRESS_PATH") else {
+            return;
+        };
+        let writer = std::env::var("FERRUM_SESSION_STRESS_WRITER").unwrap();
+        let mut session = JsonlSession::open(PathBuf::from(path)).unwrap();
+        for index in 0..32 {
+            session
+                .append_message(&Message::text(
+                    Role::User,
+                    format!("writer {writer} record {index}"),
+                ))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn multiprocess_session_appends_remain_valid_jsonl() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let path = session.path().clone();
+        drop(session);
+        let executable = std::env::current_exe().unwrap();
+        let mut children = Vec::new();
+        for writer in 0..8 {
+            children.push(
+                std::process::Command::new(&executable)
+                    .arg("--exact")
+                    .arg("session::jsonl::tests::session_append_process_child")
+                    .arg("--nocapture")
+                    .env("FERRUM_SESSION_STRESS_PATH", &path)
+                    .env("FERRUM_SESSION_STRESS_WRITER", writer.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        for mut child in children {
+            assert!(child.wait().unwrap().success());
+        }
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            text.lines()
+                .all(|line| serde_json::from_str::<SessionEntry>(line).is_ok())
+        );
+        assert_eq!(load_messages(&path).unwrap().len(), 8 * 32);
     }
 
     #[test]

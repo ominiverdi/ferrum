@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod context;
 mod mcp;
+mod persistence;
 mod providers;
 mod session;
 mod skills;

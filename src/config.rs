@@ -403,38 +403,43 @@ impl Config {
         mcp_server_allow: Option<Vec<String>>,
         tools: Option<ToolSelection>,
     ) -> Result<()> {
+        let mut candidate = self.clone();
         if let Some(provider) = provider {
-            self.set_provider(provider)?;
+            candidate.set_provider(provider)?;
         }
         if let Some(model) = model {
-            self.set_model(model)?;
+            candidate.set_model(model)?;
         }
         if let Some(thinking) = thinking {
-            self.thinking = ThinkingLevel::parse(thinking)?;
+            candidate.thinking = ThinkingLevel::parse(thinking)?;
         }
         if let Some(safety) = safety {
-            self.safety = SafetyLevel::parse(safety)?;
+            candidate.safety = SafetyLevel::parse(safety)?;
         }
         if let Some(mcp_enabled) = mcp_enabled {
-            self.mcp_enabled = mcp_enabled;
+            candidate.mcp_enabled = mcp_enabled;
         }
         if let Some(mcp_server_allow) = mcp_server_allow {
-            self.mcp_enabled = true;
-            self.set_mcp_server_allow(mcp_server_allow)?;
+            candidate.mcp_enabled = true;
+            candidate.set_mcp_server_allow(mcp_server_allow)?;
         }
         if let Some(tools) = tools {
-            self.tool_selection = Some(match tools {
+            candidate.tool_selection = Some(match tools {
                 ToolSelection::None => ToolSelection::None,
                 ToolSelection::List(names) => ToolSelection::List(validate_tool_name_list(names)?),
             });
         }
+        *self = candidate;
         Ok(())
     }
 
     pub fn set_provider(&mut self, provider: &str) -> Result<()> {
+        let mut candidate = self.clone();
         let mut visited_providers = BTreeSet::new();
         let mut visited_models = BTreeSet::new();
-        self.set_provider_inner(provider, &mut visited_providers, &mut visited_models)
+        candidate.set_provider_inner(provider, &mut visited_providers, &mut visited_models)?;
+        *self = candidate;
+        Ok(())
     }
 
     fn set_provider_inner(
@@ -462,13 +467,16 @@ impl Config {
     }
 
     pub fn set_model(&mut self, model: &str) -> Result<()> {
+        let mut candidate = self.clone();
         let mut visited_providers = BTreeSet::new();
         let mut visited_models = BTreeSet::new();
-        self.apply_model_name_inner(
+        candidate.apply_model_name_inner(
             model.to_string(),
             &mut visited_providers,
             &mut visited_models,
-        )
+        )?;
+        *self = candidate;
+        Ok(())
     }
 
     fn apply_model_name_inner(
@@ -1053,8 +1061,23 @@ provider = "loop"
         )
         .unwrap();
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let before = (
+            config.provider_name.clone(),
+            config.model.clone(),
+            config.provider_model.clone(),
+            config.max_context_tokens,
+        );
         let error = config.set_provider("loop").unwrap_err();
         assert!(error.to_string().contains("configuration cycle"));
+        assert_eq!(
+            before,
+            (
+                config.provider_name.clone(),
+                config.model.clone(),
+                config.provider_model.clone(),
+                config.max_context_tokens,
+            )
+        );
     }
 
     #[test]
@@ -1084,8 +1107,23 @@ provider = "b"
         )
         .unwrap();
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let before = (
+            config.provider_name.clone(),
+            config.model.clone(),
+            config.provider_model.clone(),
+            config.max_context_tokens,
+        );
         let error = config.set_provider("a").unwrap_err();
         assert!(error.to_string().contains("configuration cycle"));
+        assert_eq!(
+            before,
+            (
+                config.provider_name.clone(),
+                config.model.clone(),
+                config.provider_model.clone(),
+                config.max_context_tokens,
+            )
+        );
     }
 
     #[test]

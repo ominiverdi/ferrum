@@ -6,6 +6,8 @@ Ferrum records model token usage in `usage.jsonl` under the Ferrum data director
 ~/.local/share/ferrum/usage.jsonl
 ```
 
+Each usage record is bounded, pre-serialized with its newline, and appended under an exclusive advisory file lock. Ferrum repairs an incomplete trailing record while locked before appending and syncs successful writes. `/usage` takes a shared lock and aggregates matching records while streaming the file instead of loading the lifetime log into memory.
+
 The interactive command is:
 
 ```text
@@ -45,7 +47,7 @@ When a provider does not return usage, Ferrum records an estimated usage entry i
 
 Estimated usage is based on Ferrum's local request/response size estimate. It is useful for trend tracking, but it is not a billing-grade source of truth.
 
-Provider-reported totals can differ from `input + output + cached` depending on the provider's accounting schema. Ferrum shows cached input separately so cache behavior is visible instead of folding it into another column.
+Provider-reported totals can differ from `input + output + cached` depending on the provider's accounting schema. Cached input is generally already included in provider input counts, so Ferrum never adds cache fields to a missing total. It shows cached input separately so cache behavior is visible instead of folding it into another column.
 
 ## Streaming usage
 
