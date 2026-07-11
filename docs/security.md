@@ -1,362 +1,146 @@
 # Security notes
 
-Ferrum is a local Linux coding agent. Its tools run with the Unix permissions of
-the user who starts Ferrum. This document explains what Ferrum's safety features
-cover, what they do not cover, and how to use them for higher-risk work.
+Ferrum is a local Linux coding agent. Its tools run with the Unix permissions of the user who starts Ferrum. This document explains what Ferrum's safety features cover, what they do not cover, and how to use them for higher-risk work.
 
 ## Design stance
 
-Ferrum does not try to prove arbitrary programs safe. It parses submitted Bash structurally and applies a tiered execution policy. At `medium` and `high`, native and statically recognized shell mutations are limited to user-configured writable roots; `low` explicitly grants host mutation authority. Ambiguous or unsupported authority fails closed before Bash starts.
+Ferrum separates robustness and trust invariants from execution authority:
 
-The policy is a hard rejection layer, not an approval prompt or sandbox. Full design and regression matrices: [tool-authority.md](tool-authority.md) and [resource-boundaries.md](resource-boundaries.md).
+- Bounds, cancellation, cleanup, terminal sanitization, atomic mutation, protected credential targets, and protocol validation apply at every safety tier.
+- `/safety low|medium|high` controls native mutation and shell execution authority.
+- Safety does not make repository text, skills, MCP output, provider output, or compaction summaries trusted authority.
+
+The policy is a deterministic rejection layer, not an approval prompt or sandbox. Full contract and regression matrix: [tool-authority.md](tool-authority.md). Resource limits: [resource-boundaries.md](resource-boundaries.md).
 
 ## Current baseline
 
-External review: several hardening items in this document were added after a
-security review by GitHub user Komzpa / Darafei Praliaskouski (`me@komzpa.net`).
+Several hardening items were added after an external security review by GitHub user Komzpa / Darafei Praliaskouski (`me@komzpa.net`).
 
-- Native tools: `read`, `write`, `edit`, `grep`, `find`, `ls`, `bash`, `wait`,
-  `history_search`, and `history_read`.
-- Tool exposure can be narrowed with `--tools`, `--no-tools`, and `[tools]`
-  config.
-- `bash`, `wait`, and interactive shell shortcuts `!` / `!!` use the same structural shell execution tier and writable-root policy.
-- `--safety low|medium|high` sets the process startup tier.
-- `/safety low|medium|high` changes the tier interactively.
-- Ferrum is not a sandbox and does not isolate `$HOME` or contain the system calls of an allowed executable.
-- Native `write` and `edit` default to the working directory as their only writable root and replace files atomically after verifying target identity.
-- Untrusted terminal text is sanitized before rendering; image, context, native search, file-line, directory-result, clipboard, and preview operations have explicit resource limits.
+- Native tools: `read`, `write`, `edit`, `grep`, `find`, `ls`, `bash`, `wait`, `history_search`, and `history_read`.
+- Tool exposure can be narrowed with `--tools`, `--no-tools`, and `[tools]` config.
+- `bash`, `wait`, and interactive shell shortcuts `!` / `!!` use the same execution tier and writable-root policy.
+- `--safety low|medium|high` sets the startup tier; `/safety` changes it interactively.
+- Native `write` and `edit` use identity-checked atomic replacement and reject protected credential targets.
+- Shell commands have syntax byte/node/depth limits, bounded output, timeout/cancellation cleanup, and explicit outcome reporting.
+- Untrusted terminal text is sanitized before rendering.
+- Image, context, native search, file-line, directory-result, clipboard, and preview operations have explicit limits.
+- MCP frames and metadata, provider response bodies and streams, tool-call JSON, session records, usage records, and OAuth storage are bounded and validated.
+- Authenticated non-loopback provider URLs using cleartext HTTP are rejected unless explicitly enabled; provider clients do not follow redirects.
+- Repository-owned config cannot change runtime tool policy or start MCP servers.
 
-Ferrum also hardens adjacent tool plumbing: MCP inbound `Content-Length` frames
-are capped before allocation, sanitized MCP tool-name collisions are rejected,
-MCP metadata is bounded before it reaches model tool definitions, malformed
-provider tool-call JSON is treated as an error, and session, usage, and OAuth
-auth files are created or tightened private to the user. Session and usage JSONL
-appends use advisory interprocess locks, bounded records, incomplete-tail repair,
-and durable sync checkpoints. OAuth storage fails closed on malformed JSON and
-uses locked merge plus synced atomic replacement.
-
-## How to think about risk
-
-Ferrum risk mostly comes from which tools are exposed.
-
-- `read`, `grep`, `find`, and `ls` inspect files.
-- `write` and `edit` mutate files.
-- `bash` and `wait` run local commands.
-- MCP servers are external programs; their output becomes model context.
-- Ferrum rejects authenticated non-loopback provider URLs using cleartext HTTP unless the provider explicitly sets `allow_insecure_http = true`; loopback and authless local endpoints remain supported. Provider HTTP clients do not follow redirects, preventing credentials from being forwarded to an unexpected endpoint.
-- Provider response bodies, SSE framing, aggregate stream bytes, output fields, and tool calls are bounded. Malformed or incomplete streams fail the turn rather than becoming empty replies.
-- Fork PRs and third-party repositories are untrusted input.
-- Ferrum does not load repository-owned config to change tool policy.
-- Ferrum does not treat MCP tool descriptions or output as trusted; raw MCP
-  stderr is withheld from model-visible errors, but tool-provided content can still
-  contain secrets or prompt injection.
-- `--safety` controls shell execution and native/shell mutation authority. At `medium` and `high`, native `write`/`edit` and recognized shell mutations enforce `[tools].writable_roots`; `low` bypasses writable roots. The policy does not sandbox MCP servers or allowed executables.
-
-For higher-risk work, reduce tool authority first. Use `--safety high` when
-shell remains exposed.
+Ferrum is not a sandbox. It does not isolate `$HOME`, contain the system calls of an allowed executable, or make untrusted checkout code safe.
 
 ## Safety tiers
 
-- `low`: broad host authority. Allows directory changes with `cd`, ordinary commands, inspectable read-only command substitution, and mutation outside configured roots. It still rejects dynamic executables, hidden mutation, unsupported wrappers, and explicitly catastrophic command shapes.
-- `medium`: default development policy. Rejects command substitution and direct interpreter payloads, and enforces writable roots. Build/test runners can execute trusted checkout code with the user's authority.
-- `high`: inspection policy. Allows a conservative command set and rejects shell mutation, network clients, interpreters, and unknown executables.
+- `low`: broad current-user host authority. Allows ordinary shell syntax, scripts and inline interpreters, shell launchers, functions and control flow, command/process substitution, dynamic commands, environment changes, networking, user installs, detachers, and mutation outside writable roots.
+- `medium`: default trusted-checkout development policy. Allows direct commands, builds/tests, network clients, and static mutation inside writable roots. Rejects shell/interpreter payloads, command substitution, dynamic or indirect authority, detached launchers, and mutations outside writable roots.
+- `high`: inspection-only policy. Allows a conservative read-oriented shell command set and rejects native/shell mutation, networking, interpreters, builds, and unknown executables.
 
-Tier differences:
+Tier-independent checks reject malformed syntax, resource-limit violations, privilege escalation, filesystem formatting, special permission bits, destructive root-level operands, raw device writes, and protected credential mutation.
 
-- `echo "$(date)"`: allowed at `low`, rejected at `medium` and `high`.
-- `python3 -c 'print(1)'`: allowed at `low`, rejected at `medium` and `high`.
-- `curl https://example.com`: allowed at `low` and `medium`, rejected at `high`.
-- `rm -rf /`: rejected at all tiers.
+Representative differences:
 
-## Writable roots and approval boundary
+| Command | low | medium | high |
+| --- | --- | --- | --- |
+| `pwd` | allow | allow | allow |
+| `cargo test` | allow | allow | deny |
+| `curl https://example.com` | allow | allow | deny |
+| `touch marker` | allow | allow inside roots | deny |
+| `python3 -c 'print(1)'` | allow | deny | deny |
+| `bash -lc 'echo ok'` | allow | deny | deny |
+| `echo "$(date)"` | allow | deny | deny |
+| `PATH=/tmp/bin cargo test` | allow | deny | deny |
+| `rm -rf /` | deny | deny | deny |
+| `sudo id` | deny | deny | deny |
 
-`[tools].writable_roots` defaults to `["."]`. At `medium` and `high`, Ferrum resolves mutation paths through their nearest existing ancestors and rejects native `write`/`edit` calls or recognized shell mutations outside those roots. Existing symlink escapes, dangling symlinks, and multiply linked regular-file targets are rejected. A denial requires an explicit user action: configure the intended root, move the operation, or perform it outside Ferrum. Model text cannot grant itself another root. At `low`, this boundary is intentionally disabled for both native and shell mutations.
+The executable table is enforced by `tier_capability_contract_is_table_driven` in `src/tools/shell_guard.rs`.
 
-This check does not contain an unknown executable's system calls and is not race-free filesystem isolation. Use external isolation for hostile code. Native write/edit replacement uses sibling temporary files, durable sync, target-identity verification, and atomic Linux rename operations; hostile mutation of ancestor directories remains outside Ferrum's guarantees.
+## Low is not a hostile-input boundary
 
-## Related research
+Low still parses complete Bash and catches known catastrophic shapes when they are visible. Literal nested shell payloads such as `bash -lc 'rm -rf /'` are inspected and rejected. This is a last-resort accident guard, not a proof of safety.
 
-GuardFall describes shell-injection classes for AI agents that pass model output
-to `bash -c`. Ferrum's structural execution policy addresses those classes while keeping normal coding workflows usable.
+Low deliberately permits opaque authority. A Python payload, script, build step, dynamically selected executable, encoded pipe, or unknown program can perform operations not visible in its argv. Do not use low for hostile repositories, unattended automation, or prompts influenced by untrusted content unless the process is externally isolated.
 
-Reference:
-<https://adversa.ai/blog/opensource-ai-coding-agents-shell-injection-vulnerability/>
-
-Other agent-security findings point to nearby risks:
-
-- **TrustFall**: repository trust prompts and repo-owned MCP config can start
-  attacker-controlled MCP servers. Ferrum does not load repository-owned MCP
-  config; MCP servers come from user config and process CLI choices.
-- **Deny-rule bypasses**: some agents degraded security checks for long compound shell commands. Ferrum parses the complete submission, applies syntax node/depth/byte limits, and does not turn policy uncertainty into approval.
-- **AutoJack**: a browsing agent can cross a localhost trust boundary and reach
-  a privileged local service. Ferrum does not expose a local web control plane,
-  but local services remain part of the user's host risk.
-- **Agentjacking**: trusted tool output can contain attacker-injected guidance.
-  Ferrum treats MCP output as model context; use MCP only with trusted servers
-  and reduce tool authority for untrusted workflows.
-
-## What Ferrum blocks
-
-### 1. Quote and backslash tricks
-
-Ferrum joins simple quote/backslash splits before checking command words. This
-catches common shapes where Bash would see a different command word than a raw
-string check would see.
-
-Example:
+Examples intentionally allowed only at low:
 
 ```sh
-ferrum --safety low -p "run exactly: r''m -r''f /"
+bash -lc 'echo ok'
+source ./env.sh
+if true; then echo ok; fi
+printf '%s\n' a b | xargs echo
+find /tmp/demo -delete
 ```
 
-Expected: rejected before Bash starts. Since this is rejected at `low`, it is
-also rejected at `medium` and `high`.
-
-Ferrum rejects unsupported compound and control-flow forms, including subshell/grouping forms and `if`/`while`/`case` blocks. They are represented structurally rather than recovered from a partial word tokenizer.
-
-Example:
+Known catastrophic and privilege-changing shapes remain rejected:
 
 ```sh
-ferrum --safety low -p 'run exactly: (rm -rf /)'
+rm -rf /
+mkfs.ext4 /dev/sda
+dd if=/dev/zero of=/dev/sda
+install -m4755 payload /tmp/payload
+printf key > ~/.ssh/config
 ```
 
-Expected: rejected before Bash starts. Since this is rejected at `low`, it is
-also rejected at `medium` and `high`.
+Unix has many tools and flags. Ferrum does not claim every destructive operation is recognizable. Use an external sandbox when containment is required.
 
-### 2. Parameter expansion and `$IFS`
+## Writable roots and protected targets
 
-Ferrum rejects opaque expansion forms such as `$IFS`, `${...}`, and `$'...'` in
-guarded shell commands.
+`[tools].writable_roots` defaults to `["."]`.
 
-Example:
+- Low bypasses writable roots for native and shell mutations.
+- Medium enforces writable roots for native `write`/`edit` and recognized shell mutations.
+- High rejects native and shell mutations.
+
+Ferrum resolves static targets through existing ancestors and rejects symlink escapes, dangling symlinks, multiply linked regular-file targets, and protected credential state such as `.ssh`, `.aws`, `.vault`, and Ferrum's trusted config/auth directory. Native replacement uses sibling temporary files, durable sync, identity verification, and atomic Linux rename operations.
+
+Writable-root checks do not contain an allowed executable's system calls and are not race-free filesystem isolation.
+
+## Instruction and protocol trust
+
+Repository files, project instructions, skills, tool output, MCP output, provider output, and generated summaries may contain hostile instructions. The safety tier governs tool authority; it does not upgrade those instructions to trusted runtime policy.
+
+- User CLI and user configuration define runtime authority.
+- Ferrum does not load repository-owned MCP or tool-policy config.
+- MCP stderr is withheld from model-visible errors, but MCP descriptions and output remain untrusted context.
+- Compaction must preserve user/developer authority and must not convert summarized untrusted text into instructions.
+- Skill discovery and loading must preserve its own trust boundary independently of `/safety`.
+
+## Higher-risk workflows
+
+Inspection only:
 
 ```sh
-ferrum --safety low -p 'run exactly: rm${IFS}-rf${IFS}/'
+ferrum --tools read grep find ls --safety high -p "inspect this repository"
 ```
 
-Expected: rejected before Bash starts. Since this is rejected at `low`, it is
-also rejected at `medium` and `high`.
-
-### 3. Command substitution
-
-At `medium` and `high`, Ferrum rejects command substitution such as `$()` and
-backticks. At `low`, benign substitution is allowed, but visibly dangerous
-substitution is still blocked.
-
-Dangerous example:
-
-```sh
-ferrum --safety low -p 'run exactly: echo "$(rm /tmp/demo)"'
-```
-
-Expected: rejected before Bash starts. Since this is rejected at `low`, it is
-also rejected at `medium` and `high`.
-
-Benign trade-off:
-
-```sh
-ferrum --safety low -p 'run exactly: echo "$(date)"'
-```
-
-Expected: allowed at `low`.
-
-```sh
-ferrum --safety medium -p 'run exactly: echo "$(date)"'
-```
-
-Expected: rejected at `medium` and `high`.
-
-### 4. Shell launchers, pipe-to-shell, and encoded payloads
-
-Ferrum rejects direct and wrapped shell interpreter launches such as `sh -c`,
-`bash -lc`, `busybox sh`, `env sh -c`, `timeout 1 bash -lc`, and `setsid bash
--c`. It also rejects pipelines into shell interpreters, including common encoded
-payload shapes.
-
-Example:
-
-```sh
-ferrum --safety low -p 'run exactly: echo cm0gLXJmIC8= | base64 -d | sh'
-```
-
-Expected: rejected before Bash starts. Since this is rejected at `low`, it is
-also rejected at `medium` and `high`.
-
-### 5. Alternative destructive commands
-
-Ferrum blocks representative destructive shapes beyond `rm`, including
-`find -delete`, dangerous `dd`, sensitive-path writes, privileged install modes,
-and in-place edits of credential paths.
-
-Example:
-
-```sh
-ferrum --safety low -p 'run exactly: find /tmp/demo -delete'
-```
-
-Expected: rejected before Bash starts. Since this is rejected at `low`, it is
-also rejected at `medium` and `high`.
-
-Boundary: Unix has many tools and flags. Ferrum blocks known dangerous shapes;
-it does not claim every possible destructive command is known in advance.
-
-### 6. Untrusted repository content
-
-Repository text, docs, Makefiles, tool output, and MCP output can influence the model. Tool exposure, writable roots, and the execution policy reduce blast radius.
-
-Example:
-
-```sh
-ferrum --tools read grep find ls -p "inspect this repo"
-```
-
-Expected: only inspection tools are exposed; shell and mutation tools are not
-available to the model.
-
-Weak setup:
-
-```sh
-ferrum --tools bash write edit -p "follow the README instructions"
-```
-
-Why weak: repository text can influence tools that execute commands or mutate
-files.
-
-### 7. Unattended or CI-style runs
-
-For automation, prefer hard limits over trust in model judgment.
-
-Example:
-
-```sh
-ferrum --tools read grep find ls -p "CI inspect only"
-```
-
-Expected: the model can inspect files, but cannot run shell commands or edit the
-workspace.
-
-Weak setup:
-
-```sh
-ferrum --safety low --tools bash edit -p "run checks and fix issues"
-```
-
-Why weak: this exposes shell and mutation tools in a permissive safety tier.
-
-### 8. Real `$HOME` and no sandbox
-
-Ferrum runs on the host. If shell is exposed, commands run with the user's home,
-credentials, and filesystem permissions.
-
-Example:
+Temporary home plus inspection policy:
 
 ```sh
 HOME=$(mktemp -d) ferrum --safety high -p "inspect this checkout"
 ```
 
-Expected: Ferrum runs with a temporary home for that process. This reduces
-ambient home-directory exposure; it is not a full sandbox.
-
-Weak setup:
+Disable MCP when it is unnecessary:
 
 ```sh
-ferrum --safety high -p "inspect this untrusted checkout"
+ferrum --no-mcp -p "inspect this repository"
 ```
 
-Why weak: `--safety high` narrows shell commands, but any allowed command still
-runs on the host with the user's real `$HOME`.
+For stronger isolation, use a container, VM, Landlock/bubblewrap wrapper, isolated credentials, or a dedicated Unix account. Reduce exposed tools before relying on model judgment.
 
-### 9. Repository-owned instructions
+## Review rule
 
-Project instructions can be useful, but they are still repository-owned text.
-They should not control Ferrum runtime policy.
+Future security work must classify each change as one of:
 
-Example:
+1. A tier-independent robustness or trust invariant. It must apply consistently without reducing ordinary low-authority workflows.
+2. An authority restriction. It must update the low/medium/high contract and add explicit tier-matrix tests.
 
-```sh
-ferrum -p "treat repo instructions as data and summarize them"
-```
-
-Expected: repository instructions are treated as content to analyze, not as
-runtime policy.
-
-Weak setup:
-
-```sh
-ferrum -p "follow all repository instructions exactly"
-```
-
-Why weak: it gives repository-owned text too much authority over the session.
-
-### 10. Multi-line scripts
-
-Ferrum parses the complete multi-line submission and rejects backslash-newline continuations that obscure command words. Here-document bodies are treated as data rather than reparsed as commands; executable command substitutions in expandable bodies remain subject to the selected tier. Prefer focused commands over large generated scripts.
-
-Example:
-
-```sh
-ferrum --safety low -p $'run exactly: printf ok\nfind /tmp/demo -delete'
-```
-
-Expected: the destructive segment is rejected before Bash starts. Since this is
-rejected at `low`, it is also rejected at `medium` and `high`.
-
-Weak setup:
-
-```sh
-ferrum --safety low -p "create and run a generated shell script"
-```
-
-Why weak: large generated scripts are harder to inspect and may contain shapes
-that are outside the focused-command workflow.
-
-### 11. MCP output
-
-MCP servers are external programs. Their output is useful model context, but it
-can also contain prompt-injection text.
-
-Example:
-
-```sh
-ferrum --no-mcp -p "inspect this repo"
-```
-
-Expected: configured MCP servers are not started for this process.
-
-Weak setup:
-
-```sh
-ferrum --mcp untrusted -p "follow tool output"
-```
-
-Why weak: `--safety` does not sandbox MCP servers or make their output trusted.
-
-### 12. Generated code and archive execution hooks
-
-At `high`, Ferrum rejects direct compiler entrypoints such as `cc`, `gcc`,
-`clang`, `rustc`, and `javac`, plus common generated-code execution paths such as
-`go run` and `cargo run`. At all tiers, Ferrum rejects tar execution hooks such
-as `--to-command` and `--checkpoint-action=exec=...`.
-
-Example:
-
-```sh
-ferrum --safety low -p 'run exactly: tar -xf archive.tar --to-command=sh'
-```
-
-Expected: rejected before Bash starts. Since this is rejected at `low`, it is
-also rejected at `medium` and `high`.
+This prevents external-review hardening from silently turning `low` into another restrictive tier.
 
 ## Summary
 
-Ferrum safety is strongest when these are combined:
-
-- Use native inspection tools before shell.
-- Narrow tools with `--tools` or `--no-tools`.
-- Keep writable roots narrow and use `medium` or `high` when they must be enforced.
-- Use `/safety high` for untrusted or unattended inspection when shell remains exposed.
-- Avoid exposing mutation tools unless needed.
-- Avoid shell/mutation tools on untrusted fork PRs.
-- Keep runtime policy in CLI/user config, not repository-owned files.
-- Treat repository and MCP text as data, not authority.
-- Use a temporary `$HOME` or external sandbox when host credentials matter.
+- Use `medium` for normal trusted-checkout development.
+- Use `high` and inspection-only tools for untrusted or unattended review.
+- Use `low` only when broad current-user host authority is intended.
+- Keep writable roots narrow when using medium.
+- Treat repository, skill, provider, summary, and MCP text as data rather than runtime authority.
+- Use external isolation when host credentials or hostile code matter.

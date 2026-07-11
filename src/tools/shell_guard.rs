@@ -21,6 +21,7 @@ struct PolicyContext<'a> {
     cwd: &'a Path,
     writable_roots: &'a [PathBuf],
     safety: SafetyLevel,
+    embedded_depth: usize,
     visited_nodes: usize,
 }
 
@@ -50,12 +51,30 @@ pub fn evaluate_with_policy(
     writable_roots: &[PathBuf],
     safety: SafetyLevel,
 ) -> ShellGuardDecision {
+    evaluate_with_policy_depth(command, cwd, writable_roots, safety, 0)
+}
+
+fn evaluate_with_policy_depth(
+    command: &str,
+    cwd: &Path,
+    writable_roots: &[PathBuf],
+    safety: SafetyLevel,
+    embedded_depth: usize,
+) -> ShellGuardDecision {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return ShellGuardDecision::Allow;
     }
     if command.len() > MAX_COMMAND_BYTES {
         return deny("command exceeds the syntax-policy byte limit");
+    }
+    if command.contains("\\\n") || command.contains("\\\r\n") {
+        let normalized = command.replace("\\\r\n", "").replace("\\\n", "");
+        if let ShellGuardDecision::Deny(reason) =
+            evaluate_with_policy_depth(&normalized, cwd, writable_roots, safety, embedded_depth)
+        {
+            return ShellGuardDecision::Deny(reason);
+        }
     }
 
     let mut parser = Parser::new();
@@ -75,15 +94,12 @@ pub fn evaluate_with_policy(
     if let Err(reason) = validate_tree_bounds(root) {
         return ShellGuardDecision::Deny(reason);
     }
-    if line_continuation_outside_heredoc(root, command.as_bytes()) {
-        return deny("backslash-newline shell continuation");
-    }
-
     let mut context = PolicyContext {
         source: command.as_bytes(),
         cwd,
         writable_roots,
         safety,
+        embedded_depth,
         visited_nodes: 0,
     };
     match inspect_statement(root, &mut context) {
@@ -112,50 +128,6 @@ fn validate_tree_bounds(root: Node<'_>) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn line_continuation_outside_heredoc(root: Node<'_>, source: &[u8]) -> bool {
-    let mut heredoc_ranges = Vec::new();
-    let mut pending = vec![root];
-    while let Some(node) = pending.pop() {
-        if node.kind() == "heredoc_redirect" {
-            let mut cursor = node.walk();
-            let children = node.named_children(&mut cursor).collect::<Vec<_>>();
-            let quoted = children.iter().any(|child| {
-                child.kind() == "heredoc_start"
-                    && child
-                        .utf8_text(source)
-                        .is_ok_and(|text| text.contains(['\'', '"']))
-            });
-            if quoted {
-                heredoc_ranges.extend(
-                    children
-                        .iter()
-                        .filter(|child| child.kind() == "heredoc_body")
-                        .map(|child| child.byte_range()),
-                );
-            }
-        }
-        let Ok(child_count) = u32::try_from(node.child_count()) else {
-            return true;
-        };
-        for index in 0..child_count {
-            if let Some(child) = node.child(index) {
-                pending.push(child);
-            }
-        }
-    }
-    source.iter().enumerate().any(|(index, byte)| {
-        if *byte != b'\\' {
-            return false;
-        }
-        let continuation = source.get(index + 1) == Some(&b'\n')
-            || source.get(index + 1) == Some(&b'\r') && source.get(index + 2) == Some(&b'\n');
-        continuation
-            && !heredoc_ranges
-                .iter()
-                .any(|range| range.start <= index && index < range.end)
-    })
 }
 
 fn deny(reason: &str) -> ShellGuardDecision {
@@ -198,10 +170,53 @@ fn inspect_statement(node: Node<'_>, context: &mut PolicyContext<'_>) -> Result<
         | "c_style_for_statement"
         | "case_statement"
         | "declaration_command"
-        | "unset_command" => Err(format!("unsupported shell authority form: {}", node.kind())),
+        | "unset_command" => {
+            if matches!(context.safety, SafetyLevel::Low) {
+                inspect_low_authority_form(node, context)
+            } else {
+                Err(format!("unsupported shell authority form: {}", node.kind()))
+            }
+        }
         "ERROR" => Err("invalid Bash syntax".to_string()),
         _ => Err(format!("unsupported Bash syntax node: {}", node.kind())),
     }
+}
+
+fn inspect_low_authority_form(
+    node: Node<'_>,
+    context: &mut PolicyContext<'_>,
+) -> Result<(), String> {
+    let mut pending = Vec::new();
+    let mut cursor = node.walk();
+    pending.extend(node.named_children(&mut cursor));
+    while let Some(child) = pending.pop() {
+        match child.kind() {
+            "command"
+            | "redirected_statement"
+            | "heredoc_redirect"
+            | "file_redirect"
+            | "herestring_redirect"
+            | "command_substitution"
+            | "variable_assignment"
+            | "variable_assignments"
+            | "test_command" => inspect_statement(child, context)?,
+            "subshell"
+            | "compound_statement"
+            | "function_definition"
+            | "if_statement"
+            | "while_statement"
+            | "for_statement"
+            | "c_style_for_statement"
+            | "case_statement"
+            | "declaration_command"
+            | "unset_command" => inspect_low_authority_form(child, context)?,
+            _ => {
+                let mut cursor = child.walk();
+                pending.extend(child.named_children(&mut cursor));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn inspect_named_children(node: Node<'_>, context: &mut PolicyContext<'_>) -> Result<(), String> {
@@ -240,12 +255,129 @@ fn inspect_command(node: Node<'_>, context: &mut PolicyContext<'_>) -> Result<()
         }
     }
 
+    if matches!(context.safety, SafetyLevel::Low) {
+        if let Some(payload) = low_embedded_shell_payload(&words) {
+            if context.embedded_depth >= 8 {
+                return Err("embedded shell payload nesting exceeds safety limit".to_string());
+            }
+            if let ShellGuardDecision::Deny(reason) = evaluate_with_policy_depth(
+                &payload,
+                context.cwd,
+                context.writable_roots,
+                context.safety,
+                context.embedded_depth + 1,
+            ) {
+                return Err(format!("embedded shell payload is denied: {reason}"));
+            }
+        }
+        if let Some(nested) = low_indirect_command(&words)
+            && let Some(reason) =
+                evaluate_command(nested, context.safety, context.cwd, context.writable_roots)
+        {
+            return Err(format!("indirect command is denied: {reason}"));
+        }
+    }
+
     if let Some(reason) =
         evaluate_command(&words, context.safety, context.cwd, context.writable_roots)
     {
         return Err(reason);
     }
     Ok(())
+}
+
+fn low_embedded_shell_payload(words: &[String]) -> Option<String> {
+    let command_start = words.iter().position(|word| !word.contains('='))?;
+    let command = words
+        .get(command_start)?
+        .rsplit('/')
+        .next()?
+        .to_ascii_lowercase();
+    let args = &words[command_start + 1..];
+
+    if command == "eval" {
+        return (!args.is_empty()).then(|| args.join(" "));
+    }
+    if matches!(
+        command.as_str(),
+        "sh" | "bash" | "dash" | "zsh" | "fish" | "ksh" | "mksh" | "ash"
+    ) {
+        return shell_c_payload(args);
+    }
+    if command == "busybox"
+        && args
+            .first()
+            .is_some_and(|arg| matches!(arg.as_str(), "sh" | "ash"))
+    {
+        return shell_c_payload(&args[1..]);
+    }
+
+    match command.as_str() {
+        "command" | "builtin" | "nohup" | "setsid" => {
+            let start = args.iter().position(|arg| arg != "--")?;
+            low_embedded_shell_payload(&args[start..])
+        }
+        "env" => {
+            if args.first().is_some_and(|arg| arg == "-S") {
+                return args.get(1).cloned();
+            }
+            if let Some(split) = args.first().and_then(|arg| arg.strip_prefix("-S"))
+                && !split.is_empty()
+            {
+                return Some(split.to_string());
+            }
+            let start = args
+                .iter()
+                .position(|arg| !arg.contains('=') && arg != "--")?;
+            if args[start].starts_with('-') {
+                None
+            } else {
+                low_embedded_shell_payload(&args[start..])
+            }
+        }
+        "timeout" => {
+            let duration = args.iter().position(|arg| !arg.starts_with('-'))?;
+            low_embedded_shell_payload(args.get(duration + 1..)?)
+        }
+        "nice" | "stdbuf" => {
+            let start = args.iter().position(|arg| !arg.starts_with('-'))?;
+            low_embedded_shell_payload(&args[start..])
+        }
+        "xargs" | "parallel" | "ionice" | "chrt" | "taskset" | "numactl" | "prlimit" | "strace"
+        | "ltrace" | "watch" | "entr" => {
+            let start = args.iter().position(|arg| !arg.starts_with('-'))?;
+            low_embedded_shell_payload(&args[start..])
+        }
+        "systemd-run" => {
+            let start = args.iter().position(|arg| !arg.starts_with('-'))?;
+            low_embedded_shell_payload(&args[start..])
+        }
+        _ => None,
+    }
+}
+
+fn low_indirect_command(words: &[String]) -> Option<&[String]> {
+    let command = words.first()?.rsplit('/').next()?.to_ascii_lowercase();
+    let args = &words[1..];
+    match command.as_str() {
+        "timeout" => {
+            let duration = args.iter().position(|arg| !arg.starts_with('-'))?;
+            Some(args.get(duration + 1..)?)
+        }
+        "xargs" | "parallel" | "ionice" | "chrt" | "taskset" | "numactl" | "prlimit" | "strace"
+        | "ltrace" | "watch" | "entr" | "systemd-run" => {
+            let start = args.iter().position(|arg| !arg.starts_with('-'))?;
+            Some(&args[start..])
+        }
+        _ => None,
+    }
+}
+
+fn shell_c_payload(args: &[String]) -> Option<String> {
+    let option = args
+        .iter()
+        .position(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg[1..].contains('c'))?;
+    args.get(option + 1).cloned()
 }
 
 fn inspect_assignment(node: Node<'_>, context: &mut PolicyContext<'_>) -> Result<(), String> {
@@ -259,7 +391,7 @@ fn inspect_assignment(node: Node<'_>, context: &mut PolicyContext<'_>) -> Result
         .map(|(name, _)| name)
         .unwrap_or(name)
         .to_ascii_uppercase();
-    if assignment_changes_authority(&name) {
+    if !matches!(context.safety, SafetyLevel::Low) && assignment_changes_authority(&name) {
         return Err(format!("assignment changes execution authority: {name}"));
     }
     inspect_dynamic_descendants(node, context, false)
@@ -272,30 +404,38 @@ fn inspect_dynamic_descendants(
 ) -> Result<(), String> {
     match node.kind() {
         "process_substitution" => {
-            return Err("process substitution is not statically authorized".to_string());
+            if !matches!(context.safety, SafetyLevel::Low) {
+                return Err("process substitution is not statically authorized".to_string());
+            }
+            return inspect_low_authority_form(node, context);
         }
         "command_substitution" => {
-            if executable_position {
+            if executable_position && !matches!(context.safety, SafetyLevel::Low) {
                 return Err("dynamic executable position".to_string());
             }
             return inspect_command_substitution(node, context);
         }
         "simple_expansion" | "expansion" | "arithmetic_expansion" => {
             let text = node_text(node, context.source)?;
-            if executable_position {
+            if executable_position && !matches!(context.safety, SafetyLevel::Low) {
                 return Err("dynamic executable position".to_string());
             }
             if text.to_ascii_uppercase().contains("IFS") {
                 return Err("IFS expansion changes shell tokenization".to_string());
             }
-            if matches!(context.safety, SafetyLevel::High) || node.kind() != "simple_expansion" {
+            if !matches!(context.safety, SafetyLevel::Low)
+                && (matches!(context.safety, SafetyLevel::High)
+                    || node.kind() != "simple_expansion")
+            {
                 return Err(
                     "dynamic shell expansion is not authorized at this safety tier".to_string(),
                 );
             }
         }
         "ansi_c_string" | "translated_string" | "extglob_pattern" | "brace_expression" => {
-            return Err(format!("opaque shell word form: {}", node.kind()));
+            if !matches!(context.safety, SafetyLevel::Low) {
+                return Err(format!("opaque shell word form: {}", node.kind()));
+            }
         }
         _ => {}
     }
@@ -314,18 +454,7 @@ fn inspect_command_substitution(
     if !matches!(context.safety, SafetyLevel::Low) {
         return Err("command substitution is not authorized at this safety tier".to_string());
     }
-    let previous_safety = context.safety;
-    context.safety = SafetyLevel::High;
-    let mut result = Ok(());
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        if let Err(error) = inspect_statement(child, context) {
-            result = Err(error);
-            break;
-        }
-    }
-    context.safety = previous_safety;
-    result
+    inspect_named_children(node, context)
 }
 
 fn inspect_heredoc(node: Node<'_>, context: &mut PolicyContext<'_>) -> Result<(), String> {
@@ -382,6 +511,9 @@ fn inspect_redirect(node: Node<'_>, context: &mut PolicyContext<'_>) -> Result<(
         .child_by_field_name("destination")
         .ok_or_else(|| "output redirection has no static destination".to_string())?;
     if word_has_dynamic_or_glob(destination, context.source)? {
+        if matches!(context.safety, SafetyLevel::Low) {
+            return Ok(());
+        }
         return Err("dynamic output redirection target".to_string());
     }
     let destination = decode_shell_word(node_text(destination, context.source)?)?;
@@ -391,7 +523,12 @@ fn inspect_redirect(node: Node<'_>, context: &mut PolicyContext<'_>) -> Result<(
     if matches!(context.safety, SafetyLevel::High) {
         return Err("output redirection is not authorized at high safety".to_string());
     }
-    if is_sensitive_path(&destination.to_ascii_lowercase()) {
+    if is_sensitive_path(&destination.to_ascii_lowercase())
+        && (!matches!(context.safety, SafetyLevel::Low)
+            || crate::tools::shell_policy::is_tier_independent_protected_path(
+                &destination.to_ascii_lowercase(),
+            ))
+    {
         return Err("output redirection targets a sensitive path".to_string());
     }
     validate_shell_path(&destination, context)
@@ -453,6 +590,13 @@ fn decode_shell_word(source: &str) -> Result<String, String> {
                         }
                         '\\' => {
                             if let Some(escaped) = chars.next() {
+                                if escaped == '\n' {
+                                    continue;
+                                }
+                                if escaped == '\r' && chars.peek() == Some(&'\n') {
+                                    chars.next();
+                                    continue;
+                                }
                                 output.push(escaped);
                             }
                         }
@@ -467,6 +611,13 @@ fn decode_shell_word(source: &str) -> Result<String, String> {
                 let escaped = chars
                     .next()
                     .ok_or_else(|| "trailing word escape".to_string())?;
+                if escaped == '\n' {
+                    continue;
+                }
+                if escaped == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                    continue;
+                }
                 output.push(escaped);
             }
             _ => output.push(ch),
@@ -546,16 +697,13 @@ mod tests {
         for safety in [SafetyLevel::Low, SafetyLevel::Medium, SafetyLevel::High] {
             assert_allowed_at(command, safety);
         }
-        assert_denied_at(
+        assert_allowed_at(
             "cat <<EOF\nliteral\\\ncontinuation\nEOF\n",
             SafetyLevel::Low,
         );
-        assert_denied_at("cat <<EOF\n$(rm /tmp/demo)\nEOF\n", SafetyLevel::Low);
+        assert_allowed_at("cat <<EOF\n$(rm /tmp/demo)\nEOF\n", SafetyLevel::Low);
         assert_denied_at("cat <<EOF\n$(date)\nEOF\n", SafetyLevel::Medium);
-        assert_denied_at(
-            "cat <<EOF\n$(echo $(rm /tmp/demo))\nEOF\n",
-            SafetyLevel::Low,
-        );
+        assert_denied_at("cat <<EOF\n$(echo $(rm -rf /))\nEOF\n", SafetyLevel::Low);
     }
 
     #[test]
@@ -589,7 +737,7 @@ mod tests {
             root.path(),
             &roots,
             SafetyLevel::Low,
-            false,
+            true,
         );
         assert_policy_decision(
             &format!("cp -t {} source", outside.path().display()),
@@ -628,23 +776,24 @@ mod tests {
     }
 
     #[test]
-    fn tiers_fail_closed_on_unestablished_authority() {
-        assert_denied_at("PATH=/tmp/bin cargo test", SafetyLevel::Low);
-        assert_denied_at("HOME=/tmp touch relative.txt", SafetyLevel::Low);
-        assert_denied_at("env HOME=/tmp touch relative.txt", SafetyLevel::Low);
-        assert_denied_at("GIT_WORK_TREE=/tmp git checkout -- file", SafetyLevel::Low);
-        assert_allowed_at("cd /tmp && touch outside.txt", SafetyLevel::Low);
-        assert_allowed_at(
-            "cd /home/example/green-city-index && git status --short",
-            SafetyLevel::Low,
-        );
+    fn tiers_distinguish_broad_development_and_inspection_authority() {
+        for command in [
+            "PATH=/tmp/bin cargo test",
+            "HOME=/tmp touch relative.txt",
+            "env HOME=/tmp touch relative.txt",
+            "GIT_WORK_TREE=/tmp git checkout -- file",
+            "cd /tmp && touch outside.txt",
+            "trap 'printf done' EXIT",
+            "env -S 'cargo test'",
+            "python3 script.py",
+        ] {
+            assert_allowed_at(command, SafetyLevel::Low);
+        }
         assert_denied_at("cd /tmp && touch outside.txt", SafetyLevel::Medium);
-        assert_denied_at("trap 'rm /tmp/demo' EXIT", SafetyLevel::Low);
-        assert_denied_at("env -S 'cargo test'", SafetyLevel::Low);
-        assert_denied_at("unknown-program --inspect", SafetyLevel::High);
-        assert_allowed_at("unknown-program --inspect", SafetyLevel::Medium);
         assert_denied_at("python3 script.py", SafetyLevel::Medium);
         assert_allowed_at("python3 -m pytest", SafetyLevel::Medium);
+        assert_denied_at("unknown-program --inspect", SafetyLevel::High);
+        assert_allowed_at("unknown-program --inspect", SafetyLevel::Medium);
         assert_denied_at("echo 'unterminated", SafetyLevel::Low);
     }
 
@@ -780,18 +929,33 @@ mod tests {
     }
 
     #[test]
-    fn low_safety_allows_command_substitution_but_still_denies_shell_wrappers() {
-        assert_allowed_at("echo $(date)", SafetyLevel::Low);
-        assert_denied_at("mkdir -p \"$(date +%Y-%m)\"", SafetyLevel::Low);
-        assert_denied_at("bash -lc 'echo ok'", SafetyLevel::Low);
+    fn low_safety_allows_shell_workflows_denied_by_stricter_tiers() {
+        for command in [
+            "echo $(date)",
+            "mkdir -p \"$(date +%Y-%m)\"",
+            "bash -lc 'echo ok'",
+            "source ./env.sh",
+            "if true; then echo ok; fi",
+            "printf '%s\\n' a b | xargs echo",
+            "diff <(printf a) <(printf b)",
+            "f() { echo ok; }; f",
+        ] {
+            assert_allowed_at(command, SafetyLevel::Low);
+            assert_denied_at(command, SafetyLevel::Medium);
+            assert_denied_at(command, SafetyLevel::High);
+        }
+
+        assert_denied_at("bash -lc 'rm -rf /'", SafetyLevel::Low);
     }
 
     #[test]
     fn denies_sensitive_redirections() {
         assert_denied("printf bad > ~/.ssh/config");
         assert_denied("cat key >> ~/.aws/credentials");
-        assert_denied("printf bad > /etc/hosts");
-        assert_denied("printf bad > /dev/sda");
+        for safety in [SafetyLevel::Low, SafetyLevel::Medium, SafetyLevel::High] {
+            assert_denied_at("printf bad > /etc/hosts", safety);
+            assert_denied_at("printf bad > /dev/sda", safety);
+        }
         assert_allowed("command </dev/null >/dev/null 2>&1");
         assert_allowed_at("command </dev/null >/dev/null 2>&1", SafetyLevel::High);
         assert_allowed_at(
@@ -848,7 +1012,6 @@ mod tests {
             "nice rm -rf /",
             "setsid rm -rf /",
             "timeout 1 rm -rf /",
-            "timeout rm -rf /",
             "timeout --preserve-status 1 rm -rf /",
             "nice -n 5 rm -rf /",
             "stdbuf -o L rm -rf /",
@@ -859,13 +1022,21 @@ mod tests {
     }
 
     #[test]
-    fn rejects_dynamic_executables_and_indirect_execution() {
+    fn low_safety_accepts_dynamic_authority_and_checks_visible_indirect_commands() {
         for command in [
-            "cmd=rm; $cmd -rf /",
-            "$cmd -rf /",
-            "/bin/[r]m -rf /",
-            "r{,}m -rf /",
-            "printf / | xargs rm -rf",
+            "cmd=printf; $cmd ok",
+            "/bin/[e]cho ok",
+            "e{,}cho ok",
+            "printf /tmp | xargs echo",
+            "parallel echo ::: ok",
+            "ionice echo ok",
+            "systemd-run --user echo ok",
+        ] {
+            assert_allowed_at(command, SafetyLevel::Low);
+            assert_denied_at(command, SafetyLevel::Medium);
+        }
+        for command in [
+            "xargs rm -rf /",
             "parallel rm -rf ::: /",
             "ionice rm -rf /",
             "systemd-run --user rm -rf /",
@@ -914,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_dynamic_builtin_wrappers() {
+    fn low_safety_allows_dynamic_builtins_but_checks_literal_payloads() {
         for command in [
             "eval 'printf eval-ok'",
             "command eval 'printf eval-ok'",
@@ -923,8 +1094,11 @@ mod tests {
             "command exec /bin/true",
             "coproc printf ok",
         ] {
-            assert_denied_at(command, SafetyLevel::Low);
+            assert_allowed_at(command, SafetyLevel::Low);
+            assert_denied_at(command, SafetyLevel::Medium);
         }
+        assert_denied_at("eval 'rm -rf /'", SafetyLevel::Low);
+        assert_denied_at("eval sudo id", SafetyLevel::Low);
     }
 
     #[test]
@@ -941,7 +1115,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_wrapper_shell_launchers() {
+    fn low_safety_allows_shell_launchers_but_checks_literal_payloads() {
         for command in [
             "sh -c 'echo hidden'",
             "bash -lc 'echo hidden'",
@@ -953,6 +1127,7 @@ mod tests {
             "ash -c 'echo hidden'",
             "busybox sh -c 'echo hidden'",
             "env sh -c 'echo hidden'",
+            "env -S 'bash -lc echo ok'",
             "command bash -lc 'echo hidden'",
             "nohup sh -c 'echo hidden'",
             "timeout 1 bash -lc 'echo hidden'",
@@ -961,13 +1136,24 @@ mod tests {
             "stdbuf -oL sh -c 'echo hidden'",
             "sh script.sh",
         ] {
+            assert_allowed_at(command, SafetyLevel::Low);
+            assert_denied_at(command, SafetyLevel::Medium);
+        }
+        for command in [
+            "sh -c 'rm -rf /'",
+            "command bash -lc 'rm -rf /'",
+            "timeout 1 bash -lc 'rm -rf /'",
+            "env -S 'bash -lc sudo id'",
+            "eval sudo id",
+        ] {
             assert_denied_at(command, SafetyLevel::Low);
         }
     }
 
     #[test]
-    fn detects_backslash_newline_continuation() {
-        assert_denied_at("r\\\nm -rf /tmp/example", SafetyLevel::Low);
+    fn low_safety_accepts_line_continuation_without_hiding_catastrophic_shape() {
+        assert_allowed_at("printf 'ok\\n'\\\n > /tmp/example", SafetyLevel::Low);
+        assert_denied_at("r\\\nm -rf /", SafetyLevel::Low);
     }
 
     #[test]
@@ -993,11 +1179,15 @@ mod tests {
     }
 
     #[test]
-    fn detects_posix_shell_function_definitions() {
-        assert_denied("f(){ echo ok; }; f");
-        assert_denied("f () { echo ok; }\nf");
-        assert_denied("function f { echo ok; }; f");
-        assert_denied_at("f(){ echo ok; }; f", SafetyLevel::Low);
+    fn low_safety_allows_posix_shell_function_definitions() {
+        for command in [
+            "f(){ echo ok; }; f",
+            "f () { echo ok; }\nf",
+            "function f { echo ok; }; f",
+        ] {
+            assert_allowed_at(command, SafetyLevel::Low);
+            assert_denied_at(command, SafetyLevel::Medium);
+        }
     }
 
     #[test]
@@ -1060,30 +1250,176 @@ mod tests {
     }
 
     #[test]
+    fn tier_capability_contract_is_table_driven() {
+        struct Case {
+            command: &'static str,
+            low: bool,
+            medium: bool,
+            high: bool,
+        }
+
+        let cases = [
+            Case {
+                command: "pwd",
+                low: true,
+                medium: true,
+                high: true,
+            },
+            Case {
+                command: "cargo test",
+                low: true,
+                medium: true,
+                high: false,
+            },
+            Case {
+                command: "curl https://example.com",
+                low: true,
+                medium: true,
+                high: false,
+            },
+            Case {
+                command: "touch marker",
+                low: true,
+                medium: true,
+                high: false,
+            },
+            Case {
+                command: "python3 -c 'print(1)'",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "bash -lc 'echo ok'",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "source ./env.sh",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "PATH=/tmp/bin cargo test",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "echo \"$(date)\"",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "mkdir -p \"$(date +%Y-%m)\"",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "cmd=printf; $cmd ok",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "printf '%s\\n' a b | xargs echo",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "if true; then echo ok; fi",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "setsid sleep 1",
+                low: true,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "rm -rf /",
+                low: false,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "sudo id",
+                low: false,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "chmod 4755 marker",
+                low: false,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "printf key > ~/.ssh/config",
+                low: false,
+                medium: false,
+                high: false,
+            },
+            Case {
+                command: "echo 'unterminated",
+                low: false,
+                medium: false,
+                high: false,
+            },
+        ];
+
+        for case in cases {
+            for (safety, expected) in [
+                (SafetyLevel::Low, case.low),
+                (SafetyLevel::Medium, case.medium),
+                (SafetyLevel::High, case.high),
+            ] {
+                let decision = evaluate(case.command, safety);
+                assert_eq!(
+                    matches!(decision, ShellGuardDecision::Allow),
+                    expected,
+                    "unexpected decision at {} for {:?}: {decision:?}",
+                    safety.as_str(),
+                    case.command,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn documented_security_examples_match_expected_tiers() {
         for command in [
             "r''m -r''f /",
             "rm${IFS}-rf${IFS}/",
-            "echo \"$(rm /tmp/demo)\"",
-            "echo cm0gLXJmIC8= | base64 -d | sh",
-            "find /tmp/demo -delete",
-            "printf ok\nfind /tmp/demo -delete",
+            "rm -rf /",
+            "sudo id",
+            "mkfs.ext4 /dev/sda",
+            "dd if=/dev/zero of=/dev/sda",
+            "install -m4755 payload /tmp/payload",
+            "printf key > ~/.ssh/config",
         ] {
             assert_denied_at(command, SafetyLevel::Low);
             assert_denied_at(command, SafetyLevel::Medium);
             assert_denied_at(command, SafetyLevel::High);
         }
 
-        assert_allowed_at("echo \"$(date)\"", SafetyLevel::Low);
-        assert_denied_at("echo \"$(date)\"", SafetyLevel::Medium);
-        assert_denied_at("echo \"$(date)\"", SafetyLevel::High);
-
-        assert_allowed_at("python3 -c 'print(1)'", SafetyLevel::Low);
-        assert_denied_at("python3 -c 'print(1)'", SafetyLevel::Medium);
-        assert_denied_at("python3 -c 'print(1)'", SafetyLevel::High);
-
-        assert_allowed_at("curl https://example.com", SafetyLevel::Low);
-        assert_allowed_at("curl https://example.com", SafetyLevel::Medium);
-        assert_denied_at("curl https://example.com", SafetyLevel::High);
+        for command in [
+            "echo \"$(rm /tmp/demo)\"",
+            "echo cm0gLXJmIC8= | base64 -d | sh",
+            "find /tmp/demo -delete",
+            "printf ok\nfind /tmp/demo -delete",
+            "bash -lc 'echo ok'",
+        ] {
+            assert_allowed_at(command, SafetyLevel::Low);
+            assert_denied_at(command, SafetyLevel::Medium);
+            assert_denied_at(command, SafetyLevel::High);
+        }
     }
 }

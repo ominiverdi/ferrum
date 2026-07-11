@@ -6994,13 +6994,13 @@ fn handle_command(
             println!("safety: {}", state.safety.as_str());
             match state.safety {
                 SafetyLevel::Low => println!(
-                    "execution policy: broad host authority. Allows directory changes with cd and bypasses writable roots for native and shell mutations while retaining structural catastrophic-command checks."
+                    "execution policy: broad current-user host authority. Allows scripts, shell launchers, control flow, substitutions, dynamic and detached commands, environment changes, networking, user installs, and out-of-root mutation while retaining tier-independent bounds and explicit catastrophic, privilege, and credential checks."
                 ),
                 SafetyLevel::Medium => println!(
-                    "execution policy: development. Also denies command substitution and direct interpreter payloads; trusted checkout builds and tests remain host-authority boundaries."
+                    "execution policy: trusted-checkout development. Allows direct commands, builds, tests, networking, and in-root mutation; rejects dynamic or indirect authority, detached launchers, and direct shell or interpreter payloads."
                 ),
                 SafetyLevel::High => println!(
-                    "execution policy: inspection. Allows a conservative command set and rejects shell mutations, network clients, interpreters, and unknown executables."
+                    "execution policy: inspection-only. Allows a conservative read-oriented command set and rejects native and shell mutation, network clients, interpreters, builds, and unknown executables."
                 ),
             }
             Ok(CommandAction::Continue)

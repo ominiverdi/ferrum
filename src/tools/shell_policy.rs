@@ -62,7 +62,9 @@ fn evaluate_command_inner(
         .iter()
         .position(|word| !is_environment_assignment(word))?;
     for assignment in &command[..command_start] {
-        if environment_assignment_name(assignment).is_some_and(assignment_changes_authority) {
+        if !matches!(safety, SafetyLevel::Low)
+            && environment_assignment_name(assignment).is_some_and(assignment_changes_authority)
+        {
             return Some("environment assignment changes execution authority".to_string());
         }
     }
@@ -78,6 +80,9 @@ fn evaluate_command_inner(
 
     let first = command.first()?;
     if first.contains('$') || first.contains(['*', '?', '[', '{']) {
+        if matches!(safety, SafetyLevel::Low) {
+            return None;
+        }
         return Some("dynamic executable position".to_string());
     }
     let base = command_name(first).to_ascii_lowercase();
@@ -97,9 +102,10 @@ fn evaluate_command_inner(
         ));
     }
 
-    if let Some(payload) = wrapper_payload(&base, args) {
+    if let Some(payload) = wrapper_payload(&base, args, safety) {
         let payload = match payload {
             Ok(payload) => payload,
+            Err(_) if matches!(safety, SafetyLevel::Low) => return None,
             Err(reason) => return Some(reason.to_string()),
         };
         if payload.is_empty() {
@@ -113,19 +119,22 @@ fn evaluate_command_inner(
         }
     }
 
-    if is_uninspectable_executor(&base) {
+    if !matches!(safety, SafetyLevel::Low) && is_uninspectable_executor(&base) {
         return Some("indirect executor boundary is not authorized".to_string());
     }
 
-    if base == "xargs" {
+    if !matches!(safety, SafetyLevel::Low) && base == "xargs" {
         return Some("indirect command execution through xargs".to_string());
     }
 
-    if is_shell_control_word(&base) {
+    if !matches!(safety, SafetyLevel::Low) && is_shell_control_word(&base) {
         return Some("shell compound control syntax".to_string());
     }
 
-    if base == "busybox" && args.first().is_some_and(|arg| is_shell_interpreter(arg)) {
+    if !matches!(safety, SafetyLevel::Low)
+        && base == "busybox"
+        && args.first().is_some_and(|arg| is_shell_interpreter(arg))
+    {
         return Some("shell interpreter invocation".to_string());
     }
 
@@ -150,11 +159,11 @@ fn evaluate_command_inner(
         return Some("privilege escalation command".to_string());
     }
 
-    if is_dynamic_shell_builtin(&base) && !(matches!(safety, SafetyLevel::Low) && base == "cd") {
+    if is_dynamic_shell_builtin(&base) && !matches!(safety, SafetyLevel::Low) {
         return Some("dynamic shell execution command".to_string());
     }
 
-    if base == "rm" && dangerous_rm(args) {
+    if base == "rm" && dangerous_rm(args, safety) {
         return Some("destructive rm command".to_string());
     }
 
@@ -162,7 +171,7 @@ fn evaluate_command_inner(
         return Some("dd output write command".to_string());
     }
 
-    if base == "chmod" && dangerous_chmod(args) {
+    if base == "chmod" && dangerous_chmod(args, safety) {
         return Some("dangerous chmod command".to_string());
     }
 
@@ -174,7 +183,7 @@ fn evaluate_command_inner(
         return Some("dangerous chown command".to_string());
     }
 
-    if is_shell_interpreter(&base) {
+    if !matches!(safety, SafetyLevel::Low) && is_shell_interpreter(&base) {
         return Some("shell interpreter invocation".to_string());
     }
 
@@ -192,21 +201,26 @@ fn evaluate_command_inner(
         return Some(reason);
     }
 
-    if base == "base64" && args.iter().any(|arg| arg == "-d" || arg == "--decode") {
+    if !matches!(safety, SafetyLevel::Low)
+        && base == "base64"
+        && args.iter().any(|arg| arg == "-d" || arg == "--decode")
+    {
         return Some("encoded command decoding".to_string());
     }
 
-    if base == "xxd" && args.iter().any(|arg| arg == "-r") {
+    if !matches!(safety, SafetyLevel::Low) && base == "xxd" && args.iter().any(|arg| arg == "-r") {
         return Some("hex decoding command".to_string());
     }
 
-    if ((base == "echo" && args.iter().any(|arg| arg == "-e")) || base == "printf")
+    if !matches!(safety, SafetyLevel::Low)
+        && ((base == "echo" && args.iter().any(|arg| arg == "-e")) || base == "printf")
         && all.iter().any(|arg| contains_escape_sequence(arg))
     {
         return Some("escape-sequence command construction".to_string());
     }
 
-    if base == "find"
+    if !matches!(safety, SafetyLevel::Low)
+        && base == "find"
         && args.iter().any(|arg| {
             matches!(
                 arg.as_str(),
@@ -217,7 +231,7 @@ fn evaluate_command_inner(
         return Some("find command with execution or deletion action".to_string());
     }
 
-    if base == "tar" && dangerous_tar(args) {
+    if base == "tar" && dangerous_tar(args, safety) {
         return Some("archive extraction to sensitive path".to_string());
     }
 
@@ -225,19 +239,31 @@ fn evaluate_command_inner(
         return Some("privileged install command".to_string());
     }
 
-    if base == "sed" && dangerous_sed(args) {
+    if base == "sed" && dangerous_sed(args, safety) {
         return Some("in-place edit of sensitive file".to_string());
     }
 
-    if matches!(base.as_str(), "cp" | "mv") && file_operation_targets_sensitive_path(args) {
+    if matches!(base.as_str(), "cp" | "mv")
+        && args.iter().any(|arg| {
+            let arg = arg.to_ascii_lowercase();
+            is_tier_independent_protected_path(&arg)
+                || !matches!(safety, SafetyLevel::Low) && is_sensitive_path(&arg)
+        })
+    {
         return Some("file operation targeting sensitive path".to_string());
     }
 
-    if base == "history" && args.iter().any(|arg| arg == "-c") {
+    if !matches!(safety, SafetyLevel::Low)
+        && base == "history"
+        && args.iter().any(|arg| arg == "-c")
+    {
         return Some("history clearing command".to_string());
     }
 
-    if base == "unset" && args.iter().any(|arg| arg.contains("HIST")) {
+    if !matches!(safety, SafetyLevel::Low)
+        && base == "unset"
+        && args.iter().any(|arg| arg.contains("HIST"))
+    {
         return Some("history environment manipulation".to_string());
     }
 
@@ -275,6 +301,7 @@ fn environment_assignment_name(word: &str) -> Option<&str> {
 fn wrapper_payload<'a>(
     command: &str,
     args: &'a [String],
+    safety: SafetyLevel,
 ) -> Option<Result<&'a [String], &'static str>> {
     match command {
         "command" => {
@@ -350,7 +377,10 @@ fn wrapper_payload<'a>(
                     break;
                 }
                 if is_environment_assignment(arg) {
-                    if environment_assignment_name(arg).is_some_and(assignment_changes_authority) {
+                    if !matches!(safety, SafetyLevel::Low)
+                        && environment_assignment_name(arg)
+                            .is_some_and(assignment_changes_authority)
+                    {
                         return Some(Err("env assignment changes execution authority"));
                     }
                     index += 1;
@@ -560,6 +590,9 @@ fn mutation_policy_reason(
     }
     for target in targets {
         if shell_path_is_dynamic(target) {
+            if matches!(safety, SafetyLevel::Low) {
+                continue;
+            }
             return Some(format!(
                 "dynamic mutation target is not authorized: {target}"
             ));
@@ -619,7 +652,7 @@ fn shell_path_is_dynamic(path: &str) -> bool {
     path.contains(['$', '`', '*', '?', '[', '{'])
 }
 
-fn dangerous_rm(args: &[String]) -> bool {
+fn dangerous_rm(args: &[String], safety: SafetyLevel) -> bool {
     let lower_args = args
         .iter()
         .map(|arg| arg.to_ascii_lowercase())
@@ -632,7 +665,13 @@ fn dangerous_rm(args: &[String]) -> bool {
         .iter()
         .any(|arg| arg == "-r" || arg == "-R" || arg == "--recursive")
         && lower_args.iter().any(|arg| arg == "-f" || arg == "--force"));
-    let has_dangerous_path = lower_args.iter().any(|arg| is_sensitive_path(arg));
+    let has_dangerous_path = lower_args.iter().any(|arg| {
+        if matches!(safety, SafetyLevel::Low) {
+            is_tier_independent_protected_path(arg)
+        } else {
+            is_sensitive_path(arg)
+        }
+    });
     let has_dynamic_absolute_path = lower_args
         .iter()
         .any(|arg| arg.starts_with('/') && arg.contains(['*', '?', '[']));
@@ -645,6 +684,39 @@ fn dangerous_rm(args: &[String]) -> bool {
 
 fn is_broad_path(arg: &str) -> bool {
     matches!(arg, "/" | "/*" | "~" | "~/" | "~/*" | "." | "./" | "./*")
+}
+
+fn is_catastrophic_path(arg: &str) -> bool {
+    matches!(
+        normalize_shell_path(arg).as_str(),
+        "/" | "/etc"
+            | "/etc/passwd"
+            | "/etc/shadow"
+            | "/etc/sudoers"
+            | "/usr"
+            | "/bin"
+            | "/sbin"
+            | "/boot"
+            | "/sys"
+            | "/proc"
+            | "/dev"
+            | "/lib"
+            | "/lib64"
+            | "/home"
+            | "/var"
+            | "/opt"
+            | "~"
+            | "~/"
+    )
+}
+
+pub(super) fn is_tier_independent_protected_path(arg: &str) -> bool {
+    let normalized = normalize_shell_path(arg);
+    is_catastrophic_path(&normalized)
+        || is_protected_credential_path(&normalized)
+        || ["/dev/", "/proc/", "/sys/", "/boot/"]
+            .iter()
+            .any(|prefix| normalized.starts_with(prefix))
 }
 
 pub(super) fn is_sensitive_path(arg: &str) -> bool {
@@ -696,6 +768,21 @@ pub(super) fn is_sensitive_path(arg: &str) -> bool {
     .any(|prefix| arg.starts_with(prefix))
 }
 
+pub(super) fn is_protected_credential_path(arg: &str) -> bool {
+    let normalized = normalize_shell_path(arg);
+    let components = normalized.split('/').collect::<Vec<_>>();
+    normalized.starts_with("~/.ssh")
+        || normalized.starts_with("~/.aws")
+        || normalized.starts_with("~/.vault")
+        || normalized.starts_with("~/.config/ferrum")
+        || components
+            .iter()
+            .any(|component| matches!(*component, ".ssh" | ".aws" | ".vault"))
+        || components
+            .windows(2)
+            .any(|pair| matches!(pair, [".config", "ferrum"]))
+}
+
 fn normalize_shell_path(arg: &str) -> String {
     let normalized = normalize_home_prefix(arg);
     if !normalized.starts_with('/') && !normalized.starts_with("~/") {
@@ -732,9 +819,10 @@ fn normalize_home_prefix(arg: &str) -> String {
     normalized.to_ascii_lowercase()
 }
 
-fn dangerous_chmod(args: &[String]) -> bool {
+fn dangerous_chmod(args: &[String], safety: SafetyLevel) -> bool {
     args.iter().any(|arg| {
-        matches!(arg.as_str(), "777" | "0777" | "+s" | "u+s" | "g+s")
+        (matches!(arg.as_str(), "777" | "0777") && !matches!(safety, SafetyLevel::Low))
+            || matches!(arg.as_str(), "+s" | "u+s" | "g+s")
             || arg.contains("+s")
             || octal_mode_has_special_bits(arg)
     })
@@ -750,33 +838,47 @@ fn octal_mode_has_special_bits(mode: &str) -> bool {
 fn dangerous_dd(args: &[String], safety: SafetyLevel) -> bool {
     args.iter().any(|arg| {
         arg.strip_prefix("of=").is_some_and(|target| {
-            matches!(safety, SafetyLevel::High) || is_sensitive_path(&target.to_ascii_lowercase())
+            matches!(safety, SafetyLevel::High)
+                || if matches!(safety, SafetyLevel::Low) {
+                    is_tier_independent_protected_path(target)
+                } else {
+                    is_sensitive_path(&target.to_ascii_lowercase())
+                }
         })
     })
 }
 
-fn dangerous_tar(args: &[String]) -> bool {
-    if args.iter().any(|arg| {
-        arg == "--to-command"
-            || arg.starts_with("--to-command=")
-            || arg == "--checkpoint-action"
-            || arg.starts_with("--checkpoint-action=exec=")
-    }) {
+fn dangerous_tar(args: &[String], safety: SafetyLevel) -> bool {
+    if !matches!(safety, SafetyLevel::Low)
+        && args.iter().any(|arg| {
+            arg == "--to-command"
+                || arg.starts_with("--to-command=")
+                || arg == "--checkpoint-action"
+                || arg.starts_with("--checkpoint-action=exec=")
+        })
+    {
         return true;
     }
-    args.windows(2).any(|pair| {
-        matches!(pair[0].as_str(), "--to-command" | "--checkpoint-action")
-            && (pair[0] == "--to-command" || pair[1].starts_with("exec="))
-    }) || {
-        let has_extract = args.iter().any(|arg| {
-            arg == "-x"
-                || arg == "--extract"
-                || (arg.starts_with('-') && arg.contains('x') && !arg.starts_with("--"))
-        });
-        has_extract
-            && (option_targets_sensitive_path(args, "-C")
-                || option_targets_sensitive_path(args, "--directory"))
-    }
+    !matches!(safety, SafetyLevel::Low)
+        && args.windows(2).any(|pair| {
+            matches!(pair[0].as_str(), "--to-command" | "--checkpoint-action")
+                && (pair[0] == "--to-command" || pair[1].starts_with("exec="))
+        })
+        || {
+            let has_extract = args.iter().any(|arg| {
+                arg == "-x"
+                    || arg == "--extract"
+                    || (arg.starts_with('-') && arg.contains('x') && !arg.starts_with("--"))
+            });
+            has_extract
+                && if matches!(safety, SafetyLevel::Low) {
+                    option_targets_tier_independent_protected_path(args, "-C")
+                        || option_targets_tier_independent_protected_path(args, "--directory")
+                } else {
+                    option_targets_sensitive_path(args, "-C")
+                        || option_targets_sensitive_path(args, "--directory")
+                }
+        }
 }
 
 fn dangerous_install(args: &[String], safety: SafetyLevel) -> bool {
@@ -788,6 +890,9 @@ fn dangerous_install(args: &[String], safety: SafetyLevel) -> bool {
                 || arg.starts_with("-m") && is_privileged_mode(&arg[2..])
         });
     has_privileged_mode
+        || args
+            .iter()
+            .any(|arg| is_tier_independent_protected_path(&arg.to_ascii_lowercase()))
         || !matches!(safety, SafetyLevel::Low) && file_operation_targets_sensitive_path(args)
 }
 
@@ -795,7 +900,7 @@ fn is_privileged_mode(mode: &str) -> bool {
     mode.contains("+s") || octal_mode_has_special_bits(mode)
 }
 
-fn dangerous_sed(args: &[String]) -> bool {
+fn dangerous_sed(args: &[String], safety: SafetyLevel) -> bool {
     let has_in_place = args.iter().any(|arg| {
         arg == "-i"
             || arg.starts_with("-i")
@@ -803,9 +908,11 @@ fn dangerous_sed(args: &[String]) -> bool {
             || arg.starts_with("--in-place=")
     });
     has_in_place
-        && args
-            .iter()
-            .any(|arg| is_sensitive_path(&arg.to_ascii_lowercase()))
+        && args.iter().any(|arg| {
+            let arg = arg.to_ascii_lowercase();
+            is_sensitive_path(&arg)
+                && (!matches!(safety, SafetyLevel::Low) || is_tier_independent_protected_path(&arg))
+        })
 }
 
 fn file_operation_targets_sensitive_path(args: &[String]) -> bool {
@@ -824,6 +931,19 @@ fn option_targets_sensitive_path(args: &[String], option: &str) -> bool {
                         .filter(|suffix| !suffix.is_empty() && !option.starts_with("--"))
                 })
                 .is_some_and(|suffix| is_sensitive_path(&suffix.to_ascii_lowercase()))
+        })
+}
+
+fn option_targets_tier_independent_protected_path(args: &[String], option: &str) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == option && is_tier_independent_protected_path(&pair[1]))
+        || args.iter().any(|arg| {
+            arg.strip_prefix(&format!("{option}="))
+                .or_else(|| {
+                    arg.strip_prefix(option)
+                        .filter(|suffix| !suffix.is_empty() && !option.starts_with("--"))
+                })
+                .is_some_and(is_tier_independent_protected_path)
         })
 }
 

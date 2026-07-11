@@ -85,7 +85,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "write".to_string(),
-            description: "Create or atomically replace a text file. Configured writable roots apply at medium/high safety; low safety grants host mutation authority. Creates parent directories, preserves existing permissions, and rejects changed target identity.".to_string(),
+            description: "Create or atomically replace a text file. Medium safety enforces configured writable roots, low grants host mutation authority, and high rejects mutation. Creates parent directories, preserves existing permissions, and rejects protected system/credential or changed target identity.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -98,7 +98,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "edit".to_string(),
-            description: "Apply exact text replacements atomically. Configured writable roots apply at medium/high safety; low safety grants host mutation authority. Each old_text must match exactly once and edits must not overlap. Preserves BOM, existing LF/CRLF line endings, permissions, and target identity.".to_string(),
+            description: "Apply exact text replacements atomically. Medium safety enforces configured writable roots, low grants host mutation authority, and high rejects mutation. Each old_text must match exactly once and edits must not overlap. Preserves BOM, existing LF/CRLF line endings, permissions, and rejects protected system/credential or changed target identity.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -265,6 +265,9 @@ pub async fn execute_with_cancel_and_safety(
             Ok(render_bash_output(&output))
         }
         "write" => {
+            if matches!(safety, SafetyLevel::High) {
+                anyhow::bail!("write tool is not authorized at high safety");
+            }
             let path = required_str(input, "path")?;
             let content = required_str(input, "content")?;
             let resolved = path::resolve_to_cwd(path, cwd)?;
@@ -276,6 +279,9 @@ pub async fn execute_with_cancel_and_safety(
             write::write_text(&resolved, content)
         }
         "edit" => {
+            if matches!(safety, SafetyLevel::High) {
+                anyhow::bail!("edit tool is not authorized at high safety");
+            }
             let path = required_str(input, "path")?;
             let edits_value = input
                 .get("edits")
@@ -626,6 +632,56 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read_to_string(outside_path).unwrap(), "after");
+    }
+
+    #[tokio::test]
+    async fn high_safety_rejects_native_mutation_tools() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("marker.txt");
+        let write_input = serde_json::json!({
+            "path": path,
+            "content": "before",
+        });
+        let write_error = execute_with_cancel_and_safety(
+            "write",
+            &write_input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::High,
+            &[std::path::PathBuf::from(".")],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            write_error
+                .to_string()
+                .contains("not authorized at high safety")
+        );
+        assert!(!path.exists());
+
+        std::fs::write(&path, "before").unwrap();
+        let edit_input = serde_json::json!({
+            "path": path,
+            "edits": [{"old_text": "before", "new_text": "after"}],
+        });
+        let edit_error = execute_with_cancel_and_safety(
+            "edit",
+            &edit_input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::High,
+            &[std::path::PathBuf::from(".")],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            edit_error
+                .to_string()
+                .contains("not authorized at high safety")
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "before");
     }
 
     #[tokio::test]

@@ -6,7 +6,9 @@ use std::{
 };
 
 pub fn validate_mutation_path(path: &Path, cwd: &Path, roots: &[PathBuf]) -> Result<()> {
+    reject_protected_credential_target(path)?;
     let target = resolved_mutation_target(path, cwd)?;
+    reject_protected_credential_target(&target)?;
     let roots = canonical_roots(cwd, roots)?;
     if roots.iter().any(|root| target.starts_with(root)) {
         return Ok(());
@@ -25,7 +27,41 @@ pub fn validate_mutation_path(path: &Path, cwd: &Path, roots: &[PathBuf]) -> Res
 }
 
 pub fn validate_mutation_target(path: &Path, cwd: &Path) -> Result<()> {
-    resolved_mutation_target(path, cwd).map(|_| ())
+    reject_protected_credential_target(path)?;
+    let target = resolved_mutation_target(path, cwd)?;
+    reject_protected_credential_target(&target)
+}
+
+fn reject_protected_credential_target(path: &Path) -> Result<()> {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let protected_credentials = components
+        .iter()
+        .any(|component| matches!(component.to_str(), Some(".ssh" | ".aws" | ".vault")))
+        || components.windows(2).any(|pair| {
+            pair[0] == std::ffi::OsStr::new(".config") && pair[1] == std::ffi::OsStr::new("ferrum")
+        });
+    let protected_system = path.is_absolute()
+        && (path.starts_with("/dev")
+            || path.starts_with("/proc")
+            || path.starts_with("/sys")
+            || path.starts_with("/boot")
+            || matches!(
+                path.to_str(),
+                Some("/etc/passwd" | "/etc/shadow" | "/etc/sudoers" | "/etc/hosts")
+            ));
+    if protected_credentials || protected_system {
+        anyhow::bail!(
+            "mutation target is protected system or credential state: {}",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn resolved_mutation_target(path: &Path, cwd: &Path) -> Result<PathBuf> {
@@ -225,6 +261,53 @@ mod tests {
 
         let error = validate_mutation_target(&alias, temp.path()).unwrap_err();
         assert!(error.to_string().contains("multiple hard links"));
+    }
+
+    #[test]
+    fn every_tier_validation_rejects_protected_credential_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        for relative in [
+            ".ssh/config",
+            ".aws/credentials",
+            ".vault/token",
+            ".config/ferrum/auth.json",
+        ] {
+            let target = temp.path().join(relative);
+            assert!(validate_mutation_target(&target, temp.path()).is_err());
+            assert!(validate_mutation_path(&target, temp.path(), &[PathBuf::from(".")]).is_err());
+        }
+    }
+
+    #[test]
+    fn target_validation_rejects_protected_system_state() {
+        for target in [
+            "/dev/sda",
+            "/proc/sys/kernel/core_pattern",
+            "/sys/kernel/test",
+            "/boot/loader/entries/test.conf",
+            "/etc/passwd",
+            "/etc/shadow",
+            "/etc/sudoers",
+            "/etc/hosts",
+        ] {
+            assert!(validate_mutation_target(Path::new(target), Path::new("/")).is_err());
+        }
+    }
+
+    #[test]
+    fn protected_target_check_follows_existing_ancestor_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let protected = temp.path().join(".ssh");
+        std::fs::create_dir(&protected).unwrap();
+        symlink(&protected, temp.path().join("alias")).unwrap();
+
+        let target = temp.path().join("alias/config");
+        let error = validate_mutation_target(&target, temp.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("protected system or credential state")
+        );
     }
 
     #[test]

@@ -1,58 +1,73 @@
 # Tool authority policy
 
-Ferrum runs on the host as the invoking Unix user. This policy reduces accidental and model-induced authority; it is not process isolation and does not make arbitrary programs safe.
+Ferrum runs on the host as the invoking Unix user. The execution policy reduces accidental and model-induced authority; it is not process isolation and does not make arbitrary programs safe.
 
 ## Threat model
 
-Repository files, user prompts, provider output, MCP output, command output, and generated compaction summaries may be hostile. User-owned CLI and configuration are trusted authority. Ferrum must reject shell text it cannot parse structurally, dynamic executable positions, hidden execution through wrappers, and native mutations outside configured writable roots when the selected tier enforces them.
+Repository files, user prompts, provider output, MCP output, command output, skills, and generated compaction summaries may be hostile. User-owned CLI and configuration are trusted runtime authority. Safety tiers govern native mutation and shell execution; they do not make untrusted instructions authoritative.
 
-The policy protects against commands whose dangerous authority is visible in the submitted syntax. An allowed executable can still use system calls, configuration, plugins, build scripts, tests, network services, or races that are not represented by its argv. Use a container, VM, Landlock/bubblewrap wrapper, isolated credentials, or a dedicated Unix account when host isolation is required.
+Allowed executables can use system calls, configuration, plugins, build scripts, tests, network services, or races that are not represented by their argv. Use a container, VM, Landlock/bubblewrap wrapper, isolated credentials, or a dedicated Unix account when host isolation is required.
+
+## Tier-independent invariants
+
+Every tier retains:
+
+- command byte, syntax-node, syntax-depth, output, time, and concurrency bounds;
+- complete Bash parsing and rejection of malformed or incomplete syntax;
+- cancellation, process-tree cleanup, bounded pipe draining, and honest outcome reporting;
+- terminal sanitization and private output spooling;
+- native mutation target-identity, symlink, hard-link, and atomic-replacement checks;
+- rejection of privilege escalation, filesystem formatting, special permission bits, destructive root-level operands, raw device writes, and protected credential mutation;
+- provider, MCP, session, and instruction-trust boundaries.
+
+These are robustness and trust properties, not authority-tier restrictions. A review fix must not reduce `low` capability unless it changes this contract explicitly and adds tier-specific regression coverage.
 
 ## Writable roots
 
-At `medium` and `high`, native `write` and `edit` and statically recognized shell mutations are limited to `[tools].writable_roots`. Relative roots are resolved from Ferrum's working directory. The default is `["."]`. `low` bypasses this boundary for both native and shell mutations.
+`medium` limits native `write`/`edit` and statically recognized shell mutations to `[tools].writable_roots`. Relative roots are resolved from Ferrum's working directory; the default is `["."]`. `low` bypasses writable roots. `high` rejects native and shell mutation.
 
-Ferrum resolves each root and target through its nearest existing ancestor before checking containment. Existing symlinks that resolve outside every root, dangling symlinks, and multiply linked regular-file targets are rejected. This is an authority check, not a complete race-free filesystem transaction; atomic replacement and stronger identity guarantees are tracked separately.
+Ferrum resolves roots and static targets through their nearest existing ancestor before checking containment. Existing symlink escapes, dangling symlinks, multiply linked regular-file targets, and protected credential targets are rejected. This is an authority check, not race-free filesystem isolation.
 
-At `medium` or `high`, a rejected path requires an explicit user decision: add the intended trusted path to `writable_roots`, move the operation under an existing root, perform it outside Ferrum, or deliberately switch to `low`. The model cannot change tiers or extend roots.
+At `medium`, an out-of-root operation requires an explicit user decision: add a trusted root, move the operation, perform it outside Ferrum, or deliberately switch to `low`. Model text cannot change tiers or extend roots.
 
-## Shell parsing and execution policy
+## Shell policy
 
-Ferrum parses the complete Bash input into a syntax tree before execution. Parse errors and unsupported compound forms fail closed. Here-document bodies are data; executable substitutions inside expandable here-documents are still inspected.
-
-All tiers:
-
-- reject dynamic executable names and process substitution;
-- recursively inspect supported wrappers and reject unknown wrapper options;
-- reject shell interpreter relaunch, `eval`, `exec`, `source`, `xargs`, privilege escalation, filesystem formatting, destructive root/home operands, and sensitive credential targets;
-- normalize literal mutation paths and reject dynamic/globbed mutation operands.
-
-`medium` and `high` apply writable roots to recognized shell mutations. `low` permits directory changes with `cd` and bypasses writable roots.
+Ferrum parses complete Bash input before execution. Here-document bodies are data; substitutions in expandable bodies remain executable syntax. Syntax byte/node/depth limits apply at every tier.
 
 Tier contract:
 
 | Authority | low | medium (default) | high |
 | --- | --- | --- | --- |
-| Direct inspection executable | allow | allow | inspection allowlist only |
-| Command substitution | inspect nested commands | deny | deny |
-| Inline interpreter payload | allow as explicit broad authority | deny | deny |
-| Direct static development/build executable | allow | allow as explicit checkout-code authority | deny |
-| Direct network client | allow | allow | deny |
-| Statically recognized mutation inside writable roots | allow | allow | deny |
-| Statically recognized mutation outside writable roots | allow | deny | deny |
-| Dynamic/indirect executable or mutation target | deny | deny | deny |
+| Direct executable or script path | allow | allow | inspection allowlist only |
+| Development/build executable | allow | allow | deny |
+| Network client | allow | allow | deny |
+| Inline interpreter or shell payload | allow | deny | deny |
+| Shell interpreter payload, function, or control flow | allow | deny | deny |
+| Command/process substitution | allow | deny | deny |
+| Dynamic executable/expansion | allow | deny | deny |
+| Indirect executor or detached process | allow | deny | deny |
+| Authority-changing environment assignment | allow | deny | deny |
+| Native or shell mutation inside writable roots | allow | allow | deny |
+| Native or shell mutation outside writable roots | allow | deny | deny |
+| Malformed syntax or resource-limit violation | deny | deny | deny |
+| Privilege escalation or explicit catastrophic shape | deny | deny | deny |
+| Protected credential mutation | deny | deny | deny |
 
-`low` is explicit broad host authority, including native and shell mutation outside configured roots, not an unsafe-syntax bypass. `medium` supports normal trusted-checkout development but does not contain build scripts, tests, plugins, or unknown executables. `high` is for inspection and rejects commands whose effects cannot be established conservatively.
+`low` is broad current-user host authority. It supports ordinary shell workflows, including `bash -lc`, scripts, `source`, `eval`, functions, control flow, command/process substitution, environment changes, dynamic commands, user installs, background processes, and mutations outside configured roots. Ferrum still parses the command and checks literal nested shell payloads and visible indirect commands for known catastrophic shapes, but low deliberately permits opaque authority. An equivalent operation can always be hidden inside an allowed interpreter or executable; low is not a security boundary against a hostile model or repository.
 
-## Structural test matrix
+`medium` is the trusted-checkout development tier. It permits normal direct commands, build/test runners, network clients, and static mutations inside writable roots. It rejects command substitution, direct shell/interpreter payloads, unsupported compound authority, dynamic executable or mutation targets, authority-changing environment assignments, indirect executors, and detached launchers. Build scripts, tests, plugins, and unknown direct executables still run with the user's host authority.
 
-The regression matrix covers:
+`high` is inspection-only. It permits a conservative read-oriented shell command set and rejects native mutation, shell mutation, network clients, interpreters, builds, and unknown executables.
 
-- leading assignments, array assignments, dynamic executable expansion, quote concatenation, chains, pipelines, and malformed syntax;
-- `env`, `command`, `nice`, `timeout`, detaching wrappers, shell launchers, interpreters, build runners, and unknown wrapper options;
-- normalized paths, quoted literals, absolute and relative destructive globs, redirections, and configured roots;
-- here-doc data versus executable command substitution;
-- each tier's direct command, network, interpreter, build, and mutation decisions;
-- native write/edit inside a root, lexical escape, existing symlink escape, and explicit additional roots.
+## Regression contract
 
-The guard is a deterministic denial layer. Ferrum does not silently downgrade a denied command, infer approval from model text, or claim that an allowed command is sandboxed.
+The table-driven capability matrix in `src/tools/shell_guard.rs` covers representative commands across all three tiers. Additional tests cover:
+
+- direct and nested catastrophic command shapes;
+- shell launchers, wrappers, interpreters, functions, control flow, dynamic commands, and detachers;
+- normalized paths, globbed/dynamic targets, redirections, and writable roots;
+- here-document data and executable substitutions;
+- native write/edit authority and protected credential targets;
+- syntax byte/node/depth limits.
+
+Future hardening should be classified as either a tier-independent invariant or an authority restriction. Authority restrictions require explicit low/medium/high expectations so review work cannot silently ratchet down `low`.

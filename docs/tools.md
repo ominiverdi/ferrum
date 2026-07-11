@@ -123,7 +123,7 @@ Notes:
 
 ## write
 
-Create or atomically replace a file. At `medium` and `high`, `[tools].writable_roots` limits mutation and defaults to the working directory. `low` bypasses writable roots. Existing permissions are preserved; symlink targets and concurrent target changes are rejected.
+Create or atomically replace a file. `medium` limits the target to `[tools].writable_roots`; `low` bypasses writable roots; `high` rejects the operation. Existing permissions are preserved; protected system/credential targets, symlink targets, and concurrent target changes are rejected.
 
 ```json
 {
@@ -134,7 +134,7 @@ Create or atomically replace a file. At `medium` and `high`, `[tools].writable_r
 
 ## edit
 
-Exact text replacement. At `medium` and `high`, the target must be under a configured writable root; `low` bypasses writable roots. Ferrum reads the target once, validates its identity, and commits through a synced sibling temporary file plus atomic rename.
+Exact text replacement. `medium` limits the target to a configured writable root; `low` bypasses writable roots; `high` rejects the operation. Ferrum rejects protected system/credential targets, validates target identity, and commits through a synced sibling temporary file plus atomic rename.
 
 ```json
 {
@@ -184,9 +184,9 @@ Rules:
 
 ## bash
 
-Run a focused bash command in cwd with timeout. Before execution, Ferrum parses the complete Bash input with a real syntax grammar and applies the selected execution tier plus configured writable roots. Parse errors, dynamic executable positions, unsupported authority forms, and ambiguous wrappers fail closed. Here-document bodies are data, not command text.
+Run a focused bash command in cwd with timeout. Before execution, Ferrum parses complete Bash input with a real syntax grammar, enforces syntax resource limits, and applies the selected authority tier. Malformed syntax fails closed. Here-document bodies are data, not command text.
 
-The policy recursively inspects supported wrappers such as `env`, `command`, `nice`, and `timeout`; rejects shell interpreter relaunch, dynamic executables, process substitution, `xargs`, dangerous normalized/globbed operands, and sensitive-path writes. At `medium`, recognized mutations are limited to `[tools].writable_roots`. `low` allows directory changes with `cd` and bypasses writable roots for host-authority mutation. At `high`, a conservative inspection command set replaces the normal development policy.
+`low` grants broad current-user shell authority, including scripts, shell launchers, substitutions, control flow, dynamic/indirect commands, detachers, and out-of-root mutation. `medium` supports direct trusted-checkout development, recursively inspects supported wrappers, rejects dynamic/indirect authority and direct shell/interpreter payloads, and limits recognized mutations to `[tools].writable_roots`. `high` allows only a conservative inspection command set. Every tier retains explicit catastrophic, privilege-escalation, protected-credential, resource, and process-cleanup checks.
 
 Allowed executables still run with the user's host authority. In particular, build tools and tests can execute checkout code at `low` and `medium`. This is not a sandbox; see [tool-authority.md](tool-authority.md).
 
@@ -306,8 +306,8 @@ Results are appended in the original model-requested order. Mixed or mutating ba
 ## Safety
 
 - Tools run with local user permissions.
-- `write`, `edit`, `bash`, and `wait` can mutate files.
-- At `medium` and `high`, `write`, `edit`, and recognized shell mutations are limited to user-configured writable roots. `low` bypasses writable roots and grants host mutation authority.
-- Ferrum has no model-grantable confirmation prompt. At `medium` or `high`, a denied root requires the user to change trusted config or perform the action outside Ferrum.
+- `write`, `edit`, `bash`, and `wait` can mutate files at `low` or `medium`; `high` rejects mutation.
+- `medium` limits native and recognized shell mutations to user-configured writable roots. `low` bypasses writable roots and grants host mutation authority.
+- Ferrum has no model-grantable confirmation prompt. A medium-tier denied root requires the user to change trusted config or perform the action outside Ferrum.
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 - Secrets must not be written, printed, logged, or committed.
