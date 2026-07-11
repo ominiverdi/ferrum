@@ -1,3 +1,4 @@
+pub mod events;
 pub mod messages;
 pub mod tools;
 
@@ -13,6 +14,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     terminal,
 };
+use events::{AgentEvent, AgentEventSink, ModelRequestKind, NoticeKind, TurnOptions, TurnOutcome};
 use futures_util::{StreamExt, stream};
 use rustyline::{
     Editor, Helper,
@@ -403,7 +405,7 @@ fn current_palette_name(config_dir: &Path, colors: &ColorPalette) -> Result<Stri
     Ok("custom".to_string())
 }
 
-fn apply_palette(name: &str, config: &mut Config, state: &mut AgentState) -> Result<()> {
+fn apply_palette(name: &str, config: &mut Config, state: &mut AgentSession) -> Result<()> {
     let path = palette_file_path(&config.config_dir, name)?;
     if !path.exists() {
         anyhow::bail!("unknown palette: {name}. Use /palettes to list available palettes");
@@ -513,9 +515,9 @@ pub async fn run_print(
 ) -> Result<()> {
     let mut effective_config = config.clone();
     let mut state = if let Some(reference) = session_ref {
-        AgentState::resume_or_create_ref(&mut effective_config, reference)?
+        AgentSession::resume_or_create_ref(&mut effective_config, reference)?
     } else {
-        AgentState::new(&effective_config)?
+        AgentSession::new(&effective_config)?
     };
     if let Some(title) = title {
         state.set_title(title)?;
@@ -541,7 +543,7 @@ pub async fn run_interactive(
 ) -> Result<()> {
     let show_resume_tail = session_ref.is_some() || resume.is_some() || continue_latest;
     let mut state = match (session_ref, resume, continue_latest) {
-        (Some(reference), _, _) => AgentState::resume_ref(
+        (Some(reference), _, _) => AgentSession::resume_ref(
             config,
             Some(&reference),
             !thinking_overridden,
@@ -550,7 +552,7 @@ pub async fn run_interactive(
             !provider_overridden,
             !model_overridden,
         )?,
-        (None, Some(Some(reference)), _) => AgentState::resume_ref(
+        (None, Some(Some(reference)), _) => AgentSession::resume_ref(
             config,
             Some(&reference),
             !thinking_overridden,
@@ -559,7 +561,7 @@ pub async fn run_interactive(
             !provider_overridden,
             !model_overridden,
         )?,
-        (None, Some(None), _) | (None, None, true) => AgentState::resume_ref(
+        (None, Some(None), _) | (None, None, true) => AgentSession::resume_ref(
             config,
             None,
             !thinking_overridden,
@@ -568,7 +570,7 @@ pub async fn run_interactive(
             !provider_overridden,
             !model_overridden,
         )?,
-        (None, None, false) => AgentState::new(config)?,
+        (None, None, false) => AgentSession::new(config)?,
     };
     if let Some(title) = title {
         state.set_title(title)?;
@@ -866,6 +868,7 @@ struct ExecutedToolUse {
     duration_ms: u128,
 }
 
+#[cfg(test)]
 fn aborted_tool_uses(
     tool_uses: Vec<(String, String, serde_json::Value)>,
     content: &str,
@@ -969,15 +972,15 @@ fn emit_model_metrics_end(
 
 static USAGE_WARNING_PRINTED: AtomicBool = AtomicBool::new(false);
 
-fn append_usage_record_with_warning(data_dir: &Path, record: &usage::UsageRecord) {
-    if let Err(error) = usage::append_usage_record(data_dir, record)
-        && !USAGE_WARNING_PRINTED.swap(true, Ordering::Relaxed)
-    {
-        eprintln!(
-            "[usage] failed to persist usage: {}",
-            terminal_text::sanitize(&error.to_string())
-        );
+fn append_usage_record_with_warning(
+    data_dir: &Path,
+    record: &usage::UsageRecord,
+) -> Option<String> {
+    let error = usage::append_usage_record(data_dir, record).err()?;
+    if USAGE_WARNING_PRINTED.swap(true, Ordering::Relaxed) {
+        return None;
     }
+    Some(format!("[usage] failed to persist usage: {error}"))
 }
 
 fn usage_for_response(
@@ -1119,10 +1122,6 @@ impl ActiveTurnAbort {
         Arc::clone(&self.aborted)
     }
 
-    fn is_cancelled(&self) -> bool {
-        self.aborted.load(Ordering::Relaxed)
-    }
-
     fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
@@ -1135,6 +1134,114 @@ impl ActiveTurnAbort {
 impl Drop for ActiveTurnAbort {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+struct TerminalAgentEventSink {
+    interactive: bool,
+    color_mode: ColorMode,
+    colors: ColorPalette,
+    diff_mode: DiffMode,
+    live_render: Option<LiveRenderState>,
+}
+
+impl TerminalAgentEventSink {
+    fn new(
+        interactive: bool,
+        color_mode: ColorMode,
+        colors: ColorPalette,
+        diff_mode: DiffMode,
+    ) -> Self {
+        Self {
+            interactive,
+            color_mode,
+            colors,
+            diff_mode,
+            live_render: None,
+        }
+    }
+
+    fn finish_live_render(&mut self) -> Result<bool> {
+        let Some(live_render) = self.live_render.take() else {
+            return Ok(false);
+        };
+        live_render.finish()?;
+        Ok(live_render.text_started)
+    }
+}
+
+impl AgentEventSink for TerminalAgentEventSink {
+    fn emit(&mut self, event: AgentEvent) -> Result<()> {
+        match event {
+            AgentEvent::TurnStarted { .. } => {
+                if self.interactive {
+                    render_turn_separator(self.color_mode, &self.colors);
+                    io::stdout().flush()?;
+                }
+            }
+            AgentEvent::ModelRequestStarted { request, kind } => {
+                let _ = self.finish_live_render()?;
+                self.live_render = Some(LiveRenderState::new(self.color_mode, self.colors.clone()));
+                if self.interactive && request > 1 && matches!(kind, ModelRequestKind::Agent) {
+                    render_turn_separator(self.color_mode, &self.colors);
+                    io::stdout().flush()?;
+                }
+            }
+            AgentEvent::ThinkingDelta(delta) => {
+                if let Some(live_render) = &mut self.live_render {
+                    live_render.render_event(providers::StreamEvent::ThinkingDelta(delta))?;
+                }
+            }
+            AgentEvent::TextDelta(delta) => {
+                if let Some(live_render) = &mut self.live_render {
+                    live_render.render_event(providers::StreamEvent::TextDelta(delta))?;
+                }
+            }
+            AgentEvent::AssistantMessage { message } => {
+                let rendered_live = self.finish_live_render()?;
+                if !self.interactive || !rendered_live {
+                    render_assistant_response(
+                        &message,
+                        self.interactive,
+                        self.color_mode,
+                        &self.colors,
+                    )?;
+                }
+            }
+            AgentEvent::UsageUpdated { .. } => {}
+            AgentEvent::ToolCallStarted { name, input, .. } => {
+                eprintln!();
+                render_tool_call(&name, &input, self.diff_mode, self.color_mode, &self.colors);
+            }
+            AgentEvent::ToolCallCompleted {
+                name,
+                content,
+                is_error,
+                aborted,
+                ..
+            } => {
+                if aborted {
+                    eprintln!();
+                }
+                render_tool_result(&name, &content, is_error, self.color_mode, &self.colors);
+            }
+            AgentEvent::Notice { kind, message } => match kind {
+                NoticeKind::Status if self.interactive => {
+                    render_status_notice(&message, self.color_mode, &self.colors)
+                }
+                NoticeKind::Status | NoticeKind::Diagnostic => {
+                    eprintln!("{}", terminal_text::sanitize(&message))
+                }
+            },
+            AgentEvent::TurnCancelled => {
+                let _ = self.finish_live_render()?;
+                println!("aborted");
+            }
+            AgentEvent::TurnCompleted => {
+                let _ = self.finish_live_render()?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1736,7 +1843,7 @@ fn message_is_runtime_context(message: &messages::Message) -> bool {
         })
 }
 
-struct AgentState {
+pub(crate) struct AgentSession {
     session: session::JsonlSession,
     messages: Vec<messages::Message>,
     skills: Vec<skills::Skill>,
@@ -1755,9 +1862,23 @@ struct AgentState {
     last_context_warning_bucket: Option<usize>,
 }
 
-impl AgentState {
+impl AgentSession {
     fn new(config: &Config) -> Result<Self> {
-        let cwd = std::env::current_dir()?;
+        Self::new_at_cwd(config, std::env::current_dir()?)
+    }
+
+    pub(crate) fn new_at_cwd(config: &Config, cwd: PathBuf) -> Result<Self> {
+        let cwd = if cwd.is_absolute() {
+            cwd
+        } else {
+            std::env::current_dir()?.join(cwd)
+        };
+        let cwd = cwd
+            .canonicalize()
+            .with_context(|| format!("failed to resolve session cwd {}", cwd.display()))?;
+        if !cwd.is_dir() {
+            anyhow::bail!("session cwd is not a directory: {}", cwd.display());
+        }
         let skills = skills::discover(
             &config.config_dir,
             &cwd,
@@ -1765,7 +1886,7 @@ impl AgentState {
         )?;
         let messages = immutable_system_messages(config, &cwd, &skills)?;
         Ok(Self {
-            session: session::JsonlSession::create_with_color_mode(
+            session: session::JsonlSession::create_with_color_mode_at_cwd(
                 config.sessions_dir(),
                 Some(config.provider_name.clone()),
                 Some(config.model.clone()),
@@ -1774,6 +1895,7 @@ impl AgentState {
                 Some(config.diff_mode.as_str().to_string()),
                 Some(config.safety.as_str().to_string()),
                 None,
+                &cwd,
             )?,
             messages,
             skills,
@@ -1920,6 +2042,50 @@ impl AgentState {
     }
 
     async fn run_turn(&mut self, prompt: String, config: &Config, interactive: bool) -> Result<()> {
+        let options = TurnOptions::terminal(interactive);
+        let mut sink = TerminalAgentEventSink::new(
+            interactive,
+            self.color_mode,
+            self.colors.clone(),
+            self.diff_mode,
+        );
+        self.run_turn_with_events(prompt, config, options, &mut sink)
+            .await?;
+        Ok(())
+    }
+
+    /// Runs one turn through a caller-owned event sink. The mutable session borrow
+    /// statically permits only one active turn for this session instance.
+    pub(crate) async fn run_turn_with_events(
+        &mut self,
+        prompt: String,
+        config: &Config,
+        options: TurnOptions,
+        sink: &mut dyn AgentEventSink,
+    ) -> Result<TurnOutcome> {
+        sink.emit(AgentEvent::TurnStarted {
+            cwd: self.cwd.clone(),
+        })?;
+        if options.cancellation.is_cancelled() {
+            sink.emit(AgentEvent::TurnCancelled)?;
+            return Ok(TurnOutcome::Cancelled);
+        }
+        match self.run_turn_inner(prompt, config, options, sink).await {
+            Err(error) if error.to_string() == "aborted" => {
+                sink.emit(AgentEvent::TurnCancelled)?;
+                Ok(TurnOutcome::Cancelled)
+            }
+            result => result,
+        }
+    }
+
+    async fn run_turn_inner(
+        &mut self,
+        prompt: String,
+        config: &Config,
+        options: TurnOptions,
+        sink: &mut dyn AgentEventSink,
+    ) -> Result<TurnOutcome> {
         validate_image_attachment_budget(&self.messages, &self.pending_images, &[])?;
         let images = std::mem::take(&mut self.pending_images);
         let user = if images.is_empty() {
@@ -1929,11 +2095,6 @@ impl AgentState {
         };
         self.session.append_message(&user)?;
         self.messages.push(user);
-
-        if interactive {
-            render_turn_separator(self.color_mode, &self.colors);
-            io::stdout().flush()?;
-        }
 
         let provider = providers::from_config(&config.provider)?;
         let mut tools = builtin_tools::definitions();
@@ -1956,90 +2117,126 @@ impl AgentState {
         }
 
         let metrics_enabled = metrics_enabled();
+        let turn_cancel = options.cancellation.flag();
         let mut model_request_index = 0usize;
         let mut turn_tool_calls = 0usize;
         let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
         let mut overflow_recovery_attempted = false;
         let force_final_reason = loop {
-            self.ensure_provider_request_budget(config, &tools, &[], "model request")
-                .await?;
+            self.ensure_provider_request_budget(
+                config,
+                &tools,
+                &[],
+                "model request",
+                Some(Arc::clone(&turn_cancel)),
+                sink,
+            )
+            .await?;
             model_request_index += 1;
-            if interactive && model_request_index > 1 {
-                render_turn_separator(self.color_mode, &self.colors);
-                io::stdout().flush()?;
-            }
-            let mut abort = ActiveTurnAbort::start(interactive);
+            sink.emit(AgentEvent::ModelRequestStarted {
+                request: model_request_index,
+                kind: ModelRequestKind::Agent,
+            })?;
+            let mut abort = ActiveTurnAbort::start_with_token(
+                options.monitor_terminal_cancel,
+                Arc::clone(&turn_cancel),
+            );
             if metrics_enabled {
                 emit_model_metrics_start(model_request_index, &self.messages, &tools);
             }
             let started = Instant::now();
-            let mut live_render = LiveRenderState::new(self.color_mode, self.colors.clone());
-            let mut on_event = |event| {
-                let _ = live_render.render_event(event);
-            };
-            let response_result = if interactive {
-                let token = abort.token();
-                match cancel::race_with_cancel_grace(
-                    provider.complete_streaming(
-                        &config.provider_model,
-                        &self.messages,
-                        &tools,
-                        config.thinking,
-                        &mut on_event,
-                        Some(Arc::clone(&token)),
-                    ),
-                    Some(&token),
-                    PROVIDER_CANCELLATION_GRACE,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(anyhow::anyhow!("aborted")),
-                }
-            } else {
-                provider
-                    .complete(
-                        &config.provider_model,
-                        &self.messages,
-                        &tools,
-                        config.thinking,
+            let mut event_error = None;
+            let event_cancel = Arc::clone(&turn_cancel);
+            let response_result = {
+                let mut on_event = |event| {
+                    if event_error.is_some() {
+                        return;
+                    }
+                    let event = match event {
+                        providers::StreamEvent::ThinkingDelta(delta) => {
+                            AgentEvent::ThinkingDelta(delta)
+                        }
+                        providers::StreamEvent::TextDelta(delta) => AgentEvent::TextDelta(delta),
+                    };
+                    if let Err(error) = sink.emit(event) {
+                        event_cancel.store(true, Ordering::Release);
+                        event_error = Some(error);
+                    }
+                };
+                if options.stream_responses {
+                    match cancel::race_with_cancel_grace(
+                        provider.complete_streaming(
+                            &config.provider_model,
+                            &self.messages,
+                            &tools,
+                            config.thinking,
+                            &mut on_event,
+                            Some(Arc::clone(&turn_cancel)),
+                        ),
+                        Some(&turn_cancel),
+                        PROVIDER_CANCELLATION_GRACE,
                     )
                     .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!("aborted")),
+                    }
+                } else {
+                    match cancel::race_with_cancel_grace(
+                        provider.complete(
+                            &config.provider_model,
+                            &self.messages,
+                            &tools,
+                            config.thinking,
+                        ),
+                        Some(&turn_cancel),
+                        PROVIDER_CANCELLATION_GRACE,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!("aborted")),
+                    }
+                }
             };
+            if let Some(error) = event_error {
+                return Err(error);
+            }
             abort.stop();
             let response = match response_result {
                 Ok(response) => response,
                 Err(error) if error.to_string() == "aborted" => {
-                    if interactive {
-                        live_render.finish()?;
-                    }
-                    println!("aborted");
-                    return Ok(());
+                    sink.emit(AgentEvent::TurnCancelled)?;
+                    return Ok(TurnOutcome::Cancelled);
                 }
                 Err(error)
                     if providers::is_context_overflow_error(&error)
                         && !overflow_recovery_attempted =>
                 {
                     overflow_recovery_attempted = true;
-                    eprintln!(
-                        "[session] provider reported context overflow; compacting and retrying once"
-                    );
-                    let outcome = self.compact(config, None, true, None).await?;
+                    sink.emit(AgentEvent::Notice {
+                        kind: NoticeKind::Diagnostic,
+                        message: "[session] provider reported context overflow; compacting and retrying once".to_string(),
+                    })?;
+                    let outcome = self
+                        .compact(config, None, true, Some(Arc::clone(&turn_cancel)))
+                        .await?;
                     self.last_context_warning_bucket = None;
-                    match outcome {
+                    let message = match outcome {
                         CompactionOutcome::Compacted {
                             before_tokens,
                             after_tokens,
-                        } => eprintln!(
+                        } => format!(
                             "[session] compacted context after overflow: {before_tokens} -> {after_tokens} estimated tokens"
                         ),
                         CompactionOutcome::Skipped { reason, .. } => {
-                            eprintln!(
-                                "[session] overflow recovery compaction skipped: {}",
-                                terminal_text::sanitize(&reason)
-                            )
+                            format!("[session] overflow recovery compaction skipped: {reason}")
                         }
-                    }
+                    };
+                    sink.emit(AgentEvent::Notice {
+                        kind: NoticeKind::Diagnostic,
+                        message,
+                    })?;
                     continue;
                 }
                 Err(error) => return Err(error),
@@ -2055,7 +2252,7 @@ impl AgentState {
             if response.usage.is_none() {
                 response.usage = Some(token_usage.clone());
             }
-            append_usage_record_with_warning(
+            if let Some(message) = append_usage_record_with_warning(
                 &config.data_dir,
                 &usage::UsageRecord {
                     timestamp_unix: usage::now_unix(),
@@ -2068,7 +2265,12 @@ impl AgentState {
                     cache_write_tokens: token_usage.cache_write_tokens,
                     source: token_usage.source.clone(),
                 },
-            );
+            ) {
+                sink.emit(AgentEvent::Notice {
+                    kind: NoticeKind::Diagnostic,
+                    message,
+                })?;
+            }
             turn_tool_calls = turn_tool_calls.saturating_add(model_tool_call_count(&response));
             if metrics_enabled {
                 emit_model_metrics_end(
@@ -2078,12 +2280,9 @@ impl AgentState {
                     turn_tool_calls,
                 );
             }
-            if interactive {
-                live_render.finish()?;
-            }
-            if !interactive || !live_render.text_started {
-                render_assistant_response(&response, interactive, self.color_mode, &self.colors)?;
-            }
+            sink.emit(AgentEvent::AssistantMessage {
+                message: response.clone(),
+            })?;
             self.session.append_message(&response)?;
 
             let tool_uses: Vec<_> = response
@@ -2097,24 +2296,28 @@ impl AgentState {
                 })
                 .collect();
             self.messages.push(response);
+            sink.emit(AgentEvent::UsageUpdated {
+                usage: token_usage,
+                estimated_context_tokens: self.stats().estimated_tokens,
+            })?;
 
             if tool_uses.is_empty() {
                 self.maybe_warn_context_pressure(
                     self.stats().estimated_tokens,
                     config.max_context_tokens,
-                    interactive,
-                );
-                return Ok(());
+                    sink,
+                )?;
+                sink.emit(AgentEvent::TurnCompleted)?;
+                return Ok(TurnOutcome::Completed);
             }
-            let cancelled_before_tools = abort.is_cancelled();
-            let executed_batch = if cancelled_before_tools {
-                ExecutedToolBatch {
-                    tools: aborted_tool_uses(tool_uses, "aborted before execution"),
-                    cancelled: true,
-                }
-            } else {
-                self.execute_tool_batch(tool_uses, interactive).await
-            };
+            let executed_batch = self
+                .execute_tool_batch(
+                    tool_uses,
+                    options.monitor_terminal_cancel,
+                    Arc::clone(&turn_cancel),
+                    sink,
+                )
+                .await?;
             let mut observations = Vec::new();
             for executed in executed_batch.tools {
                 observations.push(ToolObservation::new(
@@ -2135,8 +2338,8 @@ impl AgentState {
                 self.messages.push(result);
             }
             if executed_batch.cancelled {
-                println!("aborted");
-                return Ok(());
+                sink.emit(AgentEvent::TurnCancelled)?;
+                return Ok(TurnOutcome::Cancelled);
             }
 
             match loop_guard.observe_round(&observations) {
@@ -2148,7 +2351,10 @@ impl AgentState {
                             "Adaptive loop guard: {reason}. Do not repeat the same failed or redundant action. Use existing tool results, choose a different concrete action, or finish with a concise summary if enough evidence is available."
                         ),
                     );
-                    eprintln!("[loop-guard] {}", terminal_text::sanitize(&reason));
+                    sink.emit(AgentEvent::Notice {
+                        kind: NoticeKind::Diagnostic,
+                        message: format!("[loop-guard] {reason}"),
+                    })?;
                     self.session.append_message(&message)?;
                     self.messages.push(message);
                 }
@@ -2156,10 +2362,10 @@ impl AgentState {
             }
         };
 
-        eprintln!(
-            "[loop-guard] stopped tool use: {}",
-            terminal_text::sanitize(&force_final_reason)
-        );
+        sink.emit(AgentEvent::Notice {
+            kind: NoticeKind::Diagnostic,
+            message: format!("[loop-guard] stopped tool use: {force_final_reason}"),
+        })?;
         let final_instruction = messages::Message::text(
             messages::Role::System,
             format!(
@@ -2171,6 +2377,8 @@ impl AgentState {
             &[],
             std::slice::from_ref(&final_instruction),
             "final synthesis",
+            Some(Arc::clone(&turn_cancel)),
+            sink,
         )
         .await?;
         let mut final_messages = self.messages.clone();
@@ -2178,44 +2386,75 @@ impl AgentState {
         let mut final_overflow_recovery_attempted = overflow_recovery_attempted;
         let final_response = loop {
             model_request_index += 1;
+            sink.emit(AgentEvent::ModelRequestStarted {
+                request: model_request_index,
+                kind: ModelRequestKind::FinalSynthesis,
+            })?;
             if metrics_enabled {
                 emit_model_metrics_start(model_request_index, &final_messages, &[]);
             }
             let started = Instant::now();
-            let mut abort = ActiveTurnAbort::start(interactive);
-            let mut live_render = LiveRenderState::new(self.color_mode, self.colors.clone());
-            let mut on_event = |event| {
-                let _ = live_render.render_event(event);
-            };
-            let response_result = if interactive {
-                let token = abort.token();
-                match cancel::race_with_cancel_grace(
-                    provider.complete_streaming(
-                        &config.provider_model,
-                        &final_messages,
-                        &[],
-                        config.thinking,
-                        &mut on_event,
-                        Some(Arc::clone(&token)),
-                    ),
-                    Some(&token),
-                    PROVIDER_CANCELLATION_GRACE,
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(anyhow::anyhow!("aborted")),
-                }
-            } else {
-                provider
-                    .complete(
-                        &config.provider_model,
-                        &final_messages,
-                        &[],
-                        config.thinking,
+            let mut abort = ActiveTurnAbort::start_with_token(
+                options.monitor_terminal_cancel,
+                Arc::clone(&turn_cancel),
+            );
+            let mut event_error = None;
+            let event_cancel = Arc::clone(&turn_cancel);
+            let response_result = {
+                let mut on_event = |event| {
+                    if event_error.is_some() {
+                        return;
+                    }
+                    let event = match event {
+                        providers::StreamEvent::ThinkingDelta(delta) => {
+                            AgentEvent::ThinkingDelta(delta)
+                        }
+                        providers::StreamEvent::TextDelta(delta) => AgentEvent::TextDelta(delta),
+                    };
+                    if let Err(error) = sink.emit(event) {
+                        event_cancel.store(true, Ordering::Release);
+                        event_error = Some(error);
+                    }
+                };
+                if options.stream_responses {
+                    match cancel::race_with_cancel_grace(
+                        provider.complete_streaming(
+                            &config.provider_model,
+                            &final_messages,
+                            &[],
+                            config.thinking,
+                            &mut on_event,
+                            Some(Arc::clone(&turn_cancel)),
+                        ),
+                        Some(&turn_cancel),
+                        PROVIDER_CANCELLATION_GRACE,
                     )
                     .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!("aborted")),
+                    }
+                } else {
+                    match cancel::race_with_cancel_grace(
+                        provider.complete(
+                            &config.provider_model,
+                            &final_messages,
+                            &[],
+                            config.thinking,
+                        ),
+                        Some(&turn_cancel),
+                        PROVIDER_CANCELLATION_GRACE,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!("aborted")),
+                    }
+                }
             };
+            if let Some(error) = event_error {
+                return Err(error);
+            }
             abort.stop();
             match response_result {
                 Ok(response) => {
@@ -2229,44 +2468,47 @@ impl AgentState {
                             final_turn_tool_calls,
                         );
                     }
-                    if interactive {
-                        live_render.finish()?;
-                    }
-                    break (response, live_render.text_started);
+                    break response;
                 }
                 Err(error) if error.to_string() == "aborted" => {
-                    if interactive {
-                        live_render.finish()?;
-                    }
-                    println!("aborted");
-                    return Ok(());
+                    sink.emit(AgentEvent::TurnCancelled)?;
+                    return Ok(TurnOutcome::Cancelled);
                 }
                 Err(error)
                     if providers::is_context_overflow_error(&error)
                         && !final_overflow_recovery_attempted =>
                 {
                     final_overflow_recovery_attempted = true;
-                    eprintln!(
-                        "[session] provider reported context overflow during final synthesis; compacting and retrying once"
-                    );
-                    let outcome = self.compact(config, None, true, None).await?;
+                    sink.emit(AgentEvent::Notice {
+                        kind: NoticeKind::Diagnostic,
+                        message: "[session] provider reported context overflow during final synthesis; compacting and retrying once".to_string(),
+                    })?;
+                    let outcome = self
+                        .compact(config, None, true, Some(Arc::clone(&turn_cancel)))
+                        .await?;
                     self.last_context_warning_bucket = None;
-                    match outcome {
+                    let message = match outcome {
                         CompactionOutcome::Compacted {
                             before_tokens,
                             after_tokens,
-                        } => eprintln!(
+                        } => format!(
                             "[session] compacted context before final synthesis retry: {before_tokens} -> {after_tokens} estimated tokens"
                         ),
-                        CompactionOutcome::Skipped { reason, .. } => eprintln!(
+                        CompactionOutcome::Skipped { reason, .. } => format!(
                             "[session] final synthesis overflow recovery compaction skipped: {reason}"
                         ),
-                    }
+                    };
+                    sink.emit(AgentEvent::Notice {
+                        kind: NoticeKind::Diagnostic,
+                        message,
+                    })?;
                     self.ensure_provider_request_budget(
                         config,
                         &[],
                         std::slice::from_ref(&final_instruction),
                         "final synthesis retry",
+                        Some(Arc::clone(&turn_cancel)),
+                        sink,
                     )
                     .await?;
                     final_messages = self.messages.clone();
@@ -2275,7 +2517,6 @@ impl AgentState {
                 Err(error) => return Err(error),
             }
         };
-        let (final_response, final_text_was_rendered_live) = final_response;
 
         let provider_usage = final_response.usage;
         let mut final_response = final_response.message;
@@ -2288,7 +2529,7 @@ impl AgentState {
         if final_response.usage.is_none() {
             final_response.usage = Some(token_usage.clone());
         }
-        append_usage_record_with_warning(
+        if let Some(message) = append_usage_record_with_warning(
             &config.data_dir,
             &usage::UsageRecord {
                 timestamp_unix: usage::now_unix(),
@@ -2301,18 +2542,28 @@ impl AgentState {
                 cache_write_tokens: token_usage.cache_write_tokens,
                 source: token_usage.source.clone(),
             },
-        );
-        if !interactive || !final_text_was_rendered_live {
-            render_assistant_response(&final_response, interactive, self.color_mode, &self.colors)?;
+        ) {
+            sink.emit(AgentEvent::Notice {
+                kind: NoticeKind::Diagnostic,
+                message,
+            })?;
         }
+        sink.emit(AgentEvent::AssistantMessage {
+            message: final_response.clone(),
+        })?;
         self.session.append_message(&final_response)?;
         self.messages.push(final_response);
+        sink.emit(AgentEvent::UsageUpdated {
+            usage: token_usage,
+            estimated_context_tokens: self.stats().estimated_tokens,
+        })?;
         self.maybe_warn_context_pressure(
             self.stats().estimated_tokens,
             config.max_context_tokens,
-            interactive,
-        );
-        Ok(())
+            sink,
+        )?;
+        sink.emit(AgentEvent::TurnCompleted)?;
+        Ok(TurnOutcome::Completed)
     }
 
     fn attach_clipboard_image(&mut self) -> Result<()> {
@@ -2367,7 +2618,7 @@ impl AgentState {
     async fn ensure_mcp(&mut self, config: &Config) -> Result<()> {
         let servers = active_mcp_servers(config);
         if self.mcp_enabled && self.mcp.is_none() && !servers.is_empty() {
-            self.mcp = Some(mcp::McpManager::start(&servers).await?);
+            self.mcp = Some(mcp::McpManager::start_at_cwd(&servers, &self.cwd).await?);
         }
         Ok(())
     }
@@ -2457,39 +2708,45 @@ impl AgentState {
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
         interactive: bool,
-    ) -> ExecutedToolBatch {
+        cancel: Arc<AtomicBool>,
+        sink: &mut dyn AgentEventSink,
+    ) -> Result<ExecutedToolBatch> {
         let can_parallelize = tool_uses
             .iter()
             .all(|(_, name, _)| self.is_parallel_safe_builtin_tool(name));
-        let color_mode = self.color_mode;
         if can_parallelize && tool_uses.len() > 1 {
-            for (_, name, input) in &tool_uses {
-                eprintln!();
-                render_tool_call(name, input, self.diff_mode, color_mode, &self.colors);
+            for (id, name, input) in &tool_uses {
+                sink.emit(AgentEvent::ToolCallStarted {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                })?;
             }
-            let mut abort = ActiveTurnAbort::start(interactive);
-            let cancel = Some(abort.token());
-            let results = self.run_parallel_builtin_tools(tool_uses, cancel).await;
-            let cancelled = abort.is_cancelled() || results.iter().any(|result| result.aborted);
+            let mut abort = ActiveTurnAbort::start_with_token(interactive, Arc::clone(&cancel));
+            let results = self
+                .run_parallel_builtin_tools(tool_uses, Some(Arc::clone(&cancel)))
+                .await;
             abort.stop();
-            let mut executed = Vec::new();
-            for result in results {
-                render_tool_result(
-                    &result.name,
-                    &result.content,
-                    result.is_error,
-                    color_mode,
-                    &self.colors,
-                );
-                emit_tool_metrics_if_enabled(&result);
-                executed.push(result);
+            let cancelled =
+                cancel.load(Ordering::Acquire) || results.iter().any(|result| result.aborted);
+            for result in &results {
+                sink.emit(AgentEvent::ToolCallCompleted {
+                    id: result.id.clone(),
+                    name: result.name.clone(),
+                    input: result.input.clone(),
+                    content: result.content.clone(),
+                    is_error: result.is_error,
+                    aborted: result.aborted,
+                    duration_ms: result.duration_ms,
+                })?;
+                emit_tool_metrics_if_enabled(result);
             }
-            return ExecutedToolBatch {
-                tools: executed,
+            return Ok(ExecutedToolBatch {
+                tools: results,
                 cancelled,
-            };
+            });
         }
-        self.execute_sequential_tools(tool_uses, color_mode, self.colors.clone(), interactive)
+        self.execute_sequential_tools_with_cancel_and_events(tool_uses, interactive, cancel, sink)
             .await
     }
 
@@ -2568,36 +2825,41 @@ impl AgentState {
         collect_bounded_ordered(futures, MAX_PARALLEL_BUILTIN_TOOLS).await
     }
 
-    async fn execute_sequential_tools(
-        &mut self,
-        tool_uses: Vec<(String, String, serde_json::Value)>,
-        color_mode: ColorMode,
-        colors: ColorPalette,
-        interactive: bool,
-    ) -> ExecutedToolBatch {
-        self.execute_sequential_tools_with_cancel(
-            tool_uses,
-            color_mode,
-            colors,
-            interactive,
-            Arc::new(AtomicBool::new(false)),
-        )
-        .await
-    }
-
+    #[cfg(test)]
     async fn execute_sequential_tools_with_cancel(
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
-        color_mode: ColorMode,
-        colors: ColorPalette,
+        _color_mode: ColorMode,
+        _colors: ColorPalette,
         interactive: bool,
         cancel: Arc<AtomicBool>,
     ) -> ExecutedToolBatch {
+        let mut sink = events::IgnoreAgentEvents;
+        self.execute_sequential_tools_with_cancel_and_events(
+            tool_uses,
+            interactive,
+            cancel,
+            &mut sink,
+        )
+        .await
+        .expect("ignore event sink cannot fail")
+    }
+
+    async fn execute_sequential_tools_with_cancel_and_events(
+        &mut self,
+        tool_uses: Vec<(String, String, serde_json::Value)>,
+        interactive: bool,
+        cancel: Arc<AtomicBool>,
+        sink: &mut dyn AgentEventSink,
+    ) -> Result<ExecutedToolBatch> {
         let mut results = Vec::new();
         let mut batch_cancelled = cancel.load(Ordering::Acquire);
         for (id, name, input) in tool_uses {
-            eprintln!();
-            render_tool_call(&name, &input, self.diff_mode, color_mode, &colors);
+            sink.emit(AgentEvent::ToolCallStarted {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            })?;
             let started = Instant::now();
             let (content, is_error, aborted) = if batch_cancelled {
                 ("aborted before execution".to_string(), true, true)
@@ -2619,10 +2881,6 @@ impl AgentState {
                 }
             };
             batch_cancelled = batch_cancelled || aborted || cancel.load(Ordering::Acquire);
-            if aborted {
-                eprintln!();
-            }
-            render_tool_result(&name, &content, is_error, color_mode, &colors);
             let result = ExecutedToolUse {
                 id,
                 name,
@@ -2632,13 +2890,22 @@ impl AgentState {
                 aborted,
                 duration_ms: started.elapsed().as_millis(),
             };
+            sink.emit(AgentEvent::ToolCallCompleted {
+                id: result.id.clone(),
+                name: result.name.clone(),
+                input: result.input.clone(),
+                content: result.content.clone(),
+                is_error: result.is_error,
+                aborted: result.aborted,
+                duration_ms: result.duration_ms,
+            })?;
             emit_tool_metrics_if_enabled(&result);
             results.push(result);
         }
-        ExecutedToolBatch {
+        Ok(ExecutedToolBatch {
             tools: results,
             cancelled: batch_cancelled,
-        }
+        })
     }
 
     async fn execute_tool(
@@ -2761,6 +3028,8 @@ impl AgentState {
         tools: &[tools::ToolDefinition],
         pending_messages: &[messages::Message],
         phase: &str,
+        cancel: Option<Arc<AtomicBool>>,
+        sink: &mut dyn AgentEventSink,
     ) -> Result<()> {
         let projected = projected_request_tokens(&self.messages, tools, pending_messages);
         if !should_auto_compact(projected, config.max_context_tokens) {
@@ -2768,27 +3037,30 @@ impl AgentState {
         }
 
         let percent = context_usage_percent(projected, config.max_context_tokens);
-        eprintln!(
-            "[session] projected {phase} context is {percent}% ({projected}/{} tokens); compacting before request",
-            config.max_context_tokens
-        );
-        let outcome = self.compact(config, None, true, None).await?;
+        sink.emit(AgentEvent::Notice {
+            kind: NoticeKind::Diagnostic,
+            message: format!(
+                "[session] projected {phase} context is {percent}% ({projected}/{} tokens); compacting before request",
+                config.max_context_tokens
+            ),
+        })?;
+        let outcome = self.compact(config, None, true, cancel).await?;
         self.last_context_warning_bucket = None;
-        match outcome {
+        let message = match outcome {
             CompactionOutcome::Compacted {
                 before_tokens,
                 after_tokens,
-            } => eprintln!(
+            } => format!(
                 "[session] compacted message estimate: {before_tokens} -> {after_tokens} tokens"
             ),
             CompactionOutcome::Skipped { reason, .. } => {
-                eprintln!(
-                    "[session] compaction skipped before {}: {}",
-                    terminal_text::sanitize(phase),
-                    terminal_text::sanitize(&reason)
-                )
+                format!("[session] compaction skipped before {phase}: {reason}")
             }
-        }
+        };
+        sink.emit(AgentEvent::Notice {
+            kind: NoticeKind::Diagnostic,
+            message,
+        })?;
 
         let projected = projected_request_tokens(&self.messages, tools, pending_messages);
         if should_auto_compact(projected, config.max_context_tokens) {
@@ -2805,27 +3077,27 @@ impl AgentState {
         &mut self,
         estimated_tokens: usize,
         max_context_tokens: usize,
-        interactive: bool,
-    ) {
+        sink: &mut dyn AgentEventSink,
+    ) -> Result<()> {
         let percent = context_usage_percent(estimated_tokens, max_context_tokens);
         let Some(bucket) = context_warning_bucket(percent) else {
             self.last_context_warning_bucket = None;
-            return;
+            return Ok(());
         };
         if self
             .last_context_warning_bucket
             .is_some_and(|last_bucket| bucket <= last_bucket)
         {
-            return;
+            return Ok(());
         }
 
         let message = context_pressure_message(percent, estimated_tokens, max_context_tokens);
-        if interactive {
-            render_status_notice(&message, self.color_mode, &self.colors);
-        } else {
-            eprintln!("{message}");
-        }
+        sink.emit(AgentEvent::Notice {
+            kind: NoticeKind::Status,
+            message,
+        })?;
         self.last_context_warning_bucket = Some(bucket);
+        Ok(())
     }
 
     fn checkpoint_session(&mut self) -> Result<()> {
@@ -3765,7 +4037,7 @@ fn set_terminal_title(title: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_current_session_header(state: &AgentState) -> Result<()> {
+fn print_current_session_header(state: &AgentSession) -> Result<()> {
     let info = session::jsonl::session_info(state.session.path())?
         .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
     set_terminal_title(&info.title)?;
@@ -4122,6 +4394,18 @@ fn context_pressure_message(
 #[cfg(test)]
 mod context_pressure_tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Vec<AgentEvent>,
+    }
+
+    impl AgentEventSink for RecordingSink {
+        fn emit(&mut self, event: AgentEvent) -> Result<()> {
+            self.events.push(event);
+            Ok(())
+        }
+    }
 
     #[test]
     fn detects_failed_bash_preview_status() {
@@ -4525,13 +4809,14 @@ mod context_pressure_tests {
         let mut config = test_config(temp.path().to_path_buf());
         config.max_context_tokens = 6_000;
         config.base_max_context_tokens = 6_000;
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         let user = messages::Message::text(messages::Role::User, "x".repeat(40_000));
         state.session.append_message(&user).unwrap();
         state.messages.push(user);
 
+        let mut sink = events::IgnoreAgentEvents;
         let error = state
-            .ensure_provider_request_budget(&config, &[], &[], "model request")
+            .ensure_provider_request_budget(&config, &[], &[], "model request", None, &mut sink)
             .await
             .unwrap_err();
 
@@ -4551,7 +4836,7 @@ mod context_pressure_tests {
         config.tools_allow = Some(vec!["read".to_string()]);
         std::fs::write(temp.path().join("loop.txt"), "x".repeat(20_000)).unwrap();
 
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         state.cwd = temp.path().to_path_buf();
         state
             .run_turn("__ferrum_test_repeat_read__".to_string(), &config, false)
@@ -4568,6 +4853,195 @@ mod context_pressure_tests {
                 && message.text_content() == "__ferrum_test_repeat_read__"
         }));
         assert!(!loaded.first().is_some_and(message_has_tool_result));
+    }
+
+    #[tokio::test]
+    async fn headless_turn_emits_ordered_events_without_terminal_renderer() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 50_000;
+        config.base_max_context_tokens = 50_000;
+        let mut state = AgentSession::new_at_cwd(&config, temp.path().to_path_buf()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let outcome = state
+            .run_turn_with_events(
+                "__ferrum_test_event_stream__".to_string(),
+                &config,
+                TurnOptions::headless(events::TurnCancellation::new()),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        assert!(matches!(
+            sink.events.as_slice(),
+            [
+                AgentEvent::TurnStarted { .. },
+                AgentEvent::ModelRequestStarted { request: 1, .. },
+                AgentEvent::ThinkingDelta(_),
+                AgentEvent::TextDelta(_),
+                AgentEvent::AssistantMessage { .. },
+                AgentEvent::UsageUpdated { .. },
+                AgentEvent::TurnCompleted,
+            ]
+        ));
+    }
+
+    #[tokio::test]
+    async fn concurrent_headless_sessions_keep_cwd_and_tool_events_isolated() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_a = temp.path().join("workspace-a");
+        let workspace_b = temp.path().join("workspace-b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+        std::fs::write(workspace_a.join("relative.txt"), "workspace-a-marker\n").unwrap();
+        std::fs::write(workspace_b.join("relative.txt"), "workspace-b-marker\n").unwrap();
+        let process_cwd = std::env::current_dir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 50_000;
+        config.base_max_context_tokens = 50_000;
+        config.tools_allow = Some(vec!["read".to_string()]);
+
+        let mut session_a = AgentSession::new_at_cwd(&config, workspace_a.clone()).unwrap();
+        let mut session_b = AgentSession::new_at_cwd(&config, workspace_b.clone()).unwrap();
+        let path_a = session_a.session.path().clone();
+        let path_b = session_b.session.path().clone();
+        let mut sink_a = RecordingSink::default();
+        let mut sink_b = RecordingSink::default();
+
+        let (result_a, result_b) = tokio::join!(
+            session_a.run_turn_with_events(
+                "__ferrum_test_single_read__".to_string(),
+                &config,
+                TurnOptions::headless(events::TurnCancellation::new()),
+                &mut sink_a,
+            ),
+            session_b.run_turn_with_events(
+                "__ferrum_test_single_read__".to_string(),
+                &config,
+                TurnOptions::headless(events::TurnCancellation::new()),
+                &mut sink_b,
+            ),
+        );
+        assert_eq!(result_a.unwrap(), TurnOutcome::Completed);
+        assert_eq!(result_b.unwrap(), TurnOutcome::Completed);
+
+        let completed_content_contains = |events: &[AgentEvent], marker: &str| {
+            events.iter().any(|event| match event {
+                AgentEvent::ToolCallCompleted { content, .. } => content.contains(marker),
+                _ => false,
+            })
+        };
+        assert!(completed_content_contains(
+            &sink_a.events,
+            "workspace-a-marker"
+        ));
+        assert!(completed_content_contains(
+            &sink_b.events,
+            "workspace-b-marker"
+        ));
+        assert_eq!(std::env::current_dir().unwrap(), process_cwd);
+
+        let info_a = session::jsonl::session_info(&path_a).unwrap().unwrap();
+        let info_b = session::jsonl::session_info(&path_b).unwrap().unwrap();
+        assert_eq!(info_a.cwd.as_deref(), workspace_a.to_str());
+        assert_eq!(info_b.cwd.as_deref(), workspace_b.to_str());
+    }
+
+    #[tokio::test]
+    async fn headless_tool_failures_are_typed_and_turn_still_completes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 50_000;
+        config.base_max_context_tokens = 50_000;
+        config.tools_allow = Some(vec!["read".to_string()]);
+        let mut state = AgentSession::new_at_cwd(&config, temp.path().to_path_buf()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let outcome = state
+            .run_turn_with_events(
+                "__ferrum_test_single_read__".to_string(),
+                &config,
+                TurnOptions::headless(events::TurnCancellation::new()),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        let started = sink
+            .events
+            .iter()
+            .position(|event| matches!(event, AgentEvent::ToolCallStarted { .. }))
+            .unwrap();
+        let failed = sink
+            .events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    AgentEvent::ToolCallCompleted {
+                        is_error: true,
+                        aborted: false,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        let final_assistant = sink
+            .events
+            .iter()
+            .rposition(|event| matches!(event, AgentEvent::AssistantMessage { .. }))
+            .unwrap();
+        assert!(started < failed);
+        assert!(failed < final_assistant);
+        assert!(matches!(
+            sink.events.last(),
+            Some(AgentEvent::TurnCompleted)
+        ));
+    }
+
+    #[tokio::test]
+    async fn external_cancellation_stops_a_headless_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 50_000;
+        config.base_max_context_tokens = 50_000;
+        let mut state = AgentSession::new_at_cwd(&config, temp.path().to_path_buf()).unwrap();
+        let cancellation = events::TurnCancellation::new();
+        let trigger = cancellation.clone();
+        let mut sink = RecordingSink::default();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            trigger.cancel();
+        });
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.run_turn_with_events(
+                "__ferrum_test_wait_cancel__".to_string(),
+                &config,
+                TurnOptions::headless(cancellation),
+                &mut sink,
+            ),
+        )
+        .await
+        .expect("turn did not observe cancellation")
+        .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Cancelled);
+        assert!(matches!(
+            sink.events.last(),
+            Some(AgentEvent::TurnCancelled)
+        ));
+        assert!(
+            !sink
+                .events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::TurnCompleted))
+        );
     }
 
     #[test]
@@ -4657,7 +5131,7 @@ mod context_pressure_tests {
     fn large_image_turn_triggers_context_pressure_before_provider_rejects() {
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().to_path_buf());
-        let state = AgentState::new(&config).unwrap();
+        let state = AgentSession::new(&config).unwrap();
         let image = messages::Message {
             role: messages::Role::User,
             content: vec![
@@ -4697,7 +5171,7 @@ mod context_pressure_tests {
     fn estimate_after_compaction_context_source_is_reported() {
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         state.messages = vec![
             assistant_with_usage(237_351),
             messages::Message::text(
@@ -4835,7 +5309,7 @@ mod context_pressure_tests {
         let mut config = test_config(temp.path().to_path_buf());
         config.max_context_tokens = 20_000;
         config.base_max_context_tokens = 20_000;
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         state.messages.push(messages::Message::text(
             messages::Role::User,
             format!(
@@ -4904,7 +5378,7 @@ mod context_pressure_tests {
         let mut config = test_config(temp.path().to_path_buf());
         config.max_context_tokens = 20_000;
         config.base_max_context_tokens = 20_000;
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         let conversation = vec![
             messages::Message::text(messages::Role::User, "x".repeat(80_000)),
             messages::Message::text(messages::Role::User, "current request"),
@@ -5160,7 +5634,7 @@ mod context_pressure_tests {
     fn refresh_runtime_context_updates_model_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         config.model = "new-model".to_string();
         config.provider_model = "new-provider-model".to_string();
 
@@ -5175,7 +5649,7 @@ mod context_pressure_tests {
     fn failed_session_switch_preserves_active_state_and_config() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         let active_path = state.session.path().clone();
         let target = session::JsonlSession::create(
             config.sessions_dir(),
@@ -5216,7 +5690,7 @@ mod context_pressure_tests {
     fn failed_target_open_preserves_active_session_and_config() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         let active_path = state.session.path().clone();
         let target = session::JsonlSession::create(
             config.sessions_dir(),
@@ -5261,7 +5735,7 @@ mod context_pressure_tests {
         let mut config = test_config(temp.path().to_path_buf());
 
         let state =
-            AgentState::resume_ref(&mut config, None, true, true, true, true, true).unwrap();
+            AgentSession::resume_ref(&mut config, None, true, true, true, true, true).unwrap();
 
         assert_eq!(state.cwd, cwd);
         assert!(state.session.path().exists());
@@ -5375,7 +5849,7 @@ mod context_pressure_tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.max_context_tokens = 2;
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         state
             .messages
             .push(messages::Message::text(messages::Role::User, "old message"));
@@ -5455,13 +5929,13 @@ mod context_pressure_tests {
     async fn sequential_batch_marks_every_precancelled_call_aborted() {
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         state.cwd = temp.path().to_path_buf();
         state.active_tool_names = ["write".to_string()].into_iter().collect();
         let cancel = Arc::new(AtomicBool::new(true));
-        let colors = state.colors.clone();
+        let mut sink = RecordingSink::default();
         let results = state
-            .execute_sequential_tools_with_cancel(
+            .execute_sequential_tools_with_cancel_and_events(
                 vec![
                     (
                         "call_1".to_string(),
@@ -5474,15 +5948,29 @@ mod context_pressure_tests {
                         serde_json::json!({"path":"two", "content":"unexpected"}),
                     ),
                 ],
-                ColorMode::Off,
-                colors,
                 false,
                 cancel,
+                &mut sink,
             )
-            .await;
+            .await
+            .unwrap();
 
         assert!(results.cancelled);
         assert!(results.tools.iter().all(|result| result.aborted));
+        assert_eq!(
+            sink.events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    AgentEvent::ToolCallCompleted {
+                        is_error: true,
+                        aborted: true,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
         assert!(!temp.path().join("one").exists());
         assert!(!temp.path().join("two").exists());
     }
@@ -5493,7 +5981,7 @@ mod context_pressure_tests {
 
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         state.cwd = temp.path().to_path_buf();
         state.active_tool_names = ["read".to_string(), "write".to_string()]
             .into_iter()
@@ -5545,7 +6033,7 @@ mod context_pressure_tests {
     async fn sequential_batch_aborts_remaining_calls_after_cancellation() {
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         state.cwd = temp.path().to_path_buf();
         state.active_tool_names = ["bash".to_string(), "write".to_string()]
             .into_iter()
@@ -5609,7 +6097,7 @@ mod context_pressure_tests {
     async fn parallel_builtin_batch_marks_precancelled_tools_aborted() {
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().to_path_buf());
-        let state = AgentState::new(&config).unwrap();
+        let state = AgentSession::new(&config).unwrap();
         let cancel = Arc::new(AtomicBool::new(true));
         let tool_uses = vec![
             (
@@ -5726,7 +6214,7 @@ mod context_pressure_tests {
             .unwrap();
         std::fs::write(&valid, bytes.into_inner()).unwrap();
         std::fs::write(&invalid, b"not an image").unwrap();
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
 
         let error = state
             .attach_images(vec![
@@ -6902,7 +7390,7 @@ enum CommandAction {
 async fn handle_bang_command(
     input: &str,
     config: &Config,
-    state: &mut AgentState,
+    state: &mut AgentSession,
 ) -> Result<CommandAction> {
     let (send_to_model, command) = if let Some(command) = input.strip_prefix("!!") {
         (false, command.trim())
@@ -6999,7 +7487,7 @@ fn render_bash_output(command: &str, output: &builtin_tools::bash::BashOutput) -
 fn handle_command(
     input: &str,
     config: &mut Config,
-    state: &mut AgentState,
+    state: &mut AgentSession,
 ) -> Result<CommandAction> {
     let mut parts = input.split_whitespace();
     let command = parts.next().unwrap_or("");

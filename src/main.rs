@@ -1,4 +1,4 @@
-mod agent;
+pub mod agent;
 mod atomic_file;
 mod auth;
 mod cancel;

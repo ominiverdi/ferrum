@@ -50,8 +50,28 @@ impl Provider for FakeProvider {
                 .map(Message::text_content)
                 .unwrap_or_default();
             #[cfg(test)]
+            if last_user == "__ferrum_test_event_stream__" {
+                return Ok(ProviderResponse::message(Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Thinking {
+                            text: "event thought".to_string(),
+                            signature: None,
+                        },
+                        ContentBlock::Text {
+                            text: "event text\n".to_string(),
+                        },
+                    ],
+                    usage: None,
+                }));
+            }
+            #[cfg(test)]
             if last_user == "__ferrum_test_repeat_read__" {
                 return Ok(ProviderResponse::message(repeat_read_response(messages)));
+            }
+            #[cfg(test)]
+            if last_user == "__ferrum_test_single_read__" {
+                return Ok(ProviderResponse::message(single_read_response(messages)));
             }
             Ok(ProviderResponse::message(Message::text(
                 Role::Assistant,
@@ -75,6 +95,21 @@ impl Provider for FakeProvider {
             {
                 anyhow::bail!("aborted");
             }
+            #[cfg(test)]
+            if messages.iter().any(|message| {
+                matches!(message.role, Role::User)
+                    && message.text_content() == "__ferrum_test_wait_cancel__"
+            }) {
+                loop {
+                    if cancelled
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                    {
+                        anyhow::bail!("aborted");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
             let response = self.complete(model, messages, tools, thinking).await?;
             if cancelled
                 .as_ref()
@@ -83,10 +118,14 @@ impl Provider for FakeProvider {
                 anyhow::bail!("aborted");
             }
             for block in &response.message.content {
-                if let ContentBlock::Text { text } = block
-                    && !text.is_empty()
-                {
-                    on_event(StreamEvent::TextDelta(text.clone()));
+                match block {
+                    ContentBlock::Thinking { text, .. } if !text.is_empty() => {
+                        on_event(StreamEvent::ThinkingDelta(text.clone()));
+                    }
+                    ContentBlock::Text { text } if !text.is_empty() => {
+                        on_event(StreamEvent::TextDelta(text.clone()));
+                    }
+                    _ => {}
                 }
             }
             Ok(response)
@@ -248,6 +287,32 @@ fn missing_read_response(messages: &[Message]) -> Message {
             id: format!("fake-missing-read-{tool_results}"),
             name: "read".to_string(),
             input: serde_json::json!({"path": format!("missing-{tool_results}.txt")}),
+        }],
+        usage: None,
+    }
+}
+
+#[cfg(test)]
+fn single_read_response(messages: &[Message]) -> Message {
+    let tool_result = messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { content, .. } => Some(content),
+            _ => None,
+        });
+    if let Some(content) = tool_result {
+        return Message::text(
+            Role::Assistant,
+            format!("single read complete: {content}\n"),
+        );
+    }
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "fake-single-read".to_string(),
+            name: "read".to_string(),
+            input: serde_json::json!({"path": "relative.txt"}),
         }],
         usage: None,
     }

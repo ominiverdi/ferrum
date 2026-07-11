@@ -14,6 +14,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     env, io,
     os::unix::process::CommandExt,
+    path::Path,
     process::Stdio,
     sync::{
         Arc,
@@ -103,7 +104,7 @@ pub struct McpManager {
 }
 
 impl McpManager {
-    pub async fn start(configs: &[McpServerConfig]) -> Result<Self> {
+    pub async fn start_at_cwd(configs: &[McpServerConfig], cwd: &Path) -> Result<Self> {
         let mut servers = Vec::new();
         let mut tools = Vec::new();
         let mut tool_routes = HashMap::new();
@@ -111,7 +112,7 @@ impl McpManager {
         let started_servers = join_all(configs.iter().filter(|server| server.enabled).map(
             |server_config| async move {
                 let mut server =
-                    match timeout(MCP_START_TIMEOUT, McpServer::start(server_config)).await {
+                    match timeout(MCP_START_TIMEOUT, McpServer::start(server_config, cwd)).await {
                         Ok(Ok(server)) => server,
                         Ok(Err(error)) => {
                             eprintln!("[mcp] failed to start `{}`: {error}", server_config.name);
@@ -212,10 +213,11 @@ struct McpServer {
 }
 
 impl McpServer {
-    async fn start(config: &McpServerConfig) -> Result<Self> {
+    async fn start(config: &McpServerConfig, cwd: &Path) -> Result<Self> {
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
+            .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -852,6 +854,36 @@ mod tests {
         assert!(mcp_environment_names(&["BAD=NAME".to_string()]).is_err());
     }
 
+    #[tokio::test]
+    async fn mcp_server_uses_explicit_session_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let marker = temp.path().join("cwd.txt");
+        let config = McpServerConfig {
+            name: "cwd-test".to_string(),
+            command: "/bin/sh".to_string(),
+            args: vec![
+                "-c".to_string(),
+                "pwd > \"$1\"; exit 1".to_string(),
+                "sh".to_string(),
+                marker.display().to_string(),
+            ],
+            env: Vec::new(),
+            enabled: true,
+        };
+
+        let manager = McpManager::start_at_cwd(&[config], &workspace)
+            .await
+            .unwrap();
+
+        assert!(manager.definitions().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap().trim(),
+            workspace.to_str().unwrap()
+        );
+    }
+
     #[test]
     fn mcp_tool_error_result_becomes_error() {
         let value = json!({
@@ -935,7 +967,9 @@ for line in sys.stdin:
             env: Vec::new(),
             enabled: true,
         };
-        let mut manager = McpManager::start(&[config]).await.unwrap();
+        let mut manager = McpManager::start_at_cwd(&[config], std::path::Path::new("."))
+            .await
+            .unwrap();
         let exposed_name = manager.definitions()[0].name.clone();
         let pre_cancelled = Arc::new(AtomicBool::new(true));
         let error = manager
@@ -1032,7 +1066,9 @@ for line in sys.stdin:
             env: Vec::new(),
             enabled: true,
         };
-        let mut manager = McpManager::start(&[config]).await.unwrap();
+        let mut manager = McpManager::start_at_cwd(&[config], std::path::Path::new("."))
+            .await
+            .unwrap();
         let exposed_name = manager.definitions()[0].name.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let trigger = Arc::clone(&cancel);
@@ -1089,7 +1125,9 @@ for line in sys.stdin:
             enabled: true,
         };
 
-        let manager = McpManager::start(&[config]).await.unwrap();
+        let manager = McpManager::start_at_cwd(&[config], std::path::Path::new("."))
+            .await
+            .unwrap();
         let names = manager
             .definitions()
             .iter()
@@ -1146,7 +1184,9 @@ while True:
             enabled: true,
         };
 
-        let manager = McpManager::start(&[config]).await.unwrap();
+        let manager = McpManager::start_at_cwd(&[config], std::path::Path::new("."))
+            .await
+            .unwrap();
         let diagnostics = manager.servers[0].diagnostics.snapshot().await;
 
         assert!(
@@ -1201,7 +1241,7 @@ for line in sys.stdin:
             env: Vec::new(),
             enabled: true,
         };
-        let mut server = McpServer::start(&config).await.unwrap();
+        let mut server = McpServer::start(&config, temp.path()).await.unwrap();
         server.list_tools().await.unwrap();
         if server.cgroup.is_none() {
             eprintln!("skipping cgroup assertion because delegated cgroup-v2 is unavailable");
@@ -1239,7 +1279,7 @@ for line in sys.stdin:
             env: Vec::new(),
             enabled: true,
         };
-        let error = match McpServer::start(&config).await {
+        let error = match McpServer::start(&config, temp.path()).await {
             Ok(_) => panic!("expected unsupported protocol version to fail"),
             Err(error) => error,
         };
@@ -1278,7 +1318,7 @@ for line in sys.stdin:
             env: Vec::new(),
             enabled: true,
         };
-        let mut server = McpServer::start(&config).await.unwrap();
+        let mut server = McpServer::start(&config, temp.path()).await.unwrap();
         let error = server.list_tools().await.unwrap_err();
         assert!(error.to_string().contains("repeated a pagination cursor"));
     }
@@ -1321,7 +1361,7 @@ sys.stderr.flush()
             enabled: true,
         };
 
-        let error = match McpServer::start(&config).await {
+        let error = match McpServer::start(&config, script.parent().unwrap()).await {
             Ok(_) => panic!("expected MCP startup to fail"),
             Err(error) => error,
         };
@@ -1387,7 +1427,7 @@ while True:
             env: Vec::new(),
             enabled: true,
         };
-        let error = match McpManager::start(&[config]).await {
+        let error = match McpManager::start_at_cwd(&[config], std::path::Path::new(".")).await {
             Ok(_) => panic!("expected MCP collision to fail"),
             Err(error) => error,
         };

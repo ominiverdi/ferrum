@@ -95,6 +95,57 @@ impl JsonlSession {
         safety: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
+        let cwd = std::env::current_dir().ok();
+        Self::create_with_color_mode_for_cwd(
+            dir,
+            provider,
+            model,
+            thinking,
+            color_mode,
+            diff_mode,
+            safety,
+            tools,
+            cwd.as_deref(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_color_mode_at_cwd(
+        dir: PathBuf,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+        color_mode: Option<String>,
+        diff_mode: Option<String>,
+        safety: Option<String>,
+        tools: Option<Vec<String>>,
+        cwd: &Path,
+    ) -> Result<Self> {
+        Self::create_with_color_mode_for_cwd(
+            dir,
+            provider,
+            model,
+            thinking,
+            color_mode,
+            diff_mode,
+            safety,
+            tools,
+            Some(cwd),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_with_color_mode_for_cwd(
+        dir: PathBuf,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+        color_mode: Option<String>,
+        diff_mode: Option<String>,
+        safety: Option<String>,
+        tools: Option<Vec<String>>,
+        cwd: Option<&Path>,
+    ) -> Result<Self> {
         for _ in 0..16 {
             let filename = format!("{}-{}.jsonl", now_ms(), Uuid::new_v4());
             match Self::create_with_header_id(
@@ -108,6 +159,7 @@ impl JsonlSession {
                 diff_mode.clone(),
                 safety.clone(),
                 tools.clone(),
+                cwd,
             ) {
                 Ok(session) => return Ok(session),
                 Err(error)
@@ -152,6 +204,7 @@ impl JsonlSession {
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
         validate_user_session_id(id)?;
+        let cwd = std::env::current_dir().ok();
         Self::create_with_header_id(
             dir,
             format!("{id}.jsonl"),
@@ -163,6 +216,7 @@ impl JsonlSession {
             diff_mode,
             safety,
             tools,
+            cwd.as_deref(),
         )
     }
 
@@ -178,6 +232,7 @@ impl JsonlSession {
         diff_mode: Option<String>,
         safety: Option<String>,
         tools: Option<Vec<String>>,
+        cwd: Option<&Path>,
     ) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         tighten_dir_permissions(&dir);
@@ -202,9 +257,7 @@ impl JsonlSession {
             diff_mode,
             safety,
             tools,
-            cwd: std::env::current_dir()
-                .ok()
-                .map(|path| canonical_display_path(&path)),
+            cwd: cwd.map(canonical_display_path),
         };
         if let Err(error) = session.append(&header) {
             drop(session.file);
