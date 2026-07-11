@@ -229,6 +229,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /version
 /session
 /title [text]
+/new
 /sessions
 /sessions pick
 /sessions del
@@ -254,6 +255,8 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /quit
 /exit
 ```
+
+`/new` and `/sessions new` both start a fresh session.
 
 Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths.
 

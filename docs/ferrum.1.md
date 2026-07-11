@@ -157,6 +157,9 @@ Common slash commands:
 **/session**
 : Show current session information.
 
+**/new**
+: Start a new session. This is the short alias for **/sessions new**.
+
 **/sessions**
 : List recent sessions.
 

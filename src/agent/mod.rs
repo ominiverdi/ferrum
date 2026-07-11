@@ -243,6 +243,7 @@ fn slash_command_words() -> &'static [&'static str] {
         "/exit",
         "/version",
         "/session",
+        "/new",
         "/sessions",
         "/title",
         "/skills",
@@ -5266,6 +5267,21 @@ mod context_pressure_tests {
         assert!(state.session.path().starts_with(config.sessions_dir()));
     }
 
+    #[test]
+    fn new_command_starts_a_fresh_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        let previous = state.session.path().clone();
+
+        let action = handle_command("/new", &mut config, &mut state).unwrap();
+
+        assert!(matches!(action, CommandAction::Continue));
+        assert_ne!(state.session.path(), &previous);
+        assert!(state.session.path().exists());
+        assert!(previous.exists());
+    }
+
     fn assert_completion(
         helper: &FerrumLineHelper,
         ctx: &rustyline::Context<'_>,
@@ -6328,6 +6344,7 @@ fn is_known_slash_command(command: &str) -> bool {
             "/help"
                 | "/version"
                 | "/session"
+                | "/new"
                 | "/title"
                 | "/sessions"
                 | "/skills"
@@ -6993,6 +7010,7 @@ fn handle_command(
             println!("  /version              show Ferrum version");
             println!("  /session              show session path/status/size");
             println!("  /title [text]         show or set session title");
+            println!("  /new                  start a new session");
             println!("  /sessions             list recent sessions for current directory");
             println!("  /sessions pick        open session picker");
             println!("  /sessions del         delete session via picker");
@@ -7091,6 +7109,13 @@ fn handle_command(
                 state.set_title(&title)?;
                 println!("title: {}", terminal_text::sanitize(title.trim()));
             }
+            Ok(CommandAction::Continue)
+        }
+        "/new" => {
+            if let Some(extra) = parts.next() {
+                anyhow::bail!("usage: /new, got extra argument: {extra}");
+            }
+            state.new_session(config)?;
             Ok(CommandAction::Continue)
         }
         "/sessions" => {

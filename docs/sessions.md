@@ -81,6 +81,7 @@ ferrum --title "Quick check" -p "summarize this repo"
 ```text
 /session
 /title [text]
+/new
 /sessions
 /sessions pick
 /sessions del
@@ -92,7 +93,7 @@ ferrum --title "Quick check" -p "summarize this repo"
 
 When an interactive session is resumed with `--resume`, `--continue`, or `--session REF`, Ferrum prints the last 40 visible conversation lines before prompting. This is UI-only: it does not add anything to model context and does not create a new model turn.
 
-`/sessions` lists recent sessions for the current directory. `/sessions pick` opens a lightweight numbered picker where entering a number opens that session and entering text filters the list. `/sessions del` opens a deletion picker. `/sessions new` starts a fresh session.
+`/sessions` lists recent sessions for the current directory. `/sessions pick` opens a lightweight numbered picker where entering a number opens that session and entering text filters the list. `/sessions del` opens a deletion picker. `/new` and `/sessions new` both start a fresh session.
 
 Header-only and metadata-only sessions are retained so a failed start or state transition never unlinks an active file handle. `/sessions` hides old empty sessions by default, while still showing the current empty session so you can see where you are. Automatic latest-session selection skips abandoned anonymous header-only sessions.
 

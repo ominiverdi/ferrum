@@ -66,6 +66,7 @@ Slash commands:
 - `/help`
 - `/version`
 - `/session`
+- `/new`
 - `/title [text]``
 - `/sessions`
 - `/sessions pick`
@@ -107,6 +108,7 @@ Session resume:
 - `/sessions pick` provides a lightweight numbered picker with text filtering.
 - `/sessions del` provides a deletion picker.
 - `/sessions new` starts a fresh session.
+- `/new` is the short alias for `/sessions new`.
 
 ## Configuration
 
