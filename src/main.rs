@@ -7,6 +7,7 @@ mod config;
 mod context;
 mod mcp;
 mod persistence;
+mod process_containment;
 mod providers;
 mod session;
 mod skills;

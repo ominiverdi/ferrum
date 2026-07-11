@@ -4,6 +4,7 @@ use crate::{
     agent::tools::ToolDefinition,
     cancel::{self, WaitError},
     config::McpServerConfig,
+    process_containment::CgroupV2,
 };
 use anyhow::{Context, Result};
 use futures_util::future::join_all;
@@ -205,6 +206,7 @@ struct McpServer {
     transport: McpTransport,
     child: Child,
     process_group: i32,
+    cgroup: Option<CgroupV2>,
     next_id: u64,
     diagnostics: DiagnosticRing,
 }
@@ -225,6 +227,19 @@ impl McpServer {
             }
         }
         command.as_std_mut().process_group(0);
+        let cgroup = match CgroupV2::create("mcp") {
+            Ok(cgroup) => {
+                cgroup.attach_command(command.as_std_mut())?;
+                Some(cgroup)
+            }
+            Err(error) => {
+                eprintln!(
+                    "[mcp] cgroup-v2 containment unavailable for `{}`; using process-group fallback: {error:#}",
+                    config.name
+                );
+                None
+            }
+        };
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to start MCP server `{}`", config.name))?;
@@ -248,6 +263,7 @@ impl McpServer {
             transport: McpTransport::start(stdin, stdout, diagnostics.clone()),
             child,
             process_group,
+            cgroup,
             next_id: 1,
             diagnostics,
         };
@@ -439,10 +455,34 @@ impl McpServer {
 
 impl Drop for McpServer {
     fn drop(&mut self) {
-        unsafe {
-            libc::kill(-self.process_group, libc::SIGKILL);
+        if let Some(cgroup) = &self.cgroup {
+            if let Err(error) = cgroup.kill() {
+                eprintln!("[mcp] failed to kill contained MCP process tree: {error:#}");
+            } else {
+                match cgroup.wait_empty(Duration::from_millis(200)) {
+                    Ok(true) => {}
+                    Ok(false) => eprintln!(
+                        "[mcp] contained MCP process tree remained populated after SIGKILL"
+                    ),
+                    Err(error) => {
+                        eprintln!("[mcp] failed to inspect contained MCP process tree: {error:#}")
+                    }
+                }
+            }
+            if let Err(error) = cgroup.remove_if_empty() {
+                eprintln!("[mcp] failed to clean up MCP cgroup: {error:#}");
+            }
         }
-        let _ = self.child.start_kill();
+        let signal_result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
+        if signal_result != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                eprintln!("[mcp] failed to kill MCP process group: {error}");
+            }
+        }
+        if let Err(error) = self.child.start_kill() {
+            eprintln!("[mcp] failed to kill direct MCP child: {error}");
+        }
     }
 }
 
@@ -1114,6 +1154,63 @@ while True:
                 .iter()
                 .any(|message| message == "received MCP notification")
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_cgroup_contains_detached_descendants_on_drop() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("detached-finished");
+        let script = temp.path().join("detached_server.py");
+        std::fs::write(
+            &script,
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+marker = sys.argv[1]
+pid = os.fork()
+if pid == 0:
+    os.setsid()
+    time.sleep(1)
+    with open(marker, "w") as output:
+        output.write("escaped")
+    os._exit(0)
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":msg["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"detached","version":"1"}}})
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":msg["id"],"result":{"tools":[]}})
+"#,
+        )
+        .unwrap();
+        let config = McpServerConfig {
+            name: "detached".to_string(),
+            command: "python3".to_string(),
+            args: vec![script.display().to_string(), marker.display().to_string()],
+            env: Vec::new(),
+            enabled: true,
+        };
+        let mut server = McpServer::start(&config).await.unwrap();
+        server.list_tools().await.unwrap();
+        if server.cgroup.is_none() {
+            eprintln!("skipping cgroup assertion because delegated cgroup-v2 is unavailable");
+            return;
+        }
+        drop(server);
+
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert!(!marker.exists());
     }
 
     #[tokio::test]

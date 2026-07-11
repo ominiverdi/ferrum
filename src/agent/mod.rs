@@ -13,6 +13,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     terminal,
 };
+use futures_util::{StreamExt, stream};
 use rustyline::{
     Editor, Helper,
     completion::{Completer, Pair},
@@ -27,6 +28,7 @@ use std::{
     collections::{HashMap, HashSet},
     fmt::{Display, Write as FmtWrite},
     fs::{self, OpenOptions},
+    future::Future,
     io::{self, IsTerminal, Read, Write},
     os::unix::{
         fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -35,7 +37,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime},
@@ -56,6 +58,8 @@ const REPEATED_TOOL_NUDGE_LIMIT: usize = 4;
 const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
 const CONSECUTIVE_ERROR_NUDGE_LIMIT: usize = 5;
 const CONSECUTIVE_ERROR_FORCE_LIMIT: usize = 8;
+const MAX_PARALLEL_BUILTIN_TOOLS: usize = 8;
+const PROVIDER_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 const MAX_IMAGES_PER_TURN: usize = 8;
 const MAX_IMAGE_BYTES_PER_TURN: usize = 20 * 1024 * 1024;
 const MAX_IMAGE_BASE64_BYTES_PER_TURN: usize = MAX_IMAGE_BYTES_PER_TURN.div_ceil(3) * 4;
@@ -584,7 +588,13 @@ pub async fn run_interactive(
         let prompt = state
             .colors
             .paint_stdout(ColorToken::Prompt, state.color_mode, "ferrum> ");
-        match rl.readline(&prompt) {
+        let pending_input = take_pending_terminal_input();
+        let readline = if pending_input.is_empty() {
+            rl.readline(&prompt)
+        } else {
+            rl.readline_with_initial(&prompt, (&pending_input, ""))
+        };
+        match readline {
             Ok(line) => {
                 let input = line.trim();
                 if input.is_empty() {
@@ -814,6 +824,24 @@ fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) ->
     rendered
 }
 
+async fn collect_bounded_ordered<I, F, T>(futures: I, concurrency: usize) -> Vec<T>
+where
+    I: IntoIterator<Item = F>,
+    F: Future<Output = (usize, T)>,
+{
+    let mut results = stream::iter(futures)
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
+struct ExecutedToolBatch {
+    tools: Vec<ExecutedToolUse>,
+    cancelled: bool,
+}
+
 #[derive(Debug)]
 struct ExecutedToolUse {
     id: String,
@@ -823,6 +851,24 @@ struct ExecutedToolUse {
     is_error: bool,
     aborted: bool,
     duration_ms: u128,
+}
+
+fn aborted_tool_uses(
+    tool_uses: Vec<(String, String, serde_json::Value)>,
+    content: &str,
+) -> Vec<ExecutedToolUse> {
+    tool_uses
+        .into_iter()
+        .map(|(id, name, input)| ExecutedToolUse {
+            id,
+            name,
+            input,
+            content: content.to_string(),
+            is_error: true,
+            aborted: true,
+            duration_ms: 0,
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -954,6 +1000,38 @@ fn projected_request_tokens(
     usage_projection.map_or(local_estimate, |tokens| tokens.max(local_estimate))
 }
 
+static PENDING_TERMINAL_INPUT: Mutex<String> = Mutex::new(String::new());
+
+fn take_pending_terminal_input() -> String {
+    std::mem::take(
+        &mut *PENDING_TERMINAL_INPUT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
+fn preserve_terminal_event(event: Event) {
+    let mut pending = PENDING_TERMINAL_INPUT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match event {
+        Event::Key(key)
+            if key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {}
+        Event::Key(key) => match key.code {
+            KeyCode::Char(character) => pending.push(character),
+            KeyCode::Tab => pending.push('\t'),
+            KeyCode::Backspace => {
+                pending.pop();
+            }
+            _ => {}
+        },
+        Event::Paste(text) => pending.push_str(&text),
+        _ => {}
+    }
+}
+
 struct ActiveTurnAbort {
     aborted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -975,9 +1053,6 @@ impl ActiveTurnAbort {
         let watcher_stop = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
             let _ = terminal::enable_raw_mode();
-            while event::poll(Duration::from_millis(0)).unwrap_or(false) {
-                let _ = event::read();
-            }
             while !watcher_stop.load(Ordering::Relaxed) {
                 if event::poll(Duration::from_millis(50)).unwrap_or(false) {
                     match event::read() {
@@ -989,7 +1064,7 @@ impl ActiveTurnAbort {
                             watcher_aborted.store(true, Ordering::Relaxed);
                             break;
                         }
-                        Ok(_) => {}
+                        Ok(event) => preserve_terminal_event(event),
                         Err(_) => break,
                     }
                 }
@@ -1348,7 +1423,8 @@ struct LoopGuard {
     explicit_limit: usize,
     rounds: usize,
     consecutive_errors: usize,
-    repeated_tool_calls: HashMap<String, usize>,
+    last_tool_fingerprint: Option<String>,
+    consecutive_tool_repeats: usize,
     repeated_nudged: bool,
     errors_nudged: bool,
 }
@@ -1359,7 +1435,8 @@ impl LoopGuard {
             explicit_limit,
             rounds: 0,
             consecutive_errors: 0,
-            repeated_tool_calls: HashMap::new(),
+            last_tool_fingerprint: None,
+            consecutive_tool_repeats: 0,
             repeated_nudged: false,
             errors_nudged: false,
         }
@@ -1382,13 +1459,15 @@ impl LoopGuard {
         let mut max_repeats = 0;
         let mut repeated_fingerprint = None;
         for observation in observations {
-            let count = self
-                .repeated_tool_calls
-                .entry(observation.fingerprint.clone())
-                .and_modify(|count| *count += 1)
-                .or_insert(1);
-            if *count > max_repeats {
-                max_repeats = *count;
+            if self.last_tool_fingerprint.as_deref() == Some(&observation.fingerprint) {
+                self.consecutive_tool_repeats += 1;
+            } else {
+                self.last_tool_fingerprint = Some(observation.fingerprint.clone());
+                self.consecutive_tool_repeats = 1;
+                self.repeated_nudged = false;
+            }
+            if self.consecutive_tool_repeats > max_repeats {
+                max_repeats = self.consecutive_tool_repeats;
                 repeated_fingerprint = Some(observation.fingerprint.as_str());
             }
 
@@ -1470,6 +1549,34 @@ mod loop_guard_tests {
         assert!(matches!(
             guard.observe_round(std::slice::from_ref(&read)),
             LoopGuardAction::ForceFinal(reason) if reason.contains("same tool call repeated")
+        ));
+    }
+
+    #[test]
+    fn separated_identical_calls_do_not_accumulate_repetition_count() {
+        let mut guard = LoopGuard::new(0);
+        let read_a = observation("read", serde_json::json!({"path": "a.txt"}), false);
+        let read_b = observation("read", serde_json::json!({"path": "b.txt"}), false);
+
+        for _ in 0..3 {
+            assert_eq!(
+                guard.observe_round(std::slice::from_ref(&read_a)),
+                LoopGuardAction::Continue
+            );
+        }
+        assert_eq!(
+            guard.observe_round(std::slice::from_ref(&read_b)),
+            LoopGuardAction::Continue
+        );
+        for _ in 0..3 {
+            assert_eq!(
+                guard.observe_round(std::slice::from_ref(&read_a)),
+                LoopGuardAction::Continue
+            );
+        }
+        assert!(matches!(
+            guard.observe_round(std::slice::from_ref(&read_a)),
+            LoopGuardAction::Nudge(reason) if reason.contains("same tool call repeated")
         ));
     }
 
@@ -1774,7 +1881,7 @@ impl AgentState {
             };
             let response_result = if interactive {
                 let token = abort.token();
-                match cancel::race(
+                match cancel::race_with_cancel_grace(
                     provider.complete_streaming(
                         &config.provider_model,
                         &self.messages,
@@ -1784,6 +1891,7 @@ impl AgentState {
                         Some(Arc::clone(&token)),
                     ),
                     Some(&token),
+                    PROVIDER_CANCELLATION_GRACE,
                 )
                 .await
                 {
@@ -1804,6 +1912,9 @@ impl AgentState {
             let response = match response_result {
                 Ok(response) => response,
                 Err(error) if error.to_string() == "aborted" => {
+                    if interactive {
+                        live_render.finish()?;
+                    }
                     println!("aborted");
                     return Ok(());
                 }
@@ -1891,15 +2002,17 @@ impl AgentState {
                 );
                 return Ok(());
             }
-            if abort.is_cancelled() {
-                println!("aborted");
-                return Ok(());
-            }
-
-            let executed_tools = self.execute_tool_batch(tool_uses, interactive).await;
-            let aborted = executed_tools.iter().any(|tool| tool.aborted);
+            let cancelled_before_tools = abort.is_cancelled();
+            let executed_batch = if cancelled_before_tools {
+                ExecutedToolBatch {
+                    tools: aborted_tool_uses(tool_uses, "aborted before execution"),
+                    cancelled: true,
+                }
+            } else {
+                self.execute_tool_batch(tool_uses, interactive).await
+            };
             let mut observations = Vec::new();
-            for executed in executed_tools {
+            for executed in executed_batch.tools {
                 observations.push(ToolObservation::new(
                     &executed.name,
                     &executed.input,
@@ -1917,7 +2030,7 @@ impl AgentState {
                 self.session.append_message(&result)?;
                 self.messages.push(result);
             }
-            if aborted {
+            if executed_batch.cancelled {
                 println!("aborted");
                 return Ok(());
             }
@@ -1972,7 +2085,7 @@ impl AgentState {
             };
             let response_result = if interactive {
                 let token = abort.token();
-                match cancel::race(
+                match cancel::race_with_cancel_grace(
                     provider.complete_streaming(
                         &config.provider_model,
                         &final_messages,
@@ -1982,6 +2095,7 @@ impl AgentState {
                         Some(Arc::clone(&token)),
                     ),
                     Some(&token),
+                    PROVIDER_CANCELLATION_GRACE,
                 )
                 .await
                 {
@@ -2014,6 +2128,9 @@ impl AgentState {
                     break (response, live_render.text_started);
                 }
                 Err(error) if error.to_string() == "aborted" => {
+                    if interactive {
+                        live_render.finish()?;
+                    }
                     println!("aborted");
                     return Ok(());
                 }
@@ -2219,7 +2336,7 @@ impl AgentState {
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
         interactive: bool,
-    ) -> Vec<ExecutedToolUse> {
+    ) -> ExecutedToolBatch {
         let can_parallelize = tool_uses
             .iter()
             .all(|(_, name, _)| self.is_parallel_safe_builtin_tool(name));
@@ -2232,6 +2349,7 @@ impl AgentState {
             let mut abort = ActiveTurnAbort::start(interactive);
             let cancel = Some(abort.token());
             let results = self.run_parallel_builtin_tools(tool_uses, cancel).await;
+            let cancelled = abort.is_cancelled() || results.iter().any(|result| result.aborted);
             abort.stop();
             let mut executed = Vec::new();
             for result in results {
@@ -2245,7 +2363,10 @@ impl AgentState {
                 emit_tool_metrics_if_enabled(&result);
                 executed.push(result);
             }
-            return executed;
+            return ExecutedToolBatch {
+                tools: executed,
+                cancelled,
+            };
         }
         self.execute_sequential_tools(tool_uses, color_mode, self.colors.clone(), interactive)
             .await
@@ -2267,82 +2388,63 @@ impl AgentState {
         let active_tool_names = self.active_tool_names.clone();
         let safety = self.safety;
         let writable_roots = self.writable_roots.clone();
-        let mut handles = Vec::new();
-        for (index, (id, name, input)) in tool_uses.into_iter().enumerate() {
-            let cwd = cwd.clone();
-            let active_tool_names = active_tool_names.clone();
-            let cancel = cancel.clone();
-            let writable_roots = writable_roots.clone();
-            handles.push(tokio::spawn(async move {
-                let started = Instant::now();
-                let (content, is_error, aborted) = if cancel
-                    .as_ref()
-                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
-                {
-                    ("aborted".to_string(), true, true)
-                } else if !active_tool_names.contains(&name) {
-                    let content = if active_tool_names.is_empty() {
-                        format!(
-                            "Tool '{name}' is not available because tools are disabled (--no-tools)"
-                        )
-                    } else {
-                        format!("Tool '{name}' is not in the active tool set")
-                    };
-                    (content, true, false)
-                } else {
-                    match builtin_tools::execute_with_cancel_and_safety(
-                        &name,
-                        &input,
-                        &cwd,
-                        cancel,
-                        false,
-                        safety,
-                        &writable_roots,
-                    )
-                    .await
+        let futures = tool_uses.into_iter().enumerate().map(
+            |(index, (id, name, input))| {
+                let cwd = cwd.clone();
+                let active_tool_names = active_tool_names.clone();
+                let cancel = cancel.clone();
+                let writable_roots = writable_roots.clone();
+                async move {
+                    let started = Instant::now();
+                    let (content, is_error, aborted) = if cancel
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed))
                     {
-                        Ok(output) => (output, false, false),
-                        Err(error) if error.to_string() == "aborted" => {
-                            ("aborted".to_string(), true, true)
+                        ("aborted".to_string(), true, true)
+                    } else if !active_tool_names.contains(&name) {
+                        let content = if active_tool_names.is_empty() {
+                            format!(
+                                "Tool '{name}' is not available because tools are disabled (--no-tools)"
+                            )
+                        } else {
+                            format!("Tool '{name}' is not in the active tool set")
+                        };
+                        (content, true, false)
+                    } else {
+                        match builtin_tools::execute_with_cancel_and_safety(
+                            &name,
+                            &input,
+                            &cwd,
+                            cancel,
+                            false,
+                            safety,
+                            &writable_roots,
+                        )
+                        .await
+                        {
+                            Ok(output) => (output, false, false),
+                            Err(error) if error.to_string() == "aborted" => {
+                                ("aborted".to_string(), true, true)
+                            }
+                            Err(error) => (error.to_string(), true, false),
                         }
-                        Err(error) => (error.to_string(), true, false),
-                    }
-                };
-                (
-                    index,
-                    ExecutedToolUse {
-                        id,
-                        name,
-                        input,
-                        content,
-                        is_error,
-                        aborted,
-                        duration_ms: started.elapsed().as_millis(),
-                    },
-                )
-            }));
-        }
-
-        let mut results = Vec::new();
-        for handle in handles {
-            match handle.await {
-                Ok(result) => results.push(result),
-                Err(error) => results.push((
-                    usize::MAX,
-                    ExecutedToolUse {
-                        id: String::new(),
-                        name: "internal".to_string(),
-                        input: serde_json::Value::Null,
-                        content: format!("parallel tool task failed: {error}"),
-                        is_error: true,
-                        aborted: false,
-                        duration_ms: 0,
-                    },
-                )),
-            }
-        }
-        results.sort_by_key(|(index, _)| *index);
-        results.into_iter().map(|(_, result)| result).collect()
+                    };
+                    (
+                        index,
+                        ExecutedToolUse {
+                            id,
+                            name,
+                            input,
+                            content,
+                            is_error,
+                            aborted,
+                            duration_ms: started.elapsed().as_millis(),
+                        },
+                    )
+                }
+            },
+        );
+        collect_bounded_ordered(futures, MAX_PARALLEL_BUILTIN_TOOLS).await
     }
 
     async fn execute_sequential_tools(
@@ -2351,23 +2453,58 @@ impl AgentState {
         color_mode: ColorMode,
         colors: ColorPalette,
         interactive: bool,
-    ) -> Vec<ExecutedToolUse> {
+    ) -> ExecutedToolBatch {
+        let mut abort = ActiveTurnAbort::start(interactive);
+        let cancel = abort.token();
+        let results = self
+            .execute_sequential_tools_with_cancel(
+                tool_uses,
+                color_mode,
+                colors,
+                interactive,
+                cancel,
+            )
+            .await;
+        let cancelled = abort.is_cancelled() || results.cancelled;
+        abort.stop();
+        ExecutedToolBatch {
+            tools: results.tools,
+            cancelled,
+        }
+    }
+
+    async fn execute_sequential_tools_with_cancel(
+        &mut self,
+        tool_uses: Vec<(String, String, serde_json::Value)>,
+        color_mode: ColorMode,
+        colors: ColorPalette,
+        interactive: bool,
+        cancel: Arc<AtomicBool>,
+    ) -> ExecutedToolBatch {
         let mut results = Vec::new();
+        let mut batch_cancelled = cancel.load(Ordering::Acquire);
         for (id, name, input) in tool_uses {
             eprintln!();
             render_tool_call(&name, &input, self.diff_mode, color_mode, &colors);
             let started = Instant::now();
-            let mut abort = ActiveTurnAbort::start(interactive);
-            let token = abort.token();
-            let (content, is_error, aborted) = match self
-                .execute_tool(&name, &input, interactive, Some(token))
-                .await
-            {
-                Ok(output) => (output, false, false),
-                Err(error) if error.to_string() == "aborted" => ("aborted".to_string(), true, true),
-                Err(error) => (error.to_string(), true, false),
+            let (content, is_error, aborted) = if batch_cancelled {
+                ("aborted before execution".to_string(), true, true)
+            } else {
+                match self
+                    .execute_tool(&name, &input, interactive, Some(Arc::clone(&cancel)))
+                    .await
+                {
+                    Ok(output) => {
+                        let is_error = bash_preview_indicates_failure(&name, &output);
+                        (output, is_error, false)
+                    }
+                    Err(error) if error.to_string() == "aborted" => {
+                        ("aborted".to_string(), true, true)
+                    }
+                    Err(error) => (error.to_string(), true, false),
+                }
             };
-            abort.stop();
+            batch_cancelled = batch_cancelled || aborted || cancel.load(Ordering::Acquire);
             if aborted {
                 eprintln!();
             }
@@ -2384,7 +2521,10 @@ impl AgentState {
             emit_tool_metrics_if_enabled(&result);
             results.push(result);
         }
-        results
+        ExecutedToolBatch {
+            tools: results,
+            cancelled: batch_cancelled,
+        }
     }
 
     async fn execute_tool(
@@ -3411,7 +3551,20 @@ fn bash_preview_indicates_failure(name: &str, content: &str) -> bool {
             .and_then(|rest| rest.strip_suffix(')'))
             .and_then(|code| code.parse::<i32>().ok())
             .is_some_and(|code| code != 0)
-    }) || content.lines().any(|line| line == "timed_out: true")
+    }) || content.lines().any(|line| {
+        matches!(
+            line,
+            "outcome: timed_out"
+                | "outcome: cancelled"
+                | "output_incomplete: true"
+                | "residual_descendants: true"
+        ) || line
+            .strip_prefix("output_error: ")
+            .is_some_and(|error| error != "none")
+            || line
+                .strip_prefix("termination_error: ")
+                .is_some_and(|error| error != "none")
+    })
 }
 
 fn bash_preview_stderr_token(name: &str, preview: &str) -> ColorToken {
@@ -3859,15 +4012,15 @@ mod context_pressure_tests {
     fn detects_failed_bash_preview_status() {
         assert!(bash_preview_indicates_failure(
             "bash",
-            "status: Some(1)\ntimed_out: false\nstdout:\n\nstderr:\nnope"
+            "outcome: exited\nstatus: Some(1)\noutput_incomplete: false\nstdout:\n\nstderr:\nnope"
         ));
         assert!(!bash_preview_indicates_failure(
             "bash",
-            "status: Some(0)\ntimed_out: false\nstdout:\nok\nstderr:\n"
+            "outcome: exited\nstatus: Some(0)\noutput_incomplete: false\nstdout:\nok\nstderr:\n"
         ));
         assert!(!bash_preview_indicates_failure(
             "grep",
-            "status: Some(1)\ntimed_out: false"
+            "outcome: exited\nstatus: Some(1)\noutput_incomplete: false"
         ));
     }
 
@@ -3876,19 +4029,22 @@ mod context_pressure_tests {
         assert_eq!(
             bash_preview_stderr_token(
                 "bash",
-                "status: Some(0)\ntimed_out: false\nstdout:\nok\nstderr:\nFinished build\n"
+                "outcome: exited\nstatus: Some(0)\noutput_incomplete: false\nstdout:\nok\nstderr:\nFinished build\n"
             ),
             ColorToken::ToolOutput
         );
         assert_eq!(
             bash_preview_stderr_token(
                 "bash",
-                "status: Some(1)\ntimed_out: false\nstdout:\n\nstderr:\nfailed\n"
+                "outcome: exited\nstatus: Some(1)\noutput_incomplete: false\nstdout:\n\nstderr:\nfailed\n"
             ),
             ColorToken::Error
         );
         assert_eq!(
-            bash_preview_stderr_token("bash", "status: Some(0)\ntimed_out: true\nstderr:\nkilled"),
+            bash_preview_stderr_token(
+                "bash",
+                "outcome: timed_out\nstatus: None\noutput_incomplete: false\nstderr:\n",
+            ),
             ColorToken::Error
         );
     }
@@ -4940,6 +5096,214 @@ mod context_pressure_tests {
             .unwrap_err();
 
         assert_eq!(error.to_string(), "aborted");
+    }
+
+    #[test]
+    fn bang_timeout_uses_full_supported_range() {
+        let (timeout, command) = parse_bang_command("--timeout-seconds=600 cargo test").unwrap();
+        assert_eq!(timeout, Duration::from_secs(600));
+        assert_eq!(command, "cargo test");
+        assert!(parse_bang_command("--timeout-seconds=601 true").is_err());
+        assert!(parse_bang_command("--timeout-seconds=0 true").is_err());
+    }
+
+    #[test]
+    fn abort_watcher_preserves_typed_ahead_characters() {
+        let _ = take_pending_terminal_input();
+        preserve_terminal_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::NONE,
+        )));
+        preserve_terminal_event(Event::Paste("bc".to_string()));
+        preserve_terminal_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        preserve_terminal_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert_eq!(take_pending_terminal_input(), "ab");
+    }
+
+    #[test]
+    fn aborted_results_cover_every_unexecuted_tool_call() {
+        let results = aborted_tool_uses(
+            vec![
+                (
+                    "call_1".to_string(),
+                    "read".to_string(),
+                    serde_json::json!({"path":"a"}),
+                ),
+                (
+                    "call_2".to_string(),
+                    "write".to_string(),
+                    serde_json::json!({"path":"b", "content":"x"}),
+                ),
+            ],
+            "aborted before execution",
+        );
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "call_1");
+        assert_eq!(results[1].id, "call_2");
+        assert!(results.iter().all(|result| result.aborted));
+        assert!(results.iter().all(|result| result.is_error));
+    }
+
+    #[tokio::test]
+    async fn sequential_batch_marks_every_precancelled_call_aborted() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        state.cwd = temp.path().to_path_buf();
+        state.active_tool_names = ["write".to_string()].into_iter().collect();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let colors = state.colors.clone();
+        let results = state
+            .execute_sequential_tools_with_cancel(
+                vec![
+                    (
+                        "call_1".to_string(),
+                        "write".to_string(),
+                        serde_json::json!({"path":"one", "content":"unexpected"}),
+                    ),
+                    (
+                        "call_2".to_string(),
+                        "write".to_string(),
+                        serde_json::json!({"path":"two", "content":"unexpected"}),
+                    ),
+                ],
+                ColorMode::Off,
+                colors,
+                false,
+                cancel,
+            )
+            .await;
+
+        assert!(results.cancelled);
+        assert!(results.tools.iter().all(|result| result.aborted));
+        assert!(!temp.path().join("one").exists());
+        assert!(!temp.path().join("two").exists());
+    }
+
+    #[tokio::test]
+    async fn sequential_batch_stops_after_non_cancellable_tool_finishes() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        state.cwd = temp.path().to_path_buf();
+        state.active_tool_names = ["read".to_string(), "write".to_string()]
+            .into_iter()
+            .collect();
+        let fifo = temp.path().join("input.fifo");
+        let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        let writer_fifo = fifo.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            std::fs::write(writer_fifo, "completed\n").unwrap();
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            trigger.store(true, Ordering::Release);
+        });
+        let colors = state.colors.clone();
+        let results = state
+            .execute_sequential_tools_with_cancel(
+                vec![
+                    (
+                        "call_1".to_string(),
+                        "read".to_string(),
+                        serde_json::json!({"path":"input.fifo"}),
+                    ),
+                    (
+                        "call_2".to_string(),
+                        "write".to_string(),
+                        serde_json::json!({"path":"must-not-exist", "content":"unexpected"}),
+                    ),
+                ],
+                ColorMode::Off,
+                colors,
+                false,
+                cancel,
+            )
+            .await;
+
+        assert!(results.cancelled);
+        assert!(!results.tools[0].aborted);
+        assert!(results.tools[0].content.contains("completed"));
+        assert!(results.tools[1].aborted);
+        assert!(!temp.path().join("must-not-exist").exists());
+    }
+
+    #[tokio::test]
+    async fn sequential_batch_aborts_remaining_calls_after_cancellation() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let mut state = AgentState::new(&config).unwrap();
+        state.cwd = temp.path().to_path_buf();
+        state.active_tool_names = ["bash".to_string(), "write".to_string()]
+            .into_iter()
+            .collect();
+        let marker = temp.path().join("must-not-exist");
+        let tool_uses = vec![
+            (
+                "call_1".to_string(),
+                "bash".to_string(),
+                serde_json::json!({"command":"sleep 5", "timeout_seconds": 10}),
+            ),
+            (
+                "call_2".to_string(),
+                "write".to_string(),
+                serde_json::json!({"path": marker, "content":"unexpected"}),
+            ),
+        ];
+        let cancel = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            trigger.store(true, Ordering::Release);
+        });
+
+        let colors = state.colors.clone();
+        let results = state
+            .execute_sequential_tools_with_cancel(tool_uses, ColorMode::Off, colors, false, cancel)
+            .await;
+
+        assert!(results.cancelled);
+        assert_eq!(results.tools.len(), 2);
+        assert!(!results.tools[0].aborted);
+        assert!(results.tools[1].aborted);
+        assert_eq!(results.tools[1].content, "aborted before execution");
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn bounded_parallel_collection_caps_concurrency_and_restores_order() {
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let maximum = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let futures = (0..24).map(|index| {
+            let active = Arc::clone(&active);
+            let maximum = Arc::clone(&maximum);
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                maximum.fetch_max(current, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                (23 - index, index)
+            }
+        });
+
+        let results = collect_bounded_ordered(futures, MAX_PARALLEL_BUILTIN_TOOLS).await;
+
+        assert!(maximum.load(Ordering::SeqCst) <= MAX_PARALLEL_BUILTIN_TOOLS);
+        assert_eq!(results, (0..24).rev().collect::<Vec<_>>());
     }
 
     #[tokio::test]
@@ -6245,8 +6609,11 @@ async fn handle_bang_command(
         unreachable!()
     };
 
+    let (timeout, command) = parse_bang_command(command)?;
     if command.is_empty() {
-        anyhow::bail!("usage: !<command> or !!<command>");
+        anyhow::bail!(
+            "usage: ![--timeout-seconds=N] <command> or !![--timeout-seconds=N] <command>"
+        );
     }
 
     eprintln!("[bash] {}", terminal_text::sanitize(command));
@@ -6258,14 +6625,9 @@ async fn handle_bang_command(
     )?;
     let mut abort = ActiveTurnAbort::start(true);
     let token = abort.token();
-    let output = builtin_tools::bash::run_with_cancel(
-        command,
-        &state.cwd,
-        Duration::from_secs(120),
-        Some(token),
-    )
-    .await?;
-    let cancelled = abort.is_cancelled();
+    let output =
+        builtin_tools::bash::run_with_cancel(command, &state.cwd, timeout, Some(token)).await?;
+    let cancelled = output.outcome == builtin_tools::bash::CommandOutcome::Cancelled;
     abort.stop();
     let rendered = render_bash_output(command, &output);
 
@@ -6292,10 +6654,42 @@ async fn handle_bang_command(
     Ok(CommandAction::Continue)
 }
 
+fn parse_bang_command(command: &str) -> Result<(Duration, &str)> {
+    const DEFAULT_BANG_TIMEOUT_SECONDS: u64 = 120;
+    let Some(rest) = command.strip_prefix("--timeout-seconds=") else {
+        return Ok((Duration::from_secs(DEFAULT_BANG_TIMEOUT_SECONDS), command));
+    };
+    let split = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let seconds = rest[..split]
+        .parse::<u64>()
+        .context("bang timeout must be an integer number of seconds")?;
+    if seconds == 0 || seconds > builtin_tools::MAX_BASH_TIMEOUT_SECONDS {
+        anyhow::bail!(
+            "bang timeout must be between 1 and {} seconds, got {seconds}",
+            builtin_tools::MAX_BASH_TIMEOUT_SECONDS
+        );
+    }
+    let command = rest[split..].trim_start();
+    Ok((Duration::from_secs(seconds), command))
+}
+
 fn render_bash_output(command: &str, output: &builtin_tools::bash::BashOutput) -> String {
     format!(
-        "Shell command executed: `{}`\nstatus: {:?}\ntimed_out: {}\nstdout:\n{}\nstderr:\n{}",
-        command, output.status, output.timed_out, output.stdout, output.stderr
+        "Shell command executed: `{}`\noutcome: {}\nstatus: {:?}\noutput_incomplete: {}\noutput_error: {}\ntermination_error: {}\ncontainment: {}\ncontainment_error: {}\nresidual_descendants: {}\nstdout:\n{}\nstderr:\n{}",
+        command,
+        output.outcome.as_str(),
+        output.status,
+        output.output_incomplete,
+        output.output_error.as_deref().unwrap_or("none"),
+        output.termination_error.as_deref().unwrap_or("none"),
+        output.containment.as_str(),
+        output.containment_error.as_deref().unwrap_or("none"),
+        output
+            .residual_descendants
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        output.stdout,
+        output.stderr
     )
 }
 

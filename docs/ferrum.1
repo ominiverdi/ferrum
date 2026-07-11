@@ -283,6 +283,10 @@ Run a shell command and send its output to the model.
 .TP
 \f[B]!!\f[R]COMMAND
 Run a shell command and show the output only to the user.
+.PP
+Prefix either command body with \f[B]\[en]timeout-seconds=\f[R]N to
+select a foreground timeout from 1 through 600 seconds.
+The default is 120 seconds.
 .SH CONFIGURATION
 .PP
 Ferrum reads configuration from:

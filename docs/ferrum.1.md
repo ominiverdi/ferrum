@@ -240,6 +240,8 @@ Shell shortcuts:
 **!!**COMMAND
 : Run a shell command and show the output only to the user.
 
+Prefix either command body with **--timeout-seconds=**N to select a foreground timeout from 1 through 600 seconds. The default is 120 seconds.
+
 # CONFIGURATION
 
 Ferrum reads configuration from:

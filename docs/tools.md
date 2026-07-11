@@ -197,9 +197,9 @@ Allowed executables still run with the user's host authority. In particular, bui
 }
 ```
 
-Output includes status, timeout flag, stdout, and stderr. Large output is truncated to a bounded tail. When output is truncated, Ferrum saves the full stream to a temporary file and includes its path in the result.
+Output reports an explicit `outcome` (`exited`, `timed_out`, or `cancelled`), exit status, `output_incomplete`, output/termination diagnostics, containment mode, and residual-descendant state. Stdout and stderr are drained incrementally into bounded in-memory tails. Large streams are spooled to private mode-0600 files under `$XDG_RUNTIME_DIR/ferrum/bash-output` (or a per-user system-temporary fallback), and the result includes the spool path. Ferrum opportunistically removes spool files older than 24 hours when creating a new spool. If a pipe remains open past the bounded drain deadline, Ferrum closes its end, marks the output incomplete, and inserts an omission marker.
 
-`bash` runs with stdin closed, stdout/stderr piped, and its own process group. On timeout or abort, Ferrum terminates the whole process group so child processes such as `ssh` or `cloudflared` do not keep consuming the terminal.
+`bash` runs with stdin closed and its own process group. When the current Linux session delegates cgroup-v2 children, Ferrum also places each command tree in a private child cgroup and uses `cgroup.kill` on timeout or cancellation; this contains descendants that call `setsid`. If delegated cgroups are unavailable, Ferrum falls back to process-group signalling, reports `containment: process_group`, includes the cgroup setup error, and reports residual descendants as `unknown`. A normally exited command is not treated as cancelled merely because cancellation arrived during final pipe draining.
 
 For broad filesystem exploration, prefer the native `find`, `grep`, and `ls` tools. If shell `find`/`grep` is necessary, prune noisy directories such as `.git`, `target`, and `node_modules`.
 

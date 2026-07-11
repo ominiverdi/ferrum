@@ -21,7 +21,7 @@ use std::{
 };
 
 const DEFAULT_BASH_TIMEOUT_SECONDS: u64 = 30;
-const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
+pub(crate) const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
 const MAX_WAIT_SECONDS: u64 = 1800;
 
 pub fn definitions() -> Vec<ToolDefinition> {
@@ -200,7 +200,10 @@ pub async fn execute_with_cancel_and_safety(
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
-            read::read_text(&path::resolve_to_cwd(path, cwd)?, offset, limit)
+            let resolved = path::resolve_to_cwd(path, cwd)?;
+            tokio::task::spawn_blocking(move || read::read_text(&resolved, offset, limit))
+                .await
+                .context("read worker failed")?
         }
         "ls" => {
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -208,7 +211,10 @@ pub async fn execute_with_cancel_and_safety(
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
-            ls::list(&path::resolve_to_cwd(path, cwd)?, limit)
+            let resolved = path::resolve_to_cwd(path, cwd)?;
+            tokio::task::spawn_blocking(move || ls::list(&resolved, limit))
+                .await
+                .context("ls worker failed")?
         }
         "bash" => {
             let command = required_str(input, "command")?;
@@ -364,8 +370,20 @@ pub async fn execute_with_cancel_and_safety(
 
 fn render_bash_output(output: &bash::BashOutput) -> String {
     format!(
-        "status: {:?}\ntimed_out: {}\nstdout:\n{}\nstderr:\n{}",
-        output.status, output.timed_out, output.stdout, output.stderr
+        "outcome: {}\nstatus: {:?}\noutput_incomplete: {}\noutput_error: {}\ntermination_error: {}\ncontainment: {}\ncontainment_error: {}\nresidual_descendants: {}\nstdout:\n{}\nstderr:\n{}",
+        output.outcome.as_str(),
+        output.status,
+        output.output_incomplete,
+        output.output_error.as_deref().unwrap_or("none"),
+        output.termination_error.as_deref().unwrap_or("none"),
+        output.containment.as_str(),
+        output.containment_error.as_deref().unwrap_or("none"),
+        output
+            .residual_descendants
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        output.stdout,
+        output.stderr
     )
 }
 

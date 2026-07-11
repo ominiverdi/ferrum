@@ -93,6 +93,7 @@ Shell shortcuts:
 
 - `!!<cmd>` runs a shell command and prints output only.
 - `!<cmd>` runs a shell command and sends formatted output to the model.
+- Prefix either command body with `--timeout-seconds=N` to select a foreground timeout from 1 through 600 seconds; the default is 120 seconds.
 
 Session resume:
 
@@ -354,7 +355,7 @@ Exact text replacement. At `medium` and `high`, targets must be under configured
 
 ### `bash`
 
-Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Before execution, Ferrum parses the complete Bash syntax tree with byte/node/depth limits and applies `/safety low|medium|high`. Parse errors and unsupported authority fail closed; here-document bodies remain data. Supported wrappers are recursively inspected, and dynamic executable positions and indirect shell launch are rejected. At `medium`, recognized shell mutations must remain under `[tools].writable_roots`; `low` permits directory changes with `cd` and bypasses writable roots; `high` uses a conservative inspection command set. This is policy, not process isolation.
+Run a shell command in cwd. Capture stdout/stderr and return an explicit exited/timed-out/cancelled outcome, exit status, output-completeness state, cleanup errors, containment mode, and residual-descendant state. Output is incrementally bounded in memory and spooled to a private runtime file when large. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group. Ferrum uses a delegated cgroup-v2 child where available so timeout/abort can terminate descendants that leave the process group; otherwise it reports the process-group fallback and unknown residual state. Pipe draining has a deadline and incomplete output is marked explicitly. Before execution, Ferrum parses the complete Bash syntax tree with byte/node/depth limits and applies `/safety low|medium|high`. Parse errors and unsupported authority fail closed; here-document bodies remain data. Supported wrappers are recursively inspected, and dynamic executable positions and indirect shell launch are rejected. At `medium`, recognized shell mutations must remain under `[tools].writable_roots`; `low` permits directory changes with `cd` and bypasses writable roots; `high` uses a conservative inspection command set. This is policy, not process isolation.
 
 ### `wait`
 

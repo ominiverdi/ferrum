@@ -258,8 +258,9 @@ Interactive mode also supports command completion and hints via Tab for slash co
 Shell shortcuts:
 
 ```text
-!<cmd>   run shell command and send output to model
-!!<cmd>  run shell command and print output only
+!<cmd>                              run shell command and send output to model
+!!<cmd>                             run shell command and print output only
+! --timeout-seconds=600 <cmd>       select a 1-600 second foreground timeout
 ```
 
 ## Documentation
