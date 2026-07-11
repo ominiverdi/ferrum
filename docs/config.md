@@ -103,6 +103,8 @@ Supported placeholders:
 {{writable_roots}}
 ```
 
+When `max_tool_rounds = 0`, `{{max_tool_rounds}}` renders as `0 (adaptive; no fixed cap; does not disable tools)` instead of an ambiguous bare zero. Positive limits continue to render as their numeric value.
+
 Unknown placeholders are left unchanged. If the file exists but cannot be read, Ferrum fails clearly.
 
 Do not put secrets in `system.md`. A custom system prompt controls Ferrum's behavior; omitting runtime metadata or tool guidance can degrade agent behavior.

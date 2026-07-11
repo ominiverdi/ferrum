@@ -812,7 +812,10 @@ fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) ->
             "{{max_context_tokens}}",
             config.max_context_tokens.to_string(),
         ),
-        ("{{max_tool_rounds}}", config.max_tool_rounds.to_string()),
+        (
+            "{{max_tool_rounds}}",
+            render_max_tool_rounds(config.max_tool_rounds),
+        ),
         ("{{mcp_enabled}}", config.mcp_enabled.to_string()),
         ("{{diff_mode}}", config.diff_mode.as_str().to_string()),
         ("{{safety}}", config.safety.as_str().to_string()),
@@ -823,6 +826,14 @@ fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) ->
         rendered = rendered.replace(placeholder, &value);
     }
     rendered
+}
+
+fn render_max_tool_rounds(max_tool_rounds: usize) -> String {
+    if max_tool_rounds == 0 {
+        "0 (adaptive; no fixed cap; does not disable tools)".to_string()
+    } else {
+        max_tool_rounds.to_string()
+    }
 }
 
 async fn collect_bounded_ordered<I, F, T>(futures: I, concurrency: usize) -> Vec<T>
@@ -4910,6 +4921,23 @@ mod context_pressure_tests {
             rendered,
             "model=alias provider_model=actual-model cwd=/tmp/work max=1234 roots=."
         );
+    }
+
+    #[test]
+    fn renders_adaptive_tool_rounds_without_implying_tools_are_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let cwd = std::path::Path::new("/tmp/work");
+
+        let adaptive = render_system_prompt_template("{{max_tool_rounds}}", &config, cwd);
+        config.max_tool_rounds = 12;
+        let fixed = render_system_prompt_template("{{max_tool_rounds}}", &config, cwd);
+
+        assert_eq!(
+            adaptive,
+            "0 (adaptive; no fixed cap; does not disable tools)"
+        );
+        assert_eq!(fixed, "12");
     }
 
     #[test]

@@ -216,6 +216,8 @@ Supported placeholders:
 {{diff_mode}}
 ```
 
+When `max_tool_rounds = 0`, `{{max_tool_rounds}}` renders as an annotated adaptive mode rather than a bare zero, so the prompt cannot mistake it for disabled tool use.
+
 Do not put secrets in `system.md`. If you override the prompt, keep any runtime metadata and tool guidance you want Ferrum to preserve.
 
 In active interactive turns, `Esc` aborts the current model/tool turn and returns to the prompt. `Ctrl-C` also aborts foreground tool execution such as `wait`.
