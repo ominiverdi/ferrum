@@ -686,6 +686,22 @@ mod tests {
     }
 
     #[test]
+    fn low_safety_allows_non_privileged_user_install_outside_roots() {
+        assert_allowed_at(
+            "install -m755 target/release/ferrum /home/example/.cargo/bin/ferrum",
+            SafetyLevel::Low,
+        );
+        assert_denied_at(
+            "install -m755 target/release/ferrum /home/example/.cargo/bin/ferrum",
+            SafetyLevel::Medium,
+        );
+        assert_denied_at(
+            "install -m4755 target/release/ferrum /tmp/ferrum",
+            SafetyLevel::Low,
+        );
+    }
+
+    #[test]
     fn syntax_resource_limits_fail_closed() {
         let oversized = "x".repeat(MAX_COMMAND_BYTES + 1);
         assert_denied_at(&oversized, SafetyLevel::Low);

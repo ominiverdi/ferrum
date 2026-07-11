@@ -221,7 +221,7 @@ fn evaluate_command_inner(
         return Some("archive extraction to sensitive path".to_string());
     }
 
-    if base == "install" && dangerous_install(args) {
+    if base == "install" && dangerous_install(args, safety) {
         return Some("privileged install command".to_string());
     }
 
@@ -779,7 +779,7 @@ fn dangerous_tar(args: &[String]) -> bool {
     }
 }
 
-fn dangerous_install(args: &[String]) -> bool {
+fn dangerous_install(args: &[String], safety: SafetyLevel) -> bool {
     let has_privileged_mode = args
         .windows(2)
         .any(|pair| matches!(pair[0].as_str(), "-m" | "--mode") && is_privileged_mode(&pair[1]))
@@ -787,7 +787,8 @@ fn dangerous_install(args: &[String]) -> bool {
             arg.strip_prefix("--mode=").is_some_and(is_privileged_mode)
                 || arg.starts_with("-m") && is_privileged_mode(&arg[2..])
         });
-    has_privileged_mode || file_operation_targets_sensitive_path(args)
+    has_privileged_mode
+        || !matches!(safety, SafetyLevel::Low) && file_operation_targets_sensitive_path(args)
 }
 
 fn is_privileged_mode(mode: &str) -> bool {
