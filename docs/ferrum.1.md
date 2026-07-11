@@ -20,7 +20,7 @@ ferrum - small Rust-native coding agent for Linux
 
 **ferrum** **acp**
 
-**ferrum** **login** PROVIDER
+**ferrum** **login** {openai,openai-codex}
 
 # DESCRIPTION
 
@@ -188,6 +188,9 @@ Common slash commands:
 
 **/models**
 : List models known to the active provider and cache them for **/model** Tab completion until the active provider changes.
+
+**/login** {openai,openai-codex}
+: Run the OpenAI Codex / ChatGPT OAuth flow from the interactive session.
 
 **/provider** NAME
 : Switch provider.

@@ -19,6 +19,8 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderDefinition>,
     pub models: BTreeMap<String, ModelDefinition>,
     pub offline: bool,
+    #[serde(skip)]
+    pub provider_is_implicit_fake: bool,
     pub max_context_tokens: usize,
     pub base_max_context_tokens: usize,
     pub max_tool_rounds: usize,
@@ -374,6 +376,8 @@ impl Config {
 
         let offline = env::var("FERRUM_OFFLINE")
             .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+        let mut provider_was_explicitly_selected = file_config.provider.is_some();
+        let model_was_configured = file_config.model.is_some();
         let providers = file_config.providers;
         let models = file_config.models;
         let mut provider_name = if offline {
@@ -394,6 +398,7 @@ impl Config {
             .get(&selected_model)
             .and_then(|definition| definition.provider.as_ref())
         {
+            provider_was_explicitly_selected = true;
             if offline && model_provider != "fake" {
                 anyhow::bail!(
                     "model {selected_model} requires provider {model_provider}, but FERRUM_OFFLINE is set"
@@ -402,6 +407,9 @@ impl Config {
             provider_name = model_provider.clone();
         }
         let provider = resolve_provider(&provider_name, &providers, &config_dir)?;
+        let explicit_fake_model = model_was_configured && selected_model == "fake";
+        let provider_is_implicit_fake = provider_name == "fake"
+            && !(offline || provider_was_explicitly_selected || explicit_fake_model);
         let provider_model = provider_model_for(&selected_model, &models);
         let max_context_tokens = models
             .get(&selected_model)
@@ -439,6 +447,7 @@ impl Config {
             providers,
             models,
             offline,
+            provider_is_implicit_fake,
             max_context_tokens,
             base_max_context_tokens: file_config.max_context_tokens.unwrap_or(256_000),
             max_tool_rounds: env::var("FERRUM_MAX_TOOL_ROUNDS")
@@ -657,6 +666,7 @@ impl Config {
         let mut visited_providers = BTreeSet::new();
         let mut visited_models = BTreeSet::new();
         candidate.set_provider_inner(provider, &mut visited_providers, &mut visited_models)?;
+        candidate.provider_is_implicit_fake = false;
         *self = candidate;
         Ok(())
     }
@@ -687,6 +697,11 @@ impl Config {
 
     pub fn set_model(&mut self, model: &str) -> Result<()> {
         let mut candidate = self.clone();
+        let model_selects_provider = candidate
+            .models
+            .get(model)
+            .and_then(|definition| definition.provider.as_ref())
+            .is_some();
         let mut visited_providers = BTreeSet::new();
         let mut visited_models = BTreeSet::new();
         candidate.apply_model_name_inner(
@@ -694,6 +709,9 @@ impl Config {
             &mut visited_providers,
             &mut visited_models,
         )?;
+        if candidate.provider_name != "fake" || model == "fake" || model_selects_provider {
+            candidate.provider_is_implicit_fake = false;
+        }
         *self = candidate;
         Ok(())
     }
@@ -1205,6 +1223,41 @@ deny = ["chrome"]
         .unwrap();
         let opted_in = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         assert!(opted_in.allow_external_global_skill_symlinks);
+    }
+
+    #[test]
+    fn distinguishes_implicit_and_explicit_fake_provider_selection() {
+        let dir = TempDir::new().unwrap();
+        let mut implicit = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(implicit.provider_is_implicit_fake);
+
+        implicit
+            .apply_cli_overrides(None, Some("fake"), None, None, None, None, None)
+            .unwrap();
+        assert!(!implicit.provider_is_implicit_fake);
+
+        let mut implicit = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+
+        implicit
+            .apply_cli_overrides(Some("fake"), None, None, None, None, None, None)
+            .unwrap();
+        assert!(!implicit.provider_is_implicit_fake);
+
+        fs::write(dir.path().join("config.toml"), "provider = \"fake\"\n").unwrap();
+        let explicit = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!explicit.provider_is_implicit_fake);
+
+        fs::write(dir.path().join("config.toml"), "model = \"fake\"\n").unwrap();
+        let explicit = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!explicit.provider_is_implicit_fake);
+
+        fs::write(
+            dir.path().join("config.toml"),
+            "model = \"demo\"\n\n[models.demo]\nprovider = \"fake\"\n",
+        )
+        .unwrap();
+        let explicit = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!explicit.provider_is_implicit_fake);
     }
 
     #[test]

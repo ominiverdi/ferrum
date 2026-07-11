@@ -74,6 +74,7 @@ Slash commands:
 - `/sessions new`
 - `/model [name]`
 - `/models`
+- `/login <openai|openai-codex>`
 - `/usage [day|week|month]`
 - `/provider [name]`
 - `/providers`

@@ -25,6 +25,8 @@ Login:
 ferrum login openai
 ```
 
+Run `ferrum login --help` to list supported login provider names. `openai-codex` is accepted as an alias. In an interactive session, `/login openai` runs the same OAuth flow; after it succeeds, `/provider openai-codex` selects the authenticated provider for that session.
+
 Config:
 
 ```toml

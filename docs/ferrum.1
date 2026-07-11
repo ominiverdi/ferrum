@@ -33,7 +33,7 @@ ferrum - small Rust-native coding agent for Linux
 .PP
 \f[B]ferrum\f[R] \f[B]acp\f[R]
 .PP
-\f[B]ferrum\f[R] \f[B]login\f[R] PROVIDER
+\f[B]ferrum\f[R] \f[B]login\f[R] {openai,openai-codex}
 .SH DESCRIPTION
 .PP
 Ferrum is a Linux-native coding agent.
@@ -236,6 +236,9 @@ Switch model.
 \f[B]/models\f[R]
 List models known to the active provider and cache them for \f[B]/model\f[R]
 Tab completion until the active provider changes.
+.TP
+\f[B]/login\f[R] {openai,openai-codex}
+Run the OpenAI Codex / ChatGPT OAuth flow from the interactive session.
 .TP
 \f[B]/provider\f[R] NAME
 Switch provider.

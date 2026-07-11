@@ -165,6 +165,8 @@ Do not put secrets in `system.md`. A custom system prompt controls Ferrum's beha
 
 The active provider name. In normal use this should match a key under `[providers]`.
 
+When neither config nor a CLI override selects a provider, Ferrum uses its fake demo provider but prints a setup notice with the exact `config.toml` path. An explicit fake selection, directly or through a model mapping, keeps the development provider without that onboarding notice.
+
 Provider names like `local`, `minimax`, or `opencode-go` are just config keys. Ferrum does not hardcode vendor-specific provider aliases; define any provider preset you want in `config.toml`.
 
 ### providers

@@ -79,7 +79,15 @@ pub enum Command {
         permissions: AcpPermissionPolicy,
     },
     /// Authenticate with a provider
-    Login { provider: String },
+    #[command(
+        arg_required_else_help = true,
+        after_help = "Supported providers: openai, openai-codex"
+    )]
+    Login {
+        /// OAuth provider to authenticate
+        #[arg(value_parser = ["openai", "openai-codex"])]
+        provider: String,
+    },
 }
 
 impl Args {
@@ -202,5 +210,27 @@ mod tests {
     fn parses_title_flag() {
         let args = Args::try_parse_from(["ferrum", "--title", "Issue triage", "-p", "hi"]).unwrap();
         assert_eq!(args.title.as_deref(), Some("Issue triage"));
+    }
+
+    #[test]
+    fn login_provider_names_are_validated_by_cli() {
+        for provider in ["openai", "openai-codex"] {
+            let args = Args::try_parse_from(["ferrum", "login", provider]).unwrap();
+            assert!(matches!(
+                args.command,
+                Some(Command::Login { provider: parsed }) if parsed == provider
+            ));
+        }
+
+        let error = Args::try_parse_from(["ferrum", "login", "unknown"]).unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("possible values"));
+        assert!(rendered.contains("openai"));
+        assert!(rendered.contains("openai-codex"));
+
+        let missing = Args::try_parse_from(["ferrum", "login"])
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("Supported providers: openai, openai-codex"));
     }
 }

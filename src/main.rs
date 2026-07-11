@@ -94,6 +94,13 @@ async fn run() -> Result<()> {
         }
     }
 
+    if config.provider_is_implicit_fake {
+        eprintln!(
+            "[setup] no provider configured; using the fake demo provider. Run `ferrum login --help` for OAuth providers, or define an OpenAI-compatible provider in {} (API keys use `api_key_env`, not literal config values).",
+            terminal_text::sanitize(&config.config_dir.join("config.toml").display().to_string())
+        );
+    }
+
     if let Some(prompt) = args.print_prompt()? {
         agent::run_print(
             prompt,

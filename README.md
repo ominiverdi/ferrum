@@ -180,6 +180,10 @@ Login for ChatGPT/Codex OAuth:
 ferrum login openai
 ```
 
+`ferrum login --help` lists accepted provider spellings. The same OAuth flow is available inside an interactive session as `/login openai`; `openai-codex` is accepted as an alias in both places.
+
+If no provider is configured, Ferrum says explicitly that it is using the fake demo provider and points to `~/.config/ferrum/config.toml` instead of silently presenting fake output as a normal backend.
+
 OpenAI-compatible providers use environment-backed keys. Do not put secret values in `config.toml`.
 
 ## Colors
@@ -244,6 +248,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /sessions new
 /model [name]
 /models
+/login <provider>
 /usage [day|week|month]
 /provider [name]
 /providers

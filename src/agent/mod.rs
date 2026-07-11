@@ -3,7 +3,7 @@ pub mod messages;
 pub mod tools;
 
 use crate::{
-    atomic_file, cancel,
+    atomic_file, auth, cancel,
     config::{ColorMode, Config, DiffMode, SafetyLevel, ToolSelection},
     context, mcp, providers, session, skills, terminal_text, tools as builtin_tools, ui_colors,
     usage,
@@ -161,6 +161,10 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_owned_words(prefix, &self.model_names)));
         }
+        if let Some(prefix) = command_before.strip_prefix("/login ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, login_provider_words())));
+        }
         if let Some(prefix) = command_before.strip_prefix("/provider ") {
             let start = pos - prefix.len();
             return Ok((
@@ -222,6 +226,7 @@ impl FerrumLineHelper {
         command_hints.insert("/palette", " <name>  (/palettes to list)");
         command_hints.insert("/palettes", "");
         command_hints.insert("/model", " <name>");
+        command_hints.insert("/login", " openai");
         command_hints.insert("/provider", " <name>");
         command_hints.insert("/thinking", " off|minimal|low|medium|high|xhigh");
         command_hints.insert("/safety", " low|medium|high");
@@ -275,6 +280,7 @@ fn slash_command_words() -> &'static [&'static str] {
         "/skill",
         "/model",
         "/models",
+        "/login",
         "/provider",
         "/providers",
         "/thinking",
@@ -370,6 +376,10 @@ fn session_words() -> &'static [&'static str] {
 
 fn sessions_words() -> &'static [&'static str] {
     &["pick", "del", "new"]
+}
+
+fn login_provider_words() -> &'static [&'static str] {
+    &["openai", "openai-codex"]
 }
 
 fn color_words() -> &'static [&'static str] {
@@ -715,6 +725,35 @@ pub async fn run_interactive(
                             }
                         }
                         Ok(Err(error)) => render_error(&error),
+                    }
+                    continue;
+                }
+                if input == "/login" || input.starts_with("/login ") {
+                    match parse_login_provider(input) {
+                        Ok(_) => {
+                            let mut abort = ActiveTurnAbort::start(true);
+                            let result = cancel::race(
+                                auth::openai_codex::login(config),
+                                Some(&abort.token()),
+                            )
+                            .await;
+                            abort.stop();
+                            match result {
+                                Err(_) => println!("aborted"),
+                                Ok(Ok(())) => println!(
+                                    "Use /provider openai-codex for this session, and set provider = \"openai-codex\" in {} to make it the default.",
+                                    terminal_text::sanitize(
+                                        &config
+                                            .config_dir
+                                            .join("config.toml")
+                                            .display()
+                                            .to_string()
+                                    )
+                                ),
+                                Ok(Err(error)) => render_error(&error),
+                            }
+                        }
+                        Err(error) => render_error(&error),
                     }
                     continue;
                 }
@@ -5077,6 +5116,28 @@ mod context_pressure_tests {
                 .any(|candidate| candidate.replacement == "catppuccin")
         );
         assert_completion(&helper, &ctx, "/mcp l", "list");
+        assert_completion(&helper, &ctx, "/login openai-c", "openai-codex");
+    }
+
+    #[test]
+    fn login_command_accepts_only_documented_provider_names() {
+        assert_eq!(parse_login_provider("/login openai").unwrap(), "openai");
+        assert_eq!(
+            parse_login_provider("/login openai-codex").unwrap(),
+            "openai-codex"
+        );
+        assert!(
+            parse_login_provider("/login")
+                .unwrap_err()
+                .to_string()
+                .contains("supported: openai, openai-codex")
+        );
+        assert!(
+            parse_login_provider("/login unknown")
+                .unwrap_err()
+                .to_string()
+                .contains("Supported providers: openai, openai-codex")
+        );
     }
 
     #[test]
@@ -6955,6 +7016,7 @@ mod context_pressure_tests {
             providers: std::collections::BTreeMap::new(),
             models: std::collections::BTreeMap::new(),
             offline: false,
+            provider_is_implicit_fake: false,
             max_context_tokens: 1234,
             base_max_context_tokens: 1234,
             max_tool_rounds: 0,
@@ -7505,6 +7567,26 @@ fn parse_skill_invocation(input: &str) -> Option<(&str, Option<String>)> {
     None
 }
 
+fn parse_login_provider(input: &str) -> Result<&str> {
+    let mut parts = input.split_whitespace();
+    let command = parts.next().unwrap_or_default();
+    if command != "/login" {
+        anyhow::bail!("usage: /login <provider> (supported: openai, openai-codex)");
+    }
+    let Some(provider) = parts.next() else {
+        anyhow::bail!("usage: /login <provider> (supported: openai, openai-codex)");
+    };
+    if let Some(extra) = parts.next() {
+        anyhow::bail!("usage: /login <provider>, got extra argument: {extra}");
+    }
+    match provider {
+        "openai" | "openai-codex" => Ok(provider),
+        other => anyhow::bail!(
+            "unsupported login provider: {other}. Supported providers: openai, openai-codex"
+        ),
+    }
+}
+
 fn split_name_args(input: &str) -> (&str, Option<String>) {
     let mut parts = input.splitn(2, char::is_whitespace);
     let name = parts.next().unwrap_or("");
@@ -7543,6 +7625,7 @@ fn is_known_slash_command(command: &str) -> bool {
                 | "/skill"
                 | "/model"
                 | "/models"
+                | "/login"
                 | "/provider"
                 | "/providers"
                 | "/thinking"
@@ -8212,6 +8295,7 @@ fn handle_command(
             println!("  /skill:<name> [args]  load a skill into context");
             println!("  /model [name]         show or set model");
             println!("  /models               list known models for current provider");
+            println!("  /login <provider>     authenticate: openai|openai-codex");
             println!("  /usage [period]       show token usage: day|week|month");
             println!("  /provider [name]      show or set provider");
             println!("  /providers            list configured providers");
@@ -8370,6 +8454,9 @@ fn handle_command(
         }
         "/models" => {
             anyhow::bail!("/models is async; this command should be handled before sync commands")
+        }
+        "/login" => {
+            anyhow::bail!("/login is async; this command should be handled before sync commands")
         }
         "/usage" => {
             let period = usage::UsagePeriod::parse(parts.next())?;
