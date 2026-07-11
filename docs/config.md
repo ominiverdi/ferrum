@@ -71,6 +71,7 @@ max_context_tokens = 100000
 name = "example"
 command = "example-mcp-server"
 args = []
+env = ["PATH", "HOME"]
 enabled = true
 ```
 
@@ -441,8 +442,16 @@ Ferrum supports MCP stdio servers configured in TOML:
 name = "filesystem"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/ominiverdi/github"]
+env = ["PATH", "HOME"]
 enabled = true
 ```
+
+Each MCP child starts with a filtered baseline containing common process and
+desktop-session variables such as `PATH`, `HOME`, locale variables, XDG paths,
+and display/session-bus addresses. The optional `env` array adds explicit
+variable names copied from Ferrum's environment. Provider keys, OAuth tokens,
+SSH agent sockets, and unrelated ambient credentials are not inherited unless
+named here.
 
 Only stdio MCP is supported initially. HTTP/SSE MCP is not implemented.
 

@@ -4480,12 +4480,14 @@ mod context_pressure_tests {
                 name: "enabled".to_string(),
                 command: "true".to_string(),
                 args: Vec::new(),
+                env: Vec::new(),
                 enabled: true,
             },
             crate::config::McpServerConfig {
                 name: "disabled".to_string(),
                 command: "true".to_string(),
                 args: Vec::new(),
+                env: Vec::new(),
                 enabled: false,
             },
         ];
@@ -4506,12 +4508,14 @@ mod context_pressure_tests {
                 name: "enabled".to_string(),
                 command: "true".to_string(),
                 args: Vec::new(),
+                env: Vec::new(),
                 enabled: true,
             },
             crate::config::McpServerConfig {
                 name: "disabled".to_string(),
                 command: "true".to_string(),
                 args: Vec::new(),
+                env: Vec::new(),
                 enabled: false,
             },
         ];

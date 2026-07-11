@@ -44,7 +44,9 @@ Ferrum risk mostly comes from which tools are exposed.
 - MCP servers are external programs; their output becomes model context.
 - Fork PRs and third-party repositories are untrusted input.
 - Ferrum does not load repository-owned config to change tool policy.
-- Ferrum does not scan MCP tool descriptions or redact secrets before context.
+- Ferrum does not treat MCP tool descriptions or output as trusted; raw MCP
+  stderr is withheld from model-visible errors, but tool-provided content can still
+  contain secrets or prompt injection.
 - `--safety` controls shell execution only. It does not sandbox `write`, `edit`,
   MCP servers, or the filesystem.
 

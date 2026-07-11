@@ -42,6 +42,8 @@ pub struct McpServerConfig {
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -735,6 +737,23 @@ deny = ["bash"]
             )
             .unwrap();
         assert_eq!(config.tool_selection, Some(ToolSelection::None));
+    }
+
+    #[test]
+    fn mcp_server_environment_is_an_explicit_allowlist() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+[[mcp.servers]]
+name = "example"
+command = "example-server"
+env = ["PATH", "HOME"]
+"#,
+        )
+        .unwrap();
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(config.mcp_servers[0].env, vec!["PATH", "HOME"]);
     }
 
     #[test]

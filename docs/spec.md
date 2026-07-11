@@ -151,6 +151,7 @@ max_context_tokens = 6000
 name = "time"
 command = "uvx"
 args = ["mcp-server-time"]
+env = ["PATH", "HOME"]
 enabled = true
 ```
 
@@ -385,7 +386,7 @@ MCP tool names are exposed as:
 mcp__<server>__<tool>
 ```
 
-Characters outside ASCII letters, digits, `_`, and `-` are sanitized to `_`; sanitized-name collisions are rejected. Ferrum writes newline-delimited JSON to MCP stdio servers for compatibility. Incoming MCP messages may be newline-delimited JSON or `Content-Length` frames; oversized incoming `Content-Length` frames are rejected before allocation. Tool output and model-visible metadata are bounded before being returned to or sent to the model.
+Characters outside ASCII letters, digits, `_`, and `-` are sanitized to `_`; sanitized-name collisions are rejected. Ferrum writes newline-delimited JSON to MCP stdio servers for compatibility. A persistent reader accepts bounded newline-delimited JSON or `Content-Length` frames without allowing caller cancellation to split framing; a persistent writer serializes complete outbound frames. JSONL lines, individual and aggregate headers, framed bodies, and stderr lines are bounded while reading. Initialize negotiation and paginated tool discovery are validated and bounded. MCP children inherit a filtered baseline of common process/session variables plus variables explicitly named by the server's `env` allowlist; provider credentials are excluded by default. Tool output and model-visible metadata are bounded before being returned to or sent to the model.
 
 HTTP/SSE MCP transports are deferred.
 
