@@ -10,8 +10,10 @@ cd "$root"
 old="$(cat release-version.txt)"
 new="$1"
 [[ "$old" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid current release version" >&2; exit 1; }
+old_plain="${old#v}"
+new_plain="${new#v}"
 for file in README.md docs/release.md docs/ferrum.1.md docs/ferrum.1; do
-  sed -i "s/${old//./\\.}/${new}/g" "$file"
+  sed -i "s/${old_plain//./\\.}/${new_plain}/g" "$file"
 done
 printf '%s\n' "$new" > release-version.txt
 scripts/check-release-docs.sh
