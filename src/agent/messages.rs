@@ -2,10 +2,16 @@ use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{fs, io::Read, path::Path};
+use std::{
+    fs,
+    io::{Cursor, Read},
+    path::Path,
+};
 
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_IMAGE_BASE64_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_IMAGE_BASE64_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+const MAX_IMAGE_DIMENSION: u32 = 16_384;
+const MAX_IMAGE_DECODE_ALLOC_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -219,6 +225,7 @@ pub fn image_from_bytes(mime_type: String, data: Vec<u8>, source: String) -> Res
     if detected != mime_type {
         anyhow::bail!("image declared {mime_type} but bytes are {detected}");
     }
+    validate_decodable_image(&data, &detected)?;
     let mut hasher = Sha256::new();
     hasher.update(&data);
     let sha256 = format!("{:x}", hasher.finalize());
@@ -237,6 +244,42 @@ pub fn image_extension(mime_type: &str) -> &'static str {
         "image/webp" => "webp",
         _ => "img",
     }
+}
+
+pub fn image_storage_bytes(block: &ContentBlock) -> Option<(usize, usize)> {
+    let ContentBlock::Image { data_base64, .. } = block else {
+        return None;
+    };
+    let padding = data_base64
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'=')
+        .count()
+        .min(2);
+    let decoded = data_base64.len() / 4 * 3;
+    Some((decoded.saturating_sub(padding), data_base64.len()))
+}
+
+fn validate_decodable_image(data: &[u8], mime_type: &str) -> Result<()> {
+    let format = match mime_type {
+        "image/png" => image::ImageFormat::Png,
+        "image/jpeg" => image::ImageFormat::Jpeg,
+        "image/webp" => image::ImageFormat::WebP,
+        _ => anyhow::bail!("unsupported image type: {mime_type}"),
+    };
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_IMAGE_DECODE_ALLOC_BYTES);
+    let mut reader = image::ImageReader::with_format(Cursor::new(data), format);
+    reader.limits(limits);
+    reader.decode().with_context(|| {
+        format!(
+            "image is not decodable within Ferrum limits ({MAX_IMAGE_DIMENSION}x{MAX_IMAGE_DIMENSION}, {MAX_IMAGE_DECODE_ALLOC_BYTES} allocation bytes)"
+        )
+    })?;
+    Ok(())
 }
 
 fn detect_image_mime(data: &[u8]) -> Result<String> {
@@ -275,12 +318,18 @@ pub fn strip_think_blocks(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_IMAGE_BASE64_BYTES, image_from_data_uri, image_from_path, sanitize_thinking_text,
-        strip_think_blocks,
+        MAX_IMAGE_BASE64_BYTES, MAX_IMAGE_DIMENSION, image_from_data_uri, image_from_path,
+        sanitize_thinking_text, strip_think_blocks,
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use std::io::Cursor;
 
-    const PNG_BYTES: &[u8] = b"\x89PNG\r\n\x1a\nminimal";
+    fn encoded_image(format: image::ImageFormat) -> Vec<u8> {
+        let image = image::DynamicImage::new_rgba8(1, 1);
+        let mut bytes = Cursor::new(Vec::new());
+        image.write_to(&mut bytes, format).unwrap();
+        bytes.into_inner()
+    }
 
     #[test]
     fn rejects_text_file_named_png() {
@@ -302,12 +351,66 @@ mod tests {
     fn detects_image_mime_from_bytes_not_extension() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("image.jpg");
-        std::fs::write(&path, PNG_BYTES).unwrap();
+        std::fs::write(&path, encoded_image(image::ImageFormat::Png)).unwrap();
         let image = image_from_path(&path).unwrap();
         let super::ContentBlock::Image { mime_type, .. } = image else {
             panic!("expected image block");
         };
         assert_eq!(mime_type, "image/png");
+    }
+
+    #[test]
+    fn accepts_decodable_supported_formats() {
+        for (mime, format) in [
+            ("image/png", image::ImageFormat::Png),
+            ("image/jpeg", image::ImageFormat::Jpeg),
+            ("image/webp", image::ImageFormat::WebP),
+        ] {
+            let block = super::image_from_bytes(
+                mime.to_string(),
+                encoded_image(format),
+                "test".to_string(),
+            )
+            .unwrap();
+            assert!(matches!(block, super::ContentBlock::Image { .. }));
+        }
+    }
+
+    #[test]
+    fn rejects_image_dimensions_above_decoder_limit() {
+        let mut bytes = encoded_image(image::ImageFormat::Png);
+        bytes[16..20].copy_from_slice(&(MAX_IMAGE_DIMENSION + 1).to_be_bytes());
+        let mut crc = 0xffff_ffffu32;
+        for byte in &bytes[12..29] {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        bytes[29..33].copy_from_slice(&(!crc).to_be_bytes());
+
+        let error = super::image_from_bytes("image/png".to_string(), bytes, "test".to_string())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not decodable within Ferrum limits")
+        );
+    }
+
+    #[test]
+    fn rejects_signature_only_image_junk() {
+        let error = super::image_from_bytes(
+            "image/png".to_string(),
+            b"\x89PNG\r\n\x1a\nminimal".to_vec(),
+            "test".to_string(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("not decodable"));
     }
 
     #[test]

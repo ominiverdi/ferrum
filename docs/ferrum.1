@@ -104,6 +104,8 @@ Set the session title.
 Attach a local image file.
 Repeatable.
 Supported formats are png, jpg, jpeg, and webp.
+Images are decoded under bounded validation; per-turn and
+retained-session count and byte limits apply.
 .TP
 \f[B]\[en]mcp\f[R] [SERVER \&...]
 Enable configured MCP servers for this process.
@@ -121,8 +123,11 @@ Expose only the listed tools to the model.
 \f[B]Security and safety\f[R]
 Ferrum runs tools with the local user\[cq]s permissions and is not a
 sandbox.
-See \f[B]docs/security.md\f[R] for threat-model notes, shell guard
-behavior, MCP caveats, and higher-risk workflow guidance.
+Untrusted terminal text is sanitized, and native context/search/image
+operations have explicit resource boundaries.
+See \f[B]docs/security.md\f[R] and \f[B]docs/resource-boundaries.md\f[R]
+for threat-model notes, shell policy, MCP caveats, and higher-risk
+workflow guidance.
 .SH MODEL TOOLS
 .PP
 Ferrum\[cq]s default native tool set includes:
@@ -131,7 +136,20 @@ Ferrum\[cq]s default native tool set includes:
 \f[B]wait\f[R], \f[B]grep\f[R], \f[B]find\f[R], \f[B]ls\f[R],
 \f[B]history_search\f[R], and \f[B]history_read\f[R].
 .PP
-The \f[V]bash\f[R] and \f[V]wait\f[R] tools parse complete Bash syntax and apply a tiered execution policy. Native \f[V]write\f[R]/\f[V]edit\f[R] and recognized shell mutations are limited to \f[V][tools].writable_roots\f[R], which defaults to the working directory. Use \f[B]\[en]safety low|medium|high\f[R] at startup or \f[B]/safety low|medium|high\f[R] interactively. The default \f[B]medium\f[R] tier supports trusted-checkout development while rejecting command substitution, dynamic executables, hidden wrapper authority, and direct interpreter payloads. This policy is not a sandbox.
+The \f[V]bash\f[R] and \f[V]wait\f[R] tools parse complete Bash syntax
+and apply a tiered execution policy.
+Native \f[V]write\f[R]/\f[V]edit\f[R] and recognized shell mutations are
+limited to \f[V][tools].writable_roots\f[R], which defaults to the
+working directory; native replacements are identity-checked and atomic.
+Native \f[V]read\f[R], \f[V]grep\f[R], \f[V]find\f[R], and \f[V]ls\f[R]
+enforce bounded line/result/traversal behavior, with cancellation and
+deadlines for searches.
+Use \f[B]\[en]safety low|medium|high\f[R] at startup or \f[B]/safety
+low|medium|high\f[R] interactively.
+The default \f[B]medium\f[R] tier supports trusted-checkout development
+while rejecting command substitution, dynamic executables, hidden
+wrapper authority, and direct interpreter payloads.
+This policy is not a sandbox.
 .PP
 MCP tool names are namespaced and sanitized as **mcp__SERVER__TOOL\f[B].
 Ferrum rejects sanitized-name collisions, accepts newline-delimited JSON

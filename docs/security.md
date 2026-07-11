@@ -8,7 +8,7 @@ cover, what they do not cover, and how to use them for higher-risk work.
 
 Ferrum does not try to prove arbitrary programs safe. It parses submitted Bash structurally, applies a tiered execution policy, and limits native and statically recognized shell mutations to user-configured writable roots. Ambiguous or unsupported authority fails closed before Bash starts.
 
-The policy is a hard rejection layer, not an approval prompt or sandbox. Full design and regression matrix: [tool-authority.md](tool-authority.md).
+The policy is a hard rejection layer, not an approval prompt or sandbox. Full design and regression matrices: [tool-authority.md](tool-authority.md) and [resource-boundaries.md](resource-boundaries.md).
 
 ## Current baseline
 
@@ -23,7 +23,8 @@ security review by GitHub user Komzpa / Darafei Praliaskouski (`me@komzpa.net`).
 - `--safety low|medium|high` sets the process startup tier.
 - `/safety low|medium|high` changes the tier interactively.
 - Ferrum is not a sandbox and does not isolate `$HOME` or contain the system calls of an allowed executable.
-- Native `write` and `edit` default to the working directory as their only writable root.
+- Native `write` and `edit` default to the working directory as their only writable root and replace files atomically after verifying target identity.
+- Untrusted terminal text is sanitized before rendering; image, context, native search, file-line, directory-result, clipboard, and preview operations have explicit resource limits.
 
 Ferrum also hardens adjacent tool plumbing: MCP inbound `Content-Length` frames
 are capped before allocation, sanitized MCP tool-name collisions are rejected,
@@ -71,7 +72,7 @@ Tier differences:
 
 `[tools].writable_roots` defaults to `["."]`. Ferrum resolves mutation paths through their nearest existing ancestors and rejects native `write`/`edit` calls or recognized shell mutations outside those roots. Existing symlink escapes, dangling symlinks, and multiply linked regular-file targets are rejected. A denial requires an explicit user action: configure the intended root, move the operation, or perform it outside Ferrum. Model text cannot grant itself another root.
 
-This check does not contain an unknown executable's system calls and is not race-free filesystem isolation. Use external isolation for hostile code. Atomic write/edit replacement and stronger path-identity handling are separate hardening work.
+This check does not contain an unknown executable's system calls and is not race-free filesystem isolation. Use external isolation for hostile code. Native write/edit replacement uses sibling temporary files, durable sync, target-identity verification, and atomic Linux rename operations; hostile mutation of ancestor directories remains outside Ferrum's guarantees.
 
 ## Related research
 

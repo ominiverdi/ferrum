@@ -18,7 +18,7 @@ Supported modes:
 auto|on|off
 ```
 
-- `auto`: colorize only when output is a terminal
+- `auto`: colorize independently for each output stream when that stream is a terminal
 - `on`: force ANSI color output
 - `off`: disable all Ferrum UI colors
 
@@ -56,7 +56,7 @@ diff_meta = "Grey70"
 
 Restart Ferrum after editing `colors.toml`; the palette is loaded at startup.
 
-You can also keep reusable palettes in `~/.config/ferrum/color-palettes/*.toml` and switch interactively. Ferrum ships 24 built-in palettes and writes them to that directory on first run if it does not exist.
+You can also keep reusable palettes in `~/.config/ferrum/color-palettes/*.toml` and switch interactively. Ferrum ships 24 built-in palettes and seeds each missing built-in independently without replacing existing files.
 
 ```text
 /palette
@@ -66,10 +66,10 @@ You can also keep reusable palettes in `~/.config/ferrum/color-palettes/*.toml` 
 
 ### Palettes
 
-Ferrum ships 24 built-in palettes embedded in the binary. On first run, if
-`~/.config/ferrum/color-palettes/` does not exist, Ferrum creates it and writes
-all palettes there. Users can edit, rename, or delete copies freely; existing
-directories are never overwritten.
+Ferrum ships 24 built-in palettes embedded in the binary. On startup it creates
+`~/.config/ferrum/color-palettes/` if needed and writes each missing built-in
+independently. Users can edit, rename, or delete copies freely; existing files
+are never overwritten.
 
 ```text
 /palette
@@ -80,7 +80,7 @@ directories are never overwritten.
 `/palette` shows the current palette, or `default`/`custom` if it does not match
 a named palette. `/palettes` lists available palette files. `/palette <name>`
 validates `color-palettes/<name>.toml`, applies it to the running session, and
-writes it to `~/.config/ferrum/colors.toml`.
+atomically replaces `~/.config/ferrum/colors.toml`.
 
 Missing entries use defaults. Unknown palette keys or invalid color values are
 ignored with a warning when Ferrum starts from `colors.toml`; `/palette <name>`

@@ -12,7 +12,7 @@ pub mod write;
 pub mod write_policy;
 
 use crate::{agent::tools::ToolDefinition, config::SafetyLevel};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use std::{
     path::Path,
@@ -28,7 +28,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "read".to_string(),
-            description: "Read a text file with optional 1-based line offset and line limit."
+            description: "Read a text file with optional 1-based line offset and line limit. Input lines and output are bounded while reading."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -43,7 +43,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "ls".to_string(),
-            description: "List directory contents.".to_string(),
+            description: "List directory contents while retaining at most the requested number of sorted entries.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -85,7 +85,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "write".to_string(),
-            description: "Create or overwrite a text file under a configured writable root. Creates parent directories.".to_string(),
+            description: "Create or atomically replace a text file under a configured writable root. Creates parent directories, preserves existing permissions, and rejects changed target identity.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -98,7 +98,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "edit".to_string(),
-            description: "Apply exact text replacements to a file under a configured writable root. Each old_text must match exactly once and edits must not overlap. Preserves BOM and existing LF/CRLF line endings.".to_string(),
+            description: "Apply exact text replacements atomically to a file under a configured writable root. Each old_text must match exactly once and edits must not overlap. Preserves BOM, existing LF/CRLF line endings, permissions, and target identity.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -123,7 +123,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "grep".to_string(),
-            description: "Search file contents under a path with optional glob filtering, case-insensitive/literal matching, context lines, and match limits. Includes hidden config directories, respects ignore files, and skips noisy directories such as .git, target, and node_modules. Uses ripgrep if available.".to_string(),
+            description: "Search file contents under a path with optional glob filtering, case-insensitive/literal matching, context lines, and global match limits. Includes hidden config directories, respects ignore files, and skips noisy directories such as .git, target, and node_modules. Uses streamed ripgrep JSON if available; all paths have bounded lines/output, cancellation, and a deadline.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -141,7 +141,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "find".to_string(),
-            description: "Find files by glob pattern and/or legacy filename substring/extension filters. Includes hidden config directories, respects ignore files, and skips noisy directories such as .git, target, and node_modules.".to_string(),
+            description: "Find files by glob pattern and/or legacy filename substring/extension filters. Includes hidden config directories, respects ignore files, skips noisy directories such as .git, target, and node_modules, and enforces cancellation and a traversal deadline.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -298,7 +298,26 @@ pub async fn execute_with_cancel_and_safety(
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize),
             };
-            grep::grep(pattern, &path::resolve_to_cwd(path, cwd)?, options)
+            let pattern = pattern.to_string();
+            let resolved = path::resolve_to_cwd(path, cwd)?;
+            let glob = options.glob.map(str::to_string);
+            let cancel = cancel.clone();
+            tokio::task::spawn_blocking(move || {
+                grep::grep_with_cancel(
+                    &pattern,
+                    &resolved,
+                    grep::GrepOptions {
+                        glob: glob.as_deref(),
+                        ignore_case: options.ignore_case,
+                        literal: options.literal,
+                        context: options.context,
+                        limit: options.limit,
+                    },
+                    cancel.as_ref(),
+                )
+            })
+            .await
+            .context("grep worker failed")?
         }
         "find" => {
             let path = required_str(input, "path")?;
@@ -311,7 +330,25 @@ pub async fn execute_with_cancel_and_safety(
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize),
             };
-            find::find(&path::resolve_to_cwd(path, cwd)?, options)
+            let resolved = path::resolve_to_cwd(path, cwd)?;
+            let pattern = options.pattern.map(str::to_string);
+            let name = options.name.map(str::to_string);
+            let extension = options.extension.map(str::to_string);
+            let cancel = cancel.clone();
+            tokio::task::spawn_blocking(move || {
+                find::find_with_cancel(
+                    &resolved,
+                    find::FindOptions {
+                        pattern: pattern.as_deref(),
+                        name: name.as_deref(),
+                        extension: extension.as_deref(),
+                        limit: options.limit,
+                    },
+                    cancel.as_ref(),
+                )
+            })
+            .await
+            .context("find worker failed")?
         }
         other => anyhow::bail!("unknown tool: {other}"),
     }

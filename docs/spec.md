@@ -183,7 +183,7 @@ Ferrum loads context from `AGENTS.md` and `agents.md` files:
 2. Parent directories walking from filesystem root to cwd
 3. Current directory
 
-Files are deduplicated, bounded, and included in the system prompt. More specific later files override earlier instructions when conflicts exist.
+Files are deduplicated and streamed only up to the remaining 128 KiB aggregate budget before inclusion in the system prompt. More-specific files are selected first for budgeting, then rendered in normal general-to-specific order so later instructions override earlier conflicts.
 
 Ferrum also injects runtime context describing current version, provider, provider model, thinking level, safety level, writable roots, cwd, config dir, and supported interactive commands. The embedded default runtime system prompt can be fully overridden with `~/.config/ferrum/system.md`; Ferrum renders known `{{placeholder}}` values from current runtime config and leaves unknown placeholders unchanged.
 
@@ -215,7 +215,7 @@ Core loop:
 1. Build context from runtime system prompt, context files, skills summary, session history, current user message, and the active tool definitions.
 2. Send request to selected provider.
 3. Receive final assistant message.
-4. Display assistant text with `<think>...</think>` blocks hidden from terminal output while preserving raw session content.
+4. Display assistant text with `<think>...</think>` blocks hidden and untrusted terminal control protocols removed while preserving raw session content.
 5. If assistant requested tools:
    - render tool calls in readable multiline terminal format
    - execute tools in the core loop
@@ -342,15 +342,15 @@ The history tools are current-session only and include archived pre-compaction J
 
 ### `read`
 
-Read a text file with optional offset/limit. Output is truncated safely.
+Read a text file with optional offset/limit. Reading is bounded to 50 KiB even for one giant line; leading blank lines are preserved and counted.
 
 ### `write`
 
-Create or overwrite a file under a configured writable root. Creates parent directories.
+Create or atomically replace a file under a configured writable root. Creates parent directories, preserves existing permissions, and rejects symlink or changed target identities.
 
 ### `edit`
 
-Exact text replacement under a configured writable root. Each old text must match exactly once. Multiple non-overlapping edits supported. Preserve UTF-8 BOM and existing LF/CRLF line endings.
+Exact text replacement under a configured writable root. Each old text must match exactly once. Multiple non-overlapping edits supported. Preserve UTF-8 BOM and existing LF/CRLF line endings. Ferrum reads the target once and commits through synced sibling-temp plus identity-checked atomic replacement.
 
 ### `bash`
 
@@ -362,11 +362,11 @@ Wait in the foreground, then run a bash command using the same execution tier, w
 
 ### `grep`
 
-Search file contents. Uses ripgrep when available, with a Rust fallback that preserves regex and literal matching semantics.
+Search file contents. Uses streamed ripgrep JSON when available, with a streaming Rust fallback that preserves regex and literal matching semantics. Both paths enforce global match/output limits, bounded lines, cancellation, and a 10-second deadline; fallback file symlinks are rejected.
 
 ### `find`
 
-Find files by name/glob.
+Find files by name/glob with cancellation and a 10-second traversal deadline.
 
 ### `history_search`
 
@@ -411,7 +411,7 @@ Sources:
 - pasted file paths
 - `data:image/...;base64,...`
 
-Images are stored inline in session JSONL as base64 content blocks. Terminal previews use `chafa` when installed; otherwise Ferrum prints metadata.
+Images are validated through bounded PNG/JPEG/WebP decoding and stored inline in session JSONL as base64 content blocks. A turn is limited to 8 images / 20 MiB decoded; retained session context is limited to 32 images / 64 MiB decoded, with corresponding encoded budgets. Multi-image attachment is transactional. Terminal previews use a private copy of validated bytes and run `chafa` under output and time limits; otherwise Ferrum prints metadata.
 
 ## Skills
 
@@ -450,6 +450,7 @@ ferrum/
   docs/
   src/
     main.rs
+    atomic_file.rs
     cli.rs
     config.rs
     context.rs
@@ -469,6 +470,7 @@ ferrum/
     session/
       jsonl.rs
       mod.rs
+    terminal_text.rs
     tools/
       bash.rs
       edit.rs

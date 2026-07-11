@@ -17,6 +17,7 @@ futures-util = "0.3"
 globset = "0.4"
 httpdate = "1"
 ignore = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 libc = "0.2"
 rand = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }

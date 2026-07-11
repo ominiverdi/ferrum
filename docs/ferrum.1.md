@@ -91,7 +91,7 @@ prompt.
 
 **--image** PATH
 : Attach a local image file. Repeatable. Supported formats are png, jpg, jpeg,
-and webp.
+and webp. Images are decoded under bounded validation; per-turn and retained-session count and byte limits apply.
 
 **--mcp** [SERVER ...]
 : Enable configured MCP servers for this process. If server names are provided,
@@ -107,7 +107,7 @@ only those servers are enabled.
 : Expose only the listed tools to the model.
 
 **Security and safety**
-: Ferrum runs tools with the local user's permissions and is not a sandbox. See **docs/security.md** for threat-model notes, shell guard behavior, MCP caveats, and higher-risk workflow guidance.
+: Ferrum runs tools with the local user's permissions and is not a sandbox. Untrusted terminal text is sanitized, and native context/search/image operations have explicit resource boundaries. See **docs/security.md** and **docs/resource-boundaries.md** for threat-model notes, shell policy, MCP caveats, and higher-risk workflow guidance.
 
 # MODEL TOOLS
 
@@ -116,7 +116,7 @@ Ferrum's default native tool set includes:
 **read**, **write**, **edit**, **bash**, **wait**, **grep**, **find**, **ls**,
 **history_search**, and **history_read**.
 
-The `bash` and `wait` tools parse complete Bash syntax and apply a tiered execution policy. Native `write`/`edit` and recognized shell mutations are limited to `[tools].writable_roots`, which defaults to the working directory. Use **--safety low|medium|high** at startup or **/safety low|medium|high** interactively. The default **medium** tier supports trusted-checkout development while rejecting command substitution, dynamic executables, hidden wrapper authority, and direct interpreter payloads. This policy is not a sandbox.
+The `bash` and `wait` tools parse complete Bash syntax and apply a tiered execution policy. Native `write`/`edit` and recognized shell mutations are limited to `[tools].writable_roots`, which defaults to the working directory; native replacements are identity-checked and atomic. Native `read`, `grep`, `find`, and `ls` enforce bounded line/result/traversal behavior, with cancellation and deadlines for searches. Use **--safety low|medium|high** at startup or **/safety low|medium|high** interactively. The default **medium** tier supports trusted-checkout development while rejecting command substitution, dynamic executables, hidden wrapper authority, and direct interpreter payloads. This policy is not a sandbox.
 
 MCP tool names are namespaced and sanitized as **mcp__SERVER__TOOL**. Ferrum rejects sanitized-name collisions, accepts newline-delimited JSON or **Content-Length** framed inbound MCP messages, rejects oversized incoming frames before allocation, and bounds model-visible MCP metadata.
 

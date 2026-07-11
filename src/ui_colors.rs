@@ -1,4 +1,4 @@
-use crate::config::ColorMode;
+use crate::{atomic_file, config::ColorMode, terminal_text};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io::IsTerminal, path::Path};
@@ -65,16 +65,13 @@ const PALETTE_FILES: &[(&str, &str)] = &[
 
 pub fn seed_palettes(config_dir: &Path) {
     let palette_dir = config_dir.join("color-palettes");
-    if palette_dir.exists() {
-        return;
-    }
     if fs::create_dir_all(&palette_dir).is_err() {
         return;
     }
     for (name, content) in PALETTE_FILES {
         let path = palette_dir.join(name);
         if !path.exists() {
-            let _ = fs::write(&path, content);
+            let _ = atomic_file::replace(&path, content.as_bytes(), None);
         }
     }
 }
@@ -197,7 +194,7 @@ impl ColorPalette {
                 if strict {
                     anyhow::bail!(message);
                 }
-                eprintln!("[colors] ignoring {message}");
+                eprintln!("[colors] ignoring {}", terminal_text::sanitize(&message));
                 continue;
             };
             if AnsiStyle::parse(&value).is_none() {
@@ -205,7 +202,7 @@ impl ColorPalette {
                 if strict {
                     anyhow::bail!(message);
                 }
-                eprintln!("[colors] ignoring {message}");
+                eprintln!("[colors] ignoring {}", terminal_text::sanitize(&message));
                 continue;
             }
             match key.as_str() {
@@ -229,7 +226,7 @@ impl ColorPalette {
                     if strict {
                         anyhow::bail!(message);
                     }
-                    eprintln!("[colors] ignoring {message}");
+                    eprintln!("[colors] ignoring {}", terminal_text::sanitize(&message));
                 }
             }
         }
@@ -237,18 +234,50 @@ impl ColorPalette {
     }
 
     pub fn paint(&self, token: ColorToken, mode: ColorMode, text: impl AsRef<str>) -> String {
-        let text = text.as_ref();
-        if !color_enabled(mode) {
-            return text.to_string();
-        }
-        let Some(style) = AnsiStyle::parse(self.spec(token)) else {
-            return text.to_string();
-        };
-        style.paint(text)
+        self.paint_for(token, mode, OutputStream::Stderr, text)
     }
 
-    pub fn prefix_suffix(&self, token: ColorToken, mode: ColorMode) -> (String, &'static str) {
-        if !color_enabled(mode) {
+    pub fn paint_stdout(
+        &self,
+        token: ColorToken,
+        mode: ColorMode,
+        text: impl AsRef<str>,
+    ) -> String {
+        self.paint_for(token, mode, OutputStream::Stdout, text)
+    }
+
+    fn paint_for(
+        &self,
+        token: ColorToken,
+        mode: ColorMode,
+        stream: OutputStream,
+        text: impl AsRef<str>,
+    ) -> String {
+        let text = terminal_text::sanitize(text.as_ref());
+        if !color_enabled_for(mode, stream) {
+            return text;
+        }
+        let Some(style) = AnsiStyle::parse(self.spec(token)) else {
+            return text;
+        };
+        style.paint(&text)
+    }
+
+    pub fn prefix_suffix_stdout(
+        &self,
+        token: ColorToken,
+        mode: ColorMode,
+    ) -> (String, &'static str) {
+        self.prefix_suffix_for(token, mode, OutputStream::Stdout)
+    }
+
+    fn prefix_suffix_for(
+        &self,
+        token: ColorToken,
+        mode: ColorMode,
+        stream: OutputStream,
+    ) -> (String, &'static str) {
+        if !color_enabled_for(mode, stream) {
             return (String::new(), "");
         }
         let Some(style) = AnsiStyle::parse(self.spec(token)) else {
@@ -278,9 +307,23 @@ impl ColorPalette {
     }
 }
 
-pub fn color_enabled(mode: ColorMode) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+pub fn color_enabled_for(mode: ColorMode, stream: OutputStream) -> bool {
+    let is_terminal = match stream {
+        OutputStream::Stdout => std::io::stdout().is_terminal(),
+        OutputStream::Stderr => std::io::stderr().is_terminal(),
+    };
+    color_enabled_for_terminal(mode, is_terminal)
+}
+
+fn color_enabled_for_terminal(mode: ColorMode, is_terminal: bool) -> bool {
     match mode {
-        ColorMode::Auto => std::io::stderr().is_terminal(),
+        ColorMode::Auto => is_terminal,
         ColorMode::On => true,
         ColorMode::Off => false,
     }
@@ -672,6 +715,41 @@ mod tests {
         assert_eq!(palette.prompt, "magenta");
         assert_eq!(palette.hr, "245");
         assert_eq!(palette.error, ColorPalette::default().error);
+    }
+
+    #[test]
+    fn repairs_partial_palette_seed_without_overwriting_existing_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let palette_dir = temp.path().join("color-palettes");
+        fs::create_dir_all(&palette_dir).unwrap();
+        fs::write(palette_dir.join("ansi-dark.toml"), "custom = true\n").unwrap();
+
+        seed_palettes(temp.path());
+
+        assert_eq!(
+            fs::read_to_string(palette_dir.join("ansi-dark.toml")).unwrap(),
+            "custom = true\n"
+        );
+        assert!(palette_dir.join("tokyonight.toml").is_file());
+    }
+
+    #[test]
+    fn paint_sanitizes_untrusted_terminal_controls() {
+        let palette = ColorPalette::default();
+        let painted = palette.paint(
+            ColorToken::Assistant,
+            ColorMode::Off,
+            "ok\x1b]52;c;x\x07end",
+        );
+        assert_eq!(painted, "okend");
+    }
+
+    #[test]
+    fn auto_color_uses_the_selected_stream_terminal_state() {
+        assert!(color_enabled_for_terminal(ColorMode::Auto, true));
+        assert!(!color_enabled_for_terminal(ColorMode::Auto, false));
+        assert!(color_enabled_for_terminal(ColorMode::On, false));
+        assert!(!color_enabled_for_terminal(ColorMode::Off, true));
     }
 
     #[test]

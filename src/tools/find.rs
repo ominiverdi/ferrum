@@ -1,10 +1,18 @@
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 const DEFAULT_LIMIT: usize = 1000;
 const MAX_LIMIT: usize = 10_000;
+const FIND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct FindOptions<'a> {
@@ -14,7 +22,26 @@ pub struct FindOptions<'a> {
     pub limit: Option<usize>,
 }
 
+#[cfg(test)]
 pub fn find(root: &Path, options: FindOptions<'_>) -> Result<String> {
+    find_with_cancel(root, options, None)
+}
+
+pub fn find_with_cancel(
+    root: &Path,
+    options: FindOptions<'_>,
+    cancel: Option<&Arc<AtomicBool>>,
+) -> Result<String> {
+    find_with_deadline(root, options, cancel, Instant::now() + FIND_TIMEOUT)
+}
+
+fn find_with_deadline(
+    root: &Path,
+    options: FindOptions<'_>,
+    cancel: Option<&Arc<AtomicBool>>,
+    deadline: Instant,
+) -> Result<String> {
+    check_control(cancel, deadline)?;
     let limit = options.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let matcher = build_matcher(options.pattern)?;
     let root = root
@@ -36,6 +63,7 @@ pub fn find(root: &Path, options: FindOptions<'_>) -> Result<String> {
         .filter_entry(|entry| !should_skip_entry(entry.path()));
 
     for entry in walker.build() {
+        check_control(cancel, deadline)?;
         let entry = entry.with_context(|| format!("failed to walk {}", root.display()))?;
         let path = entry.path();
         if path == root || !path.is_file() {
@@ -63,6 +91,16 @@ pub fn find(root: &Path, options: FindOptions<'_>) -> Result<String> {
         ));
     }
     Ok(output)
+}
+
+fn check_control(cancel: Option<&Arc<AtomicBool>>, deadline: Instant) -> Result<()> {
+    if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        anyhow::bail!("aborted");
+    }
+    if Instant::now() >= deadline {
+        anyhow::bail!("find timed out after {} seconds", FIND_TIMEOUT.as_secs());
+    }
+    Ok(())
 }
 
 fn build_matcher(pattern: Option<&str>) -> Result<Option<GlobSet>> {
@@ -201,5 +239,41 @@ mod tests {
         )
         .unwrap();
         assert_eq!(output, "kept.log");
+    }
+
+    #[test]
+    fn deadline_stops_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = find_with_deadline(
+            temp.path(),
+            FindOptions {
+                pattern: None,
+                name: None,
+                extension: None,
+                limit: None,
+            },
+            None,
+            Instant::now(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("find timed out"));
+    }
+
+    #[test]
+    fn cancellation_stops_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let error = find_with_cancel(
+            temp.path(),
+            FindOptions {
+                pattern: None,
+                name: None,
+                extension: None,
+                limit: None,
+            },
+            Some(&cancel),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "aborted");
     }
 }

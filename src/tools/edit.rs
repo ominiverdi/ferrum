@@ -1,6 +1,7 @@
+use crate::atomic_file;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::{fs, path::Path};
+use std::path::Path;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EditSpec {
@@ -9,8 +10,7 @@ pub struct EditSpec {
 }
 
 pub fn replace_exact(path: &Path, edits: &[EditSpec]) -> Result<String> {
-    let original =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let (original, identity) = atomic_file::read_text_with_identity(path)?;
     let replacements = validate_edits(&original, edits)?;
 
     let mut output = String::with_capacity(original.len());
@@ -29,7 +29,8 @@ pub fn replace_exact(path: &Path, edits: &[EditSpec]) -> Result<String> {
         );
     }
 
-    fs::write(path, output).with_context(|| format!("failed to write {}", path.display()))?;
+    atomic_file::replace(path, output.as_bytes(), Some(identity))
+        .with_context(|| format!("failed to write {}", path.display()))?;
     Ok(format!(
         "applied {} edit(s) to {}",
         edits.len(),
@@ -75,6 +76,7 @@ fn validate_edits(original: &str, edits: &[EditSpec]) -> Result<Vec<(usize, usiz
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn applies_multiple_non_overlapping_edits() {

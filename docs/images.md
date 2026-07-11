@@ -10,11 +10,13 @@ Status: early feature.
 - JPEG
 - WebP
 
-Maximum image size:
+Per-image decoded and encoded payload limit:
 
 ```text
-10 MB
+10 MiB
 ```
+
+Per-turn limits are 8 images and 20 MiB decoded plus the corresponding base64 budget. Retained session context is limited to 32 images and 64 MiB decoded plus base64. A multi-image attachment is transactional: Ferrum queues none of the batch unless every image and the aggregate pass validation.
 
 ## CLI
 
@@ -30,7 +32,7 @@ Attach multiple images:
 ferrum --image ./before.png --image ./after.png -p "compare these"
 ```
 
-Ferrum also detects image paths or `data:image/...;base64,...` blocks pasted into the prompt and attaches them automatically.
+Ferrum validates actual PNG, JPEG, or WebP decodability under decoder dimension and allocation limits; a matching filename or signature alone is insufficient. It also detects image paths or `data:image/...;base64,...` blocks pasted into the prompt and attaches them automatically.
 
 ## Interactive mode
 
@@ -56,7 +58,7 @@ You can also paste one or more image file paths directly into the prompt. Ferrum
 
 If your terminal or file manager pastes images as `data:image/...;base64,...`, Ferrum creates a temporary preview file on the fly and attaches the image.
 
-If your terminal sends Ctrl+V as a key sequence instead of text, Ferrum attempts to read the clipboard image with `xclip` on X11 or `wl-paste` on Wayland, writes it to `/tmp/ferrum-clipboard-<hash>.<ext>`, and processes that generated path like a normal pasted image path.
+If your terminal sends Ctrl+V as a key sequence instead of text, Ferrum attempts to read the clipboard image with `xclip` on X11 or `wl-paste` on Wayland, writes it to a private Ferrum temporary directory, and processes that generated path like a normal pasted image path. Clipboard helpers have a 5-second deadline and a 10 MiB output cap.
 
 ## Preview
 
@@ -68,7 +70,7 @@ Ferrum previews images when attaching them:
    - iTerm2: iTerm inline image protocol
    - foot/mlterm/WezTerm or sixel-marked terminals: sixel output
 3. If high-resolution rendering is unavailable or fails, Ferrum falls back to `chafa` symbol rendering.
-4. For pasted data URIs, Ferrum creates a temporary image file for the preview and deletes it afterwards.
+4. Ferrum previews a private copy of already validated bytes rather than reopening the original path. `chafa` has a 10-second deadline and a 2 MiB output cap; temporary preview files are deleted afterwards.
 5. If preview rendering is unavailable, Ferrum prints fallback metadata:
 
 ```text

@@ -2,9 +2,10 @@ pub mod messages;
 pub mod tools;
 
 use crate::{
-    cancel,
+    atomic_file, cancel,
     config::{ColorMode, Config, DiffMode, SafetyLevel, ToolSelection},
-    context, mcp, providers, session, skills, tools as builtin_tools, ui_colors, usage,
+    context, mcp, providers, session, skills, terminal_text, tools as builtin_tools, ui_colors,
+    usage,
 };
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -24,10 +25,13 @@ use rustyline::{
 use similar::{ChangeTag, TextDiff};
 use std::{
     collections::{HashMap, HashSet},
-    fmt::Write as FmtWrite,
+    fmt::{Display, Write as FmtWrite},
     fs::{self, OpenOptions},
-    io::{self, IsTerminal, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    io::{self, IsTerminal, Read, Write},
+    os::unix::{
+        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        process::CommandExt,
+    },
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -52,6 +56,15 @@ const REPEATED_TOOL_NUDGE_LIMIT: usize = 4;
 const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
 const CONSECUTIVE_ERROR_NUDGE_LIMIT: usize = 5;
 const CONSECUTIVE_ERROR_FORCE_LIMIT: usize = 8;
+const MAX_IMAGES_PER_TURN: usize = 8;
+const MAX_IMAGE_BYTES_PER_TURN: usize = 20 * 1024 * 1024;
+const MAX_IMAGE_BASE64_BYTES_PER_TURN: usize = MAX_IMAGE_BYTES_PER_TURN.div_ceil(3) * 4;
+const MAX_IMAGES_PER_SESSION: usize = 32;
+const MAX_IMAGE_BYTES_PER_SESSION: usize = 64 * 1024 * 1024;
+const MAX_IMAGE_BASE64_BYTES_PER_SESSION: usize = MAX_IMAGE_BYTES_PER_SESSION.div_ceil(3) * 4;
+const CLIPBOARD_HELPER_TIMEOUT: Duration = Duration::from_secs(5);
+const PREVIEW_HELPER_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_PREVIEW_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default)]
 struct FerrumLineHelper {
@@ -90,7 +103,7 @@ impl Hinter for FerrumLineHelper {
                 .find(|name| name.starts_with(prefix))
                 .and_then(|name| name.strip_prefix(prefix))
                 .filter(|rest| !rest.is_empty())
-                .map(str::to_string);
+                .map(terminal_text::sanitize);
         }
         if line.chars().last().is_some_and(char::is_whitespace) {
             return None;
@@ -277,6 +290,7 @@ fn palette_list_hint(names: &[String]) -> String {
         return " <name>".to_string();
     }
     let joined = names.iter().take(8).cloned().collect::<Vec<_>>().join("|");
+    let joined = terminal_text::sanitize(&joined);
     if names.len() > 8 {
         format!(" {joined}|...")
     } else {
@@ -356,11 +370,11 @@ fn print_palette_list(config_dir: &Path) -> Result<()> {
     if names.is_empty() {
         println!(
             "no palettes found in {}",
-            config_dir.join("color-palettes").display()
+            terminal_text::sanitize(&config_dir.join("color-palettes").display().to_string())
         );
     } else {
         for name in names {
-            println!("{name}");
+            println!("{}", terminal_text::sanitize(&name));
         }
     }
     Ok(())
@@ -394,15 +408,18 @@ fn apply_palette(name: &str, config: &mut Config, state: &mut AgentState) -> Res
     fs::create_dir_all(&config.config_dir)
         .with_context(|| format!("failed to create {}", config.config_dir.display()))?;
     let colors_path = config.config_dir.join("colors.toml");
-    fs::write(&colors_path, text)
+    let expected = atomic_file::target_identity(&colors_path)?;
+    atomic_file::replace(&colors_path, text.as_bytes(), expected)
         .with_context(|| format!("failed to write {}", colors_path.display()))?;
     config.colors = palette.clone();
     state.colors = palette;
     println!(
         "palette: {}",
-        path.file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or(name)
+        terminal_text::sanitize(
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(name)
+        )
     );
     Ok(())
 }
@@ -423,7 +440,7 @@ fn complete_from_owned_words(prefix: &str, words: &[String]) -> Vec<Pair> {
         .iter()
         .filter(|word| word.starts_with(prefix))
         .map(|word| Pair {
-            display: word.clone(),
+            display: terminal_text::sanitize(word),
             replacement: word.clone(),
         })
         .collect()
@@ -459,7 +476,7 @@ fn complete_path_candidates(prefix: &str) -> Vec<Pair> {
             replacement.push('/');
         }
         matches.push(Pair {
-            display: replacement.clone(),
+            display: terminal_text::sanitize(&replacement),
             replacement,
         });
     }
@@ -566,7 +583,7 @@ pub async fn run_interactive(
     loop {
         let prompt = state
             .colors
-            .paint(ColorToken::Prompt, state.color_mode, "ferrum> ");
+            .paint_stdout(ColorToken::Prompt, state.color_mode, "ferrum> ");
         match rl.readline(&prompt) {
             Ok(line) => {
                 let input = line.trim();
@@ -589,7 +606,7 @@ pub async fn run_interactive(
                             return Ok(());
                         }
                         Err(error) => {
-                            eprintln!("Error: {error}");
+                            render_error(&error);
                             continue;
                         }
                     }
@@ -598,9 +615,9 @@ pub async fn run_interactive(
                     match state.expand_skill_prompt(name, args.as_deref()) {
                         Ok(prompt) => match state.run_turn(prompt, config, true).await {
                             Ok(()) => render_prompt_separator(state.color_mode, &state.colors),
-                            Err(error) => eprintln!("Error: {error}"),
+                            Err(error) => render_error(&error),
                         },
-                        Err(error) => eprintln!("Error: {error}"),
+                        Err(error) => render_error(&error),
                     }
                     continue;
                 }
@@ -618,15 +635,15 @@ pub async fn run_interactive(
                             notices,
                         })) => {
                             for notice in notices {
-                                println!("{notice}");
+                                println!("{}", terminal_text::sanitize(&notice));
                             }
-                            println!("models from {source}:");
+                            println!("models from {}:", terminal_text::sanitize(&source));
                             for model in models {
                                 let marker = if model == config.model { "*" } else { " " };
-                                println!("{marker} {model}");
+                                println!("{marker} {}", terminal_text::sanitize(&model));
                             }
                         }
-                        Ok(Err(error)) => eprintln!("Error: {error}"),
+                        Ok(Err(error)) => render_error(&error),
                     }
                     continue;
                 }
@@ -652,7 +669,7 @@ pub async fn run_interactive(
                             "compaction skipped: {reason} ({before_tokens} -> {after_tokens} estimated tokens)"
                         ),
                         Err(error) if error.to_string() == "aborted" => println!("aborted"),
-                        Err(error) => eprintln!("Error: {error}"),
+                        Err(error) => render_error(&error),
                     }
                     continue;
                 }
@@ -665,7 +682,7 @@ pub async fn run_interactive(
                             return Ok(());
                         }
                         Err(error) => {
-                            eprintln!("Error: {error}");
+                            render_error(&error);
                             continue;
                         }
                     }
@@ -679,7 +696,7 @@ pub async fn run_interactive(
                             }
                         }
                         Err(error) => {
-                            eprintln!("Error: {error}");
+                            render_error(&error);
                             continue;
                         }
                     }
@@ -687,7 +704,7 @@ pub async fn run_interactive(
                 match state.run_turn(prompt, config, true).await {
                     Ok(()) => render_prompt_separator(state.color_mode, &state.colors),
                     Err(error) => {
-                        eprintln!("Error: {error}");
+                        render_error(&error);
                         continue;
                     }
                 }
@@ -876,7 +893,10 @@ fn append_usage_record_with_warning(data_dir: &Path, record: &usage::UsageRecord
     if let Err(error) = usage::append_usage_record(data_dir, record)
         && !USAGE_WARNING_PRINTED.swap(true, Ordering::Relaxed)
     {
-        eprintln!("[usage] failed to persist usage: {error}");
+        eprintln!(
+            "[usage] failed to persist usage: {}",
+            terminal_text::sanitize(&error.to_string())
+        );
     }
 }
 
@@ -1009,6 +1029,7 @@ impl Drop for ActiveTurnAbort {
 struct LiveRenderState {
     color_mode: ColorMode,
     colors: ColorPalette,
+    terminal_sanitizer: terminal_text::Sanitizer,
     thinking_started: bool,
     text_started: bool,
     text_ended_with_newline: bool,
@@ -1019,6 +1040,7 @@ impl LiveRenderState {
         Self {
             color_mode,
             colors,
+            terminal_sanitizer: terminal_text::Sanitizer::default(),
             thinking_started: false,
             text_started: false,
             text_ended_with_newline: false,
@@ -1028,6 +1050,7 @@ impl LiveRenderState {
     fn render_event(&mut self, event: providers::StreamEvent) -> Result<()> {
         match event {
             providers::StreamEvent::ThinkingDelta(delta) => {
+                let delta = self.terminal_sanitizer.push(&delta);
                 if !self.thinking_started {
                     self.thinking_started = true;
                     print_raw_mode_text_styled(
@@ -1045,6 +1068,7 @@ impl LiveRenderState {
                 );
             }
             providers::StreamEvent::TextDelta(delta) => {
+                let delta = self.terminal_sanitizer.push(&delta);
                 if !self.text_started {
                     self.text_started = true;
                     if self.thinking_started {
@@ -1085,12 +1109,15 @@ fn print_raw_mode_text_styled(
     colors: &ColorPalette,
 ) {
     let text = text.replace('\n', "\r\n");
-    let (prefix, suffix) = colors.prefix_suffix(token, color_mode);
+    let (prefix, suffix) = colors.prefix_suffix_stdout(token, color_mode);
     print!("{prefix}{text}{suffix}");
 }
 
 fn render_hr(color_mode: ColorMode, colors: &ColorPalette) {
-    println!("{}", colors.paint(ColorToken::Hr, color_mode, "------"));
+    println!(
+        "{}",
+        colors.paint_stdout(ColorToken::Hr, color_mode, "------")
+    );
 }
 
 fn render_turn_separator(color_mode: ColorMode, colors: &ColorPalette) {
@@ -1101,7 +1128,10 @@ fn render_turn_separator(color_mode: ColorMode, colors: &ColorPalette) {
 fn render_status_notice(message: &str, color_mode: ColorMode, colors: &ColorPalette) {
     println!();
     render_hr(color_mode, colors);
-    println!("{}", colors.paint(ColorToken::Status, color_mode, message));
+    println!(
+        "{}",
+        colors.paint_stdout(ColorToken::Status, color_mode, message)
+    );
     render_hr(color_mode, colors);
 }
 
@@ -1125,11 +1155,11 @@ fn render_assistant_response(
     if interactive && !summary.trim().is_empty() {
         println!(
             "{}",
-            colors.paint(ColorToken::Thinking, output_color_mode, "thinking:")
+            colors.paint_stdout(ColorToken::Thinking, output_color_mode, "thinking:")
         );
         println!(
             "{}",
-            colors.paint(ColorToken::Thinking, output_color_mode, summary.trim())
+            colors.paint_stdout(ColorToken::Thinking, output_color_mode, summary.trim())
         );
         println!();
         render_hr(output_color_mode, colors);
@@ -1137,7 +1167,7 @@ fn render_assistant_response(
     let text = response.display_text();
     print!(
         "{}",
-        colors.paint(ColorToken::Assistant, output_color_mode, &text)
+        colors.paint_stdout(ColorToken::Assistant, output_color_mode, &text)
     );
     if !text.ends_with('\n') {
         println!();
@@ -1686,6 +1716,7 @@ impl AgentState {
     }
 
     async fn run_turn(&mut self, prompt: String, config: &Config, interactive: bool) -> Result<()> {
+        validate_image_attachment_budget(&self.messages, &self.pending_images, &[])?;
         let images = std::mem::take(&mut self.pending_images);
         let user = if images.is_empty() {
             messages::Message::text(messages::Role::User, prompt)
@@ -1794,7 +1825,10 @@ impl AgentState {
                             "[session] compacted context after overflow: {before_tokens} -> {after_tokens} estimated tokens"
                         ),
                         CompactionOutcome::Skipped { reason, .. } => {
-                            eprintln!("[session] overflow recovery compaction skipped: {reason}")
+                            eprintln!(
+                                "[session] overflow recovery compaction skipped: {}",
+                                terminal_text::sanitize(&reason)
+                            )
                         }
                     }
                     continue;
@@ -1897,7 +1931,7 @@ impl AgentState {
                             "Adaptive loop guard: {reason}. Do not repeat the same failed or redundant action. Use existing tool results, choose a different concrete action, or finish with a concise summary if enough evidence is available."
                         ),
                     );
-                    eprintln!("[loop-guard] {reason}");
+                    eprintln!("[loop-guard] {}", terminal_text::sanitize(&reason));
                     self.session.append_message(&message)?;
                     self.messages.push(message);
                 }
@@ -1905,7 +1939,10 @@ impl AgentState {
             }
         };
 
-        eprintln!("[loop-guard] stopped tool use: {force_final_reason}");
+        eprintln!(
+            "[loop-guard] stopped tool use: {}",
+            terminal_text::sanitize(&force_final_reason)
+        );
         let final_instruction = messages::Message::text(
             messages::Role::System,
             format!(
@@ -2056,30 +2093,50 @@ impl AgentState {
 
     fn attach_clipboard_image(&mut self) -> Result<()> {
         let image = read_clipboard_image()?;
-        preview_attached_image(None, &image);
+        validate_image_attachment_budget(
+            &self.messages,
+            &self.pending_images,
+            std::slice::from_ref(&image),
+        )?;
+        preview_attached_image(&image);
         self.pending_images.push(image);
         eprintln!("[image] attached clipboard image");
         Ok(())
     }
 
     fn attach_images(&mut self, specs: Vec<String>) -> Result<()> {
+        let mut loaded = Vec::with_capacity(specs.len());
+        let mut temp_paths = PendingTempImages::default();
         for spec in specs {
             if spec.starts_with("data:image/") {
-                let image = messages::image_from_data_uri(&spec)?;
-                preview_attached_image(None, &image);
-                self.pending_images.push(image);
-                eprintln!("[image] attached pasted image");
+                loaded.push((
+                    messages::image_from_data_uri(&spec)?,
+                    "pasted image".to_string(),
+                ));
                 continue;
             }
 
             let path_spec = ui_path_argument(&spec, &self.cwd);
             let resolved = builtin_tools::path::resolve_to_cwd(&path_spec, &self.cwd)?;
+            if is_ferrum_temp_image_path(&resolved) {
+                temp_paths.0.push(resolved.clone());
+            }
             let image = messages::image_from_path(&resolved)?;
-            preview_attached_image(Some(&resolved), &image);
-            self.pending_images.push(image);
-            eprintln!("[image] attached {}", resolved.display());
-            remove_if_ferrum_temp_image(&resolved);
+            loaded.push((image, resolved.display().to_string()));
         }
+
+        validate_image_attachment_budget_iter(
+            &self.messages,
+            &self.pending_images,
+            loaded.iter().map(|(image, _)| image),
+        )?;
+
+        for (image, source) in &loaded {
+            preview_attached_image(image);
+            eprintln!("[image] attached {}", terminal_text::sanitize(source));
+        }
+        self.pending_images
+            .extend(loaded.into_iter().map(|(image, _)| image));
         Ok(())
     }
 
@@ -2136,7 +2193,10 @@ impl AgentState {
         println!("configured_servers: {configured}");
         println!("configured_enabled_servers: {configured_enabled}");
         if let Some(allow) = &config.mcp_server_allow {
-            println!("server_filter: {}", allow.join(","));
+            println!(
+                "server_filter: {}",
+                terminal_text::sanitize(&allow.join(","))
+            );
         }
         println!("connected: {}", self.mcp.is_some());
         println!("native_tools: {}", native_tools.len());
@@ -2146,7 +2206,11 @@ impl AgentState {
         if !configured_servers.is_empty() {
             println!("servers:");
             for server in &configured_servers {
-                println!("- {} enabled={}", server.name, server.enabled);
+                println!(
+                    "- {} enabled={}",
+                    terminal_text::sanitize(&server.name),
+                    server.enabled
+                );
             }
         }
     }
@@ -2464,7 +2528,11 @@ impl AgentState {
                 "[session] compacted message estimate: {before_tokens} -> {after_tokens} tokens"
             ),
             CompactionOutcome::Skipped { reason, .. } => {
-                eprintln!("[session] compaction skipped before {phase}: {reason}")
+                eprintln!(
+                    "[session] compaction skipped before {}: {}",
+                    terminal_text::sanitize(phase),
+                    terminal_text::sanitize(&reason)
+                )
             }
         }
 
@@ -2641,7 +2709,10 @@ impl AgentState {
             if query.is_empty() {
                 println!("Recent sessions in {}\n", self.cwd.display());
             } else {
-                println!("Recent sessions matching '{query}'\n");
+                println!(
+                    "Recent sessions matching '{}'\n",
+                    terminal_text::sanitize(&query)
+                );
             }
             if filtered.is_empty() {
                 println!("No matching sessions");
@@ -2673,7 +2744,10 @@ impl AgentState {
             if query.is_empty() {
                 println!("Recent sessions in {}\n", self.cwd.display());
             } else {
-                println!("Recent sessions matching '{query}'\n");
+                println!(
+                    "Recent sessions matching '{}'\n",
+                    terminal_text::sanitize(&query)
+                );
             }
             if filtered.is_empty() {
                 println!("No matching sessions");
@@ -2863,7 +2937,7 @@ fn render_tool_call(
             if let Some(command) = input.get("command").and_then(|value| value.as_str()) {
                 eprintln!("command:");
                 for line in command.lines() {
-                    eprintln!("  {line}");
+                    eprintln!("  {}", terminal_text::sanitize(line));
                 }
             }
             if let Some(timeout) = input
@@ -2874,7 +2948,10 @@ fn render_tool_call(
             }
         }
         "read" => {
-            eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            eprintln!(
+                "path: {}",
+                &terminal_text::sanitize(json_str(input, "path").unwrap_or("<missing>"))
+            );
             if let Some(offset) = input.get("offset").and_then(|value| value.as_u64()) {
                 eprintln!("offset: {offset}");
             }
@@ -2883,7 +2960,10 @@ fn render_tool_call(
             }
         }
         "ls" => {
-            eprintln!("path: {}", json_str(input, "path").unwrap_or("."));
+            eprintln!(
+                "path: {}",
+                &terminal_text::sanitize(json_str(input, "path").unwrap_or("."))
+            );
             if let Some(limit) = input.get("limit").and_then(|value| value.as_u64()) {
                 eprintln!("limit: {limit}");
             }
@@ -2891,11 +2971,14 @@ fn render_tool_call(
         "grep" => {
             eprintln!(
                 "pattern: {}",
-                json_str(input, "pattern").unwrap_or("<missing>")
+                terminal_text::sanitize(json_str(input, "pattern").unwrap_or("<missing>"))
             );
-            eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            eprintln!(
+                "path: {}",
+                &terminal_text::sanitize(json_str(input, "path").unwrap_or("<missing>"))
+            );
             if let Some(glob) = json_str(input, "glob") {
-                eprintln!("glob: {glob}");
+                eprintln!("glob: {}", terminal_text::sanitize(glob));
             }
             if let Some(ignore_case) = input.get("ignore_case").and_then(|value| value.as_bool()) {
                 eprintln!("ignore_case: {ignore_case}");
@@ -2911,22 +2994,28 @@ fn render_tool_call(
             }
         }
         "find" => {
-            eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            eprintln!(
+                "path: {}",
+                &terminal_text::sanitize(json_str(input, "path").unwrap_or("<missing>"))
+            );
             if let Some(pattern) = json_str(input, "pattern") {
-                eprintln!("pattern: {pattern}");
+                eprintln!("pattern: {}", terminal_text::sanitize(pattern));
             }
             if let Some(name) = json_str(input, "name") {
-                eprintln!("name: {name}");
+                eprintln!("name: {}", terminal_text::sanitize(name));
             }
             if let Some(extension) = json_str(input, "extension") {
-                eprintln!("extension: {extension}");
+                eprintln!("extension: {}", terminal_text::sanitize(extension));
             }
             if let Some(limit) = input.get("limit").and_then(|value| value.as_u64()) {
                 eprintln!("limit: {limit}");
             }
         }
         "write" => {
-            eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+            eprintln!(
+                "path: {}",
+                &terminal_text::sanitize(json_str(input, "path").unwrap_or("<missing>"))
+            );
             if let Some(content) = json_str(input, "content") {
                 eprintln!(
                     "content: {} lines, {} bytes",
@@ -2935,7 +3024,10 @@ fn render_tool_call(
                 );
                 let preview = truncate_chars(content, TOOL_PREVIEW_MAX_CHARS);
                 if !preview.is_empty() {
-                    eprintln!("preview:\n{}", indent_block(&preview));
+                    eprintln!(
+                        "preview:\n{}",
+                        indent_block(&terminal_text::sanitize(&preview))
+                    );
                     if content.chars().count() > TOOL_PREVIEW_MAX_CHARS {
                         eprintln!("  [content truncated for display]");
                     }
@@ -2946,7 +3038,10 @@ fn render_tool_call(
         _ => {
             let rendered =
                 serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
-            eprintln!("args:\n{}", indent_block(&rendered));
+            eprintln!(
+                "args:\n{}",
+                indent_block(&terminal_text::sanitize(&rendered))
+            );
         }
     }
 }
@@ -2957,27 +3052,33 @@ fn render_edit_call(
     color_mode: ColorMode,
     colors: &ColorPalette,
 ) {
-    eprintln!("path: {}", json_str(input, "path").unwrap_or("<missing>"));
+    eprintln!(
+        "path: {}",
+        &terminal_text::sanitize(json_str(input, "path").unwrap_or("<missing>"))
+    );
     eprintln!("diff: {}", diff_mode.as_str());
     let Some(edits) = input.get("edits").and_then(|value| value.as_array()) else {
         let rendered = serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
-        eprintln!("args:\n{}", indent_block(&rendered));
+        eprintln!(
+            "args:\n{}",
+            indent_block(&terminal_text::sanitize(&rendered))
+        );
         return;
     };
 
     eprintln!("edits: {}", edits.len());
     for (index, edit) in edits.iter().enumerate() {
-        let old_text = json_str(edit, "old_text").unwrap_or("");
-        let new_text = json_str(edit, "new_text").unwrap_or("");
+        let old_text = terminal_text::sanitize(json_str(edit, "old_text").unwrap_or(""));
+        let new_text = terminal_text::sanitize(json_str(edit, "new_text").unwrap_or(""));
         eprintln!();
         eprintln!("edit {}:", index + 1);
         match diff_mode {
-            DiffMode::Unified => render_unified_diff(old_text, new_text, 3, color_mode, colors),
-            DiffMode::Compact => render_unified_diff(old_text, new_text, 1, color_mode, colors),
-            DiffMode::Full => render_full_diff(old_text, new_text, color_mode, colors),
-            DiffMode::Words => render_word_diff(old_text, new_text, color_mode, colors),
+            DiffMode::Unified => render_unified_diff(&old_text, &new_text, 3, color_mode, colors),
+            DiffMode::Compact => render_unified_diff(&old_text, &new_text, 1, color_mode, colors),
+            DiffMode::Full => render_full_diff(&old_text, &new_text, color_mode, colors),
+            DiffMode::Words => render_word_diff(&old_text, &new_text, color_mode, colors),
             DiffMode::SideBySide => {
-                render_side_by_side_diff(old_text, new_text, color_mode, colors)
+                render_side_by_side_diff(&old_text, &new_text, color_mode, colors)
             }
         }
     }
@@ -3364,6 +3465,10 @@ fn blocked_tool_reason<'a>(name: &str, content: &'a str) -> Option<&'a str> {
     }
 }
 
+fn render_error(error: &dyn Display) {
+    eprintln!("Error: {}", terminal_text::sanitize(&error.to_string()));
+}
+
 fn json_str<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     input.get(key).and_then(|value| value.as_str())
 }
@@ -3376,16 +3481,17 @@ fn indent_block(text: &str) -> String {
 }
 
 fn print_session_title(title: &str, color_mode: ColorMode, colors: &ColorPalette) {
+    let title = terminal_text::sanitize(title);
     println!();
     println!(
         "{} {title}",
-        colors.paint(ColorToken::Highlight, color_mode, "title:")
+        colors.paint_stdout(ColorToken::Highlight, color_mode, "title:")
     );
     render_hr(color_mode, colors);
 }
 
 fn set_terminal_title(title: &str) -> Result<()> {
-    let title = title.replace(['\x1b', '\x07'], "");
+    let title = terminal_text::sanitize_title(title);
     print!("\x1b]0;Ferrum: {title}\x07");
     io::stdout().flush()?;
     Ok(())
@@ -3431,13 +3537,15 @@ fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &P
             .last_compaction_timestamp_ms
             .map(|timestamp| format!(" compacted={}", format_timestamp_ms(timestamp)))
             .unwrap_or_default();
+        let provider_model = terminal_text::sanitize(&provider_model);
+        let title = terminal_text::sanitize(&session.title);
         println!(
             "[{}] {marker} {:>4} {:<22} {:<28} {}{}",
             index + 1,
             age,
             truncate_chars(&message_label, 22).replace('\n', " "),
             truncate_chars(&provider_model, 28).replace('\n', " "),
-            session.title,
+            title,
             compaction_label
         );
     }
@@ -3466,7 +3574,10 @@ fn print_usage_summary(period: usage::UsagePeriod, rows: &[usage::UsageSummaryRo
     for row in rows {
         println!(
             "{:<32} {:>4} {:>9} {:>10} {:>10} {:>8} {:>10}",
-            truncate_chars(&format!("{}/{}", row.provider, row.model), 32),
+            truncate_chars(
+                &terminal_text::sanitize(&format!("{}/{}", row.provider, row.model)),
+                32,
+            ),
             row.summary.requests,
             format!(
                 "{}/{}/{}",
@@ -3507,14 +3618,14 @@ fn print_recent_conversation_lines(
     println!();
     println!(
         "{}",
-        colors.paint(
+        colors.paint_stdout(
             ColorToken::Highlight,
             color_mode,
             format!("Recent conversation ({}):", current_preview_timestamp())
         )
     );
     for line in lines {
-        println!("{line}");
+        println!("{}", terminal_text::sanitize(&line));
     }
     render_hr(color_mode, colors);
 }
@@ -3891,6 +4002,20 @@ mod context_pressure_tests {
             helper.hint("/palette cat", "/palette cat".len(), &ctx),
             Some("ppuccin".to_string())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_temp_directory_rejects_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let link = temp.path().join("link");
+        std::fs::create_dir(&real).unwrap();
+        symlink(&real, &link).unwrap();
+        let metadata = std::fs::symlink_metadata(&link).unwrap();
+        let error = validate_private_temp_dir(&link, &metadata).unwrap_err();
+        assert!(error.to_string().contains("not a real directory"));
     }
 
     #[test]
@@ -4899,6 +5024,81 @@ mod context_pressure_tests {
         assert!(servers.is_empty());
     }
 
+    #[test]
+    fn image_aggregate_count_limit_is_enforced() {
+        let incoming = (0..=MAX_IMAGES_PER_TURN)
+            .map(|index| messages::ContentBlock::Image {
+                mime_type: "image/png".to_string(),
+                data_base64: "AA==".to_string(),
+                sha256: format!("{index}"),
+                source: "test".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let error = validate_image_attachment_budget(&[], &[], &incoming).unwrap_err();
+        assert!(error.to_string().contains("per-turn limit"));
+    }
+
+    #[test]
+    fn image_aggregate_byte_limit_is_enforced() {
+        let incoming = vec![messages::ContentBlock::Image {
+            mime_type: "image/png".to_string(),
+            data_base64: "A".repeat(MAX_IMAGE_BASE64_BYTES_PER_TURN + 4),
+            sha256: "test".to_string(),
+            source: "test".to_string(),
+        }];
+        let error = validate_image_attachment_budget(&[], &[], &incoming).unwrap_err();
+        assert!(error.to_string().contains("per-turn byte limit"));
+    }
+
+    #[test]
+    fn multi_image_attachment_is_transactional() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().join("config"));
+        std::fs::create_dir_all(&config.config_dir).unwrap();
+        let valid = temp.path().join("valid.png");
+        let invalid = temp.path().join("invalid.png");
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(1, 1)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&valid, bytes.into_inner()).unwrap();
+        std::fs::write(&invalid, b"not an image").unwrap();
+        let mut state = AgentState::new(&config).unwrap();
+
+        let error = state
+            .attach_images(vec![
+                valid.display().to_string(),
+                invalid.display().to_string(),
+            ])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported image type"));
+        assert!(state.pending_images.is_empty());
+    }
+
+    #[test]
+    fn bounded_helper_enforces_timeout_and_output_cap() {
+        let timeout = run_helper_bounded("sh", &["-c", "sleep 1"], Duration::from_millis(30), 16)
+            .unwrap_err();
+        assert!(timeout.to_string().contains("timed out"));
+
+        let holder_started = Instant::now();
+        let holder = run_helper_bounded(
+            "sh",
+            &["-c", "sleep 5 & exit 0"],
+            Duration::from_secs(1),
+            16,
+        )
+        .unwrap_err();
+        assert!(holder.to_string().contains("output did not close"));
+        assert!(holder_started.elapsed() < Duration::from_secs(2));
+
+        let oversized =
+            run_helper_bounded("sh", &["-c", "printf 123456789"], Duration::from_secs(1), 4)
+                .unwrap_err();
+        assert!(oversized.to_string().contains("exceeded 4 bytes"));
+    }
+
     fn test_config(config_dir: std::path::PathBuf) -> Config {
         Config {
             data_dir: config_dir.clone(),
@@ -5121,7 +5321,10 @@ fn compaction_summary_or_fallback(
         Ok(_) => anyhow::bail!("compaction summary was empty"),
         Err(error) if error.to_string() == "aborted" => Err(error),
         Err(error) if force => {
-            eprintln!("[session] model compaction failed: {error}; using local fallback summary");
+            eprintln!(
+                "[session] model compaction failed: {}; using local fallback summary",
+                terminal_text::sanitize(&error.to_string())
+            );
             Ok(local_compaction_summary(messages, custom_instructions))
         }
         Err(error) => Err(error).context("model compaction failed"),
@@ -5258,7 +5461,7 @@ fn save_history_private(rl: &mut Editor<FerrumLineHelper, DefaultHistory>, path:
         rl.save_history(path)
             .with_context(|| format!("failed to save history file {}", path.display()))
     }) {
-        eprintln!("[history] {error}");
+        eprintln!("[history] {}", terminal_text::sanitize(&error.to_string()));
     }
     let _ = prepare_history_file(path);
 }
@@ -5283,16 +5486,45 @@ fn sanitize_history_input(input: &str) -> String {
 }
 
 fn ferrum_temp_dir() -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("ferrum");
-    fs::create_dir_all(&dir).with_context(|| {
-        format!(
-            "failed to create temporary image directory {}",
-            dir.display()
-        )
-    })?;
+    let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let base = runtime_dir.clone().unwrap_or_else(std::env::temp_dir);
+    let dir = if runtime_dir.is_some() {
+        base.join("ferrum")
+    } else {
+        base.join(format!("ferrum-{}", unsafe { libc::geteuid() }))
+    };
+    match fs::symlink_metadata(&dir) {
+        Ok(metadata) => validate_private_temp_dir(&dir, &metadata)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to create temporary image directory {}",
+                            dir.display()
+                        )
+                    });
+                }
+            }
+            let metadata = fs::symlink_metadata(&dir).with_context(|| {
+                format!(
+                    "failed to inspect temporary image directory {}",
+                    dir.display()
+                )
+            })?;
+            validate_private_temp_dir(&dir, &metadata)?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to inspect temporary image directory {}",
+                    dir.display()
+                )
+            });
+        }
+    }
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).with_context(|| {
         format!(
             "failed to set permissions on temporary image directory {}",
@@ -5300,6 +5532,24 @@ fn ferrum_temp_dir() -> Result<PathBuf> {
         )
     })?;
     Ok(dir)
+}
+
+fn validate_private_temp_dir(dir: &Path, metadata: &fs::Metadata) -> Result<()> {
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "temporary image path is not a real directory: {}",
+            dir.display()
+        );
+    }
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        anyhow::bail!(
+            "temporary image directory is owned by uid {}, expected {effective_uid}: {}",
+            metadata.uid(),
+            dir.display()
+        );
+    }
+    Ok(())
 }
 
 fn write_private_temp_file(prefix: &str, suffix: &str, data: &[u8]) -> Result<PathBuf> {
@@ -5310,16 +5560,24 @@ fn write_private_temp_file(prefix: &str, suffix: &str, data: &[u8]) -> Result<Pa
             .create_new(true)
             .write(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)
         {
             Ok(mut file) => {
-                file.write_all(data)
-                    .with_context(|| format!("failed to write {}", path.display()))?;
-                file.sync_all()
-                    .with_context(|| format!("failed to sync {}", path.display()))?;
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-                    .with_context(|| format!("failed to set permissions on {}", path.display()))?;
-                return Ok(path);
+                let result = (|| {
+                    file.write_all(data)
+                        .with_context(|| format!("failed to write {}", path.display()))?;
+                    file.sync_all()
+                        .with_context(|| format!("failed to sync {}", path.display()))?;
+                    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).with_context(
+                        || format!("failed to set permissions on {}", path.display()),
+                    )?;
+                    Ok(path.clone())
+                })();
+                if result.is_err() {
+                    let _ = fs::remove_file(&path);
+                }
+                return result;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
@@ -5333,6 +5591,17 @@ fn write_private_temp_file(prefix: &str, suffix: &str, data: &[u8]) -> Result<Pa
         "failed to create unique temporary image file in {}",
         dir.display()
     )
+}
+
+#[derive(Default)]
+struct PendingTempImages(Vec<PathBuf>);
+
+impl Drop for PendingTempImages {
+    fn drop(&mut self) {
+        for path in self.0.drain(..) {
+            remove_if_ferrum_temp_image(&path);
+        }
+    }
 }
 
 fn is_ferrum_temp_image_path(path: &Path) -> bool {
@@ -5351,11 +5620,14 @@ fn replace_paste_image_triggers(input: &str) -> String {
         while output.contains(trigger) {
             match save_clipboard_image_to_temp() {
                 Ok(path) => {
-                    eprintln!("[image] clipboard saved as {}", path.display());
+                    eprintln!(
+                        "[image] clipboard saved as {}",
+                        terminal_text::sanitize(&path.display().to_string())
+                    );
                     output = output.replacen(trigger, &format!(" {} ", path.display()), 1);
                 }
                 Err(error) => {
-                    eprintln!("Error: {error}");
+                    render_error(&error);
                     output = output.replacen(trigger, " ", 1);
                 }
             }
@@ -5510,6 +5782,73 @@ fn looks_like_image_path(path: &str) -> bool {
                 || lower.contains(".webp"))
 }
 
+fn validate_image_attachment_budget(
+    messages: &[messages::Message],
+    pending: &[messages::ContentBlock],
+    incoming: &[messages::ContentBlock],
+) -> Result<()> {
+    validate_image_attachment_budget_iter(messages, pending, incoming.iter())
+}
+
+fn validate_image_attachment_budget_iter<'a>(
+    messages: &[messages::Message],
+    pending: &[messages::ContentBlock],
+    incoming: impl Iterator<Item = &'a messages::ContentBlock>,
+) -> Result<()> {
+    let (pending_count, pending_decoded, pending_encoded) = image_totals(pending.iter());
+    let (incoming_count, incoming_decoded, incoming_encoded) = image_totals(incoming);
+    let turn_count = pending_count.saturating_add(incoming_count);
+    let turn_decoded = pending_decoded.saturating_add(incoming_decoded);
+    let turn_encoded = pending_encoded.saturating_add(incoming_encoded);
+    if turn_count > MAX_IMAGES_PER_TURN {
+        anyhow::bail!(
+            "image attachment count exceeds per-turn limit: {turn_count} > {MAX_IMAGES_PER_TURN}"
+        );
+    }
+    if turn_decoded > MAX_IMAGE_BYTES_PER_TURN || turn_encoded > MAX_IMAGE_BASE64_BYTES_PER_TURN {
+        anyhow::bail!(
+            "image attachments exceed per-turn byte limit: {turn_decoded} decoded / {turn_encoded} encoded bytes"
+        );
+    }
+
+    let historical = messages.iter().flat_map(|message| message.content.iter());
+    let (history_count, history_decoded, history_encoded) = image_totals(historical);
+    let session_count = history_count.saturating_add(turn_count);
+    let session_decoded = history_decoded.saturating_add(turn_decoded);
+    let session_encoded = history_encoded.saturating_add(turn_encoded);
+    if session_count > MAX_IMAGES_PER_SESSION {
+        anyhow::bail!(
+            "image attachment count exceeds retained-session limit: {session_count} > {MAX_IMAGES_PER_SESSION}"
+        );
+    }
+    if session_decoded > MAX_IMAGE_BYTES_PER_SESSION
+        || session_encoded > MAX_IMAGE_BASE64_BYTES_PER_SESSION
+    {
+        anyhow::bail!(
+            "image attachments exceed retained-session byte limit: {session_decoded} decoded / {session_encoded} encoded bytes"
+        );
+    }
+    Ok(())
+}
+
+fn image_totals<'a>(
+    blocks: impl Iterator<Item = &'a messages::ContentBlock>,
+) -> (usize, usize, usize) {
+    blocks.fold(
+        (0usize, 0usize, 0usize),
+        |(count, decoded, encoded), block| {
+            let Some((block_decoded, block_encoded)) = messages::image_storage_bytes(block) else {
+                return (count, decoded, encoded);
+            };
+            (
+                count.saturating_add(1),
+                decoded.saturating_add(block_decoded),
+                encoded.saturating_add(block_encoded),
+            )
+        },
+    )
+}
+
 fn read_clipboard_image() -> Result<messages::ContentBlock> {
     let (mime_type, data) = read_clipboard_image_bytes()?;
     messages::image_from_bytes(mime_type, data, "clipboard".to_string())
@@ -5580,15 +5919,22 @@ fn read_clipboard_image_bytes() -> Result<(String, Vec<u8>)> {
         [wayland_attempts, xclip_attempts].concat()
     };
 
+    let deadline = Instant::now() + CLIPBOARD_HELPER_TIMEOUT;
     for (command, args, mime_type) in attempts {
         if !command_exists(command) {
             continue;
         }
-        let Ok(output) = Command::new(command).args(args).output() else {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let Ok((status, stdout)) =
+            run_helper_bounded(command, args, remaining, messages::MAX_IMAGE_BYTES)
+        else {
             continue;
         };
-        if output.status.success() && !output.stdout.is_empty() {
-            return Ok((mime_type.to_string(), output.stdout));
+        if status.success() && !stdout.is_empty() {
+            return Ok((mime_type.to_string(), stdout));
         }
     }
 
@@ -5597,7 +5943,7 @@ fn read_clipboard_image_bytes() -> Result<(String, Vec<u8>)> {
     )
 }
 
-fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
+fn preview_attached_image(image: &messages::ContentBlock) {
     let messages::ContentBlock::Image {
         mime_type,
         data_base64,
@@ -5610,17 +5956,14 @@ fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
 
     let mut temp_path = None;
     let preview_path = if command_exists("chafa") {
-        if let Some(path) = path {
-            Some(path.to_path_buf())
-        } else {
-            temp_path = write_temp_image(image).ok();
-            temp_path.clone()
-        }
+        temp_path = write_temp_image(image).ok();
+        temp_path.clone()
     } else {
         None
     };
 
     if let Some(path) = preview_path.as_deref() {
+        let preview_deadline = Instant::now() + PREVIEW_HELPER_TIMEOUT;
         if let Some(format) = chafa_pixel_format() {
             let args = vec![
                 format!("--format={format}"),
@@ -5628,7 +5971,11 @@ fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
                 format!("--size={}", chafa_preview_size(true)),
                 "--scale=max".to_string(),
             ];
-            if render_chafa_preview(path, &args) {
+            if render_chafa_preview(
+                path,
+                &args,
+                preview_deadline.saturating_duration_since(Instant::now()),
+            ) {
                 if let Some(path) = temp_path {
                     let _ = fs::remove_file(path);
                 }
@@ -5640,7 +5987,11 @@ fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
             "--format=symbols".to_string(),
             format!("--size={}", chafa_preview_size(false)),
         ];
-        if render_chafa_preview(path, &args) {
+        if render_chafa_preview(
+            path,
+            &args,
+            preview_deadline.saturating_duration_since(Instant::now()),
+        ) {
             if let Some(path) = temp_path {
                 let _ = fs::remove_file(path);
             }
@@ -5658,15 +6009,25 @@ fn preview_attached_image(path: Option<&Path>, image: &messages::ContentBlock) {
         messages::ContentBlock::Image { source, .. } => source.as_str(),
         _ => "image",
     };
+    let source = terminal_text::sanitize(source);
     eprintln!("[image] {source} ({mime_type}, ~{approx_bytes} bytes, sha256:{short_hash})");
 }
 
-fn render_chafa_preview(path: &Path, args: &[String]) -> bool {
-    Command::new("chafa")
-        .args(args)
-        .arg(path)
-        .status()
-        .is_ok_and(|status| status.success())
+fn render_chafa_preview(path: &Path, args: &[String], timeout: Duration) -> bool {
+    if timeout.is_zero() {
+        return false;
+    }
+    let mut helper_args = args.to_vec();
+    helper_args.push(path.display().to_string());
+    let Ok((status, output)) =
+        run_helper_bounded("chafa", &helper_args, timeout, MAX_PREVIEW_OUTPUT_BYTES)
+    else {
+        return false;
+    };
+    if !status.success() {
+        return false;
+    }
+    io::stdout().write_all(&output).is_ok() && io::stdout().flush().is_ok()
 }
 
 fn chafa_preview_size(pixel_graphics: bool) -> String {
@@ -5734,6 +6095,109 @@ fn write_temp_image(image: &messages::ContentBlock) -> Result<PathBuf> {
     )
 }
 
+fn run_helper_bounded<S: AsRef<std::ffi::OsStr>>(
+    command: &str,
+    args: &[S],
+    timeout: Duration,
+    output_limit: usize,
+) -> Result<(std::process::ExitStatus, Vec<u8>)> {
+    use std::process::Stdio;
+    use std::sync::mpsc::{self, TryRecvError};
+
+    let mut child = Command::new(command)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("failed to start {command}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture helper output")?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let mut output = Vec::with_capacity(output_limit.min(64 * 1024).saturating_add(1));
+        let result = stdout
+            .take(output_limit.saturating_add(1) as u64)
+            .read_to_end(&mut output)
+            .map(|_| output);
+        let _ = sender.send(result);
+    });
+    let deadline = Instant::now() + timeout;
+    let mut captured = None;
+    loop {
+        if captured.is_none() {
+            match receiver.try_recv() {
+                Ok(result) => match result {
+                    Ok(output) => captured = Some(output),
+                    Err(error) => {
+                        kill_helper_process_group(&mut child);
+                        let _ = reader.join();
+                        return Err(error).context("failed to read helper output");
+                    }
+                },
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    kill_helper_process_group(&mut child);
+                    anyhow::bail!("helper output reader stopped unexpectedly");
+                }
+            }
+        }
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to inspect helper process")?
+        {
+            let output = match captured {
+                Some(output) => output,
+                None => match receiver.recv_timeout(Duration::from_millis(100)) {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(error)) => {
+                        kill_helper_process_group(&mut child);
+                        let _ = reader.join();
+                        return Err(error).context("failed to read helper output");
+                    }
+                    Err(error) => {
+                        kill_helper_process_group(&mut child);
+                        let _ = reader.join();
+                        anyhow::bail!("helper output did not close: {error}");
+                    }
+                },
+            };
+            let _ = reader.join();
+            if output.len() > output_limit {
+                kill_helper_process_group(&mut child);
+                anyhow::bail!("helper output exceeded {output_limit} bytes");
+            }
+            return Ok((status, output));
+        }
+        if captured
+            .as_ref()
+            .is_some_and(|output| output.len() > output_limit)
+        {
+            kill_helper_process_group(&mut child);
+            let _ = reader.join();
+            anyhow::bail!("helper output exceeded {output_limit} bytes");
+        }
+        if Instant::now() >= deadline {
+            kill_helper_process_group(&mut child);
+            let _ = reader.join();
+            anyhow::bail!("helper timed out after {} seconds", timeout.as_secs());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn kill_helper_process_group(child: &mut std::process::Child) {
+    let process_group = -(child.id() as i32);
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn command_exists(command: &str) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|path| path.join(command).is_file()))
@@ -5785,7 +6249,7 @@ async fn handle_bang_command(
         anyhow::bail!("usage: !<command> or !!<command>");
     }
 
-    eprintln!("[bash] {command}");
+    eprintln!("[bash] {}", terminal_text::sanitize(command));
     builtin_tools::shell_guard::validate_with_policy(
         command,
         &state.cwd,
@@ -5806,8 +6270,9 @@ async fn handle_bang_command(
     let rendered = render_bash_output(command, &output);
 
     if cancelled {
-        print!("{rendered}");
-        if !rendered.ends_with('\n') {
+        let display = terminal_text::sanitize(&rendered);
+        print!("{display}");
+        if !display.ends_with('\n') {
             println!();
         }
         return Ok(CommandAction::Continue);
@@ -5817,8 +6282,9 @@ async fn handle_bang_command(
         state.run_turn(rendered, config, true).await?;
         println!();
     } else {
-        print!("{rendered}");
-        if !rendered.ends_with('\n') {
+        let display = terminal_text::sanitize(&rendered);
+        print!("{display}");
+        if !display.ends_with('\n') {
             println!();
         }
     }
@@ -5889,7 +6355,10 @@ fn handle_command(
                     anyhow::bail!("unknown /session subcommand: {other}");
                 }
                 None => {
-                    println!("path: {}", state.session.path().display());
+                    println!(
+                        "path: {}",
+                        terminal_text::sanitize(&state.session.path().display().to_string())
+                    );
                     let stats = state.stats();
                     println!("messages: {}", stats.messages);
                     let info = session::jsonl::session_info(state.session.path())?
@@ -5917,12 +6386,18 @@ fn handle_command(
                     println!("mcp_connected: {}", state.mcp.is_some());
                     println!("diff_mode: {}", state.diff_mode.as_str());
                     println!("safety: {}", state.safety.as_str());
-                    println!("model: {}", config.model);
+                    println!("model: {}", terminal_text::sanitize(&config.model));
                     if config.provider_model != config.model {
-                        println!("provider_model: {}", config.provider_model);
+                        println!(
+                            "provider_model: {}",
+                            terminal_text::sanitize(&config.provider_model)
+                        );
                     }
                     println!("thinking: {}", config.thinking.as_str());
-                    println!("provider: {}", config.provider_name);
+                    println!(
+                        "provider: {}",
+                        terminal_text::sanitize(&config.provider_name)
+                    );
                 }
             }
             Ok(CommandAction::Continue)
@@ -5932,10 +6407,10 @@ fn handle_command(
             if title.trim().is_empty() {
                 let info = session::jsonl::session_info(state.session.path())?
                     .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
-                println!("title: {}", info.title);
+                println!("title: {}", terminal_text::sanitize(&info.title));
             } else {
                 state.set_title(&title)?;
-                println!("title: {}", title.trim());
+                println!("title: {}", terminal_text::sanitize(title.trim()));
             }
             Ok(CommandAction::Continue)
         }
@@ -5963,8 +6438,15 @@ fn handle_command(
                 println!("no skills found");
             } else {
                 for skill in &state.skills {
-                    println!("{} - {}", skill.name, skill.description);
-                    println!("  {}", skill.path.display());
+                    println!(
+                        "{} - {}",
+                        terminal_text::sanitize(&skill.name),
+                        terminal_text::sanitize(&skill.description)
+                    );
+                    println!(
+                        "  {}",
+                        terminal_text::sanitize(&skill.path.display().to_string())
+                    );
                 }
             }
             Ok(CommandAction::Continue)
@@ -5981,9 +6463,12 @@ fn handle_command(
                 candidate.set_model(model)?;
                 state.commit_provider_model_transition(config, candidate)?;
             }
-            println!("model: {}", config.model);
+            println!("model: {}", terminal_text::sanitize(&config.model));
             if config.provider_model != config.model {
-                println!("provider_model: {}", config.provider_model);
+                println!(
+                    "provider_model: {}",
+                    terminal_text::sanitize(&config.provider_model)
+                );
             }
             Ok(CommandAction::Continue)
         }
@@ -6005,10 +6490,16 @@ fn handle_command(
                 candidate.set_provider(provider)?;
                 state.commit_provider_model_transition(config, candidate)?;
             }
-            println!("provider: {}", config.provider_name);
-            println!("model: {}", config.model);
+            println!(
+                "provider: {}",
+                terminal_text::sanitize(&config.provider_name)
+            );
+            println!("model: {}", terminal_text::sanitize(&config.model));
             if config.provider_model != config.model {
-                println!("provider_model: {}", config.provider_model);
+                println!(
+                    "provider_model: {}",
+                    terminal_text::sanitize(&config.provider_model)
+                );
             }
             Ok(CommandAction::Continue)
         }
@@ -6027,7 +6518,12 @@ fn handle_command(
                         .as_deref()
                         .map(|model| format!(" default_model={model}"))
                         .unwrap_or_default();
-                    println!("{marker} {name} type={}{}", definition.kind, default_model);
+                    println!(
+                        "{marker} {} type={}{}",
+                        terminal_text::sanitize(name),
+                        terminal_text::sanitize(&definition.kind),
+                        terminal_text::sanitize(&default_model)
+                    );
                 }
             }
             Ok(CommandAction::Continue)
@@ -6063,7 +6559,10 @@ fn handle_command(
             match parts.next() {
                 None => println!(
                     "palette: {}",
-                    current_palette_name(&config.config_dir, &state.colors)?
+                    terminal_text::sanitize(&current_palette_name(
+                        &config.config_dir,
+                        &state.colors,
+                    )?)
                 ),
                 Some(name) => {
                     if let Some(extra) = parts.next() {
@@ -6131,7 +6630,7 @@ fn handle_command(
             }
             let path = &args[0];
             state.attach_images(vec![path.to_string()])?;
-            println!("attached image: {path}");
+            println!("attached image: {}", terminal_text::sanitize(path));
             Ok(CommandAction::Continue)
         }
         "/image-paste" | "/paste-image" => {
@@ -6143,7 +6642,7 @@ fn handle_command(
             anyhow::bail!("/compact is async; this command should be handled before sync commands")
         }
         _ => {
-            println!("unknown command: {command}");
+            println!("unknown command: {}", terminal_text::sanitize(command));
             Ok(CommandAction::Continue)
         }
     }

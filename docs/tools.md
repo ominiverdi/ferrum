@@ -118,11 +118,12 @@ Input:
 Notes:
 
 - `offset` is 1-based.
-- Output is bounded.
+- Output is bounded to 50 KiB while reading, including for a single huge line.
+- Leading blank lines are preserved and count toward `limit`.
 
 ## write
 
-Create or overwrite a file under a configured writable root. Creates parent directories. `[tools].writable_roots` defaults to the working directory.
+Create or atomically replace a file under a configured writable root. Creates parent directories. `[tools].writable_roots` defaults to the working directory. Existing permissions are preserved; symlink targets and concurrent target changes are rejected.
 
 ```json
 {
@@ -133,7 +134,7 @@ Create or overwrite a file under a configured writable root. Creates parent dire
 
 ## edit
 
-Exact text replacement under a configured writable root.
+Exact text replacement under a configured writable root. Ferrum reads the target once, validates its identity, and commits through a synced sibling temporary file plus atomic rename.
 
 ```json
 {
@@ -234,7 +235,7 @@ Search file contents under a path, including hidden config directories while ski
 }
 ```
 
-Supports optional glob filtering, case-insensitive search, literal matching, context lines, and match limits. Uses `rg` if available, with a Rust fallback that preserves regex-vs-literal semantics.
+Supports optional glob filtering, case-insensitive search, literal matching, context lines, and a true global match limit. Uses streamed `rg --json` if available, with a streaming Rust fallback that preserves regex-vs-literal semantics. Both paths enforce a 50 KiB result budget, bounded input lines, cancellation, and a 10-second deadline. The fallback rejects file symlinks rather than following them outside the search root.
 
 ## find
 
@@ -260,11 +261,11 @@ Legacy filters are still supported:
 }
 ```
 
-Searches hidden config directories, respects `.gitignore`/ignore files, returns paths relative to the search root, and skips noisy dependency/build directories such as `.git`, `target`, and `node_modules`.
+Searches hidden config directories, respects `.gitignore`/ignore files, returns paths relative to the search root, and skips noisy dependency/build directories such as `.git`, `target`, and `node_modules`. Traversal checks cancellation and a 10-second deadline.
 
 ## ls
 
-List directory contents, including dotfiles. Directories have a `/` suffix and entries are sorted case-insensitively.
+List directory contents, including dotfiles. Directories have a `/` suffix and entries are sorted case-insensitively. Ferrum scans the directory but retains only the lexicographically smallest requested entries, so memory is bounded by `limit`.
 
 ```json
 {

@@ -269,6 +269,7 @@ Shell shortcuts:
 - Colors: [`docs/colors.md`](docs/colors.md)
 - Providers: [`docs/providers.md`](docs/providers.md)
 - Tools: [`docs/tools.md`](docs/tools.md)
+- Resource-boundary design: [`docs/resource-boundaries.md`](docs/resource-boundaries.md)
 - Safety notes: [`docs/security.md`](docs/security.md) for execution tiers, writable roots, MCP caveats, host-filesystem risk, and higher-risk workflow guidance
 - Sessions: [`docs/sessions.md`](docs/sessions.md)
 - Usage accounting: [`docs/usage.md`](docs/usage.md)
@@ -290,6 +291,7 @@ Shell shortcuts:
 - `bash`, `write`, and `edit` can mutate files, but native and recognized shell mutations are limited to user-configured writable roots.
 - Ferrum has no model-grantable confirmation prompt. A denied path requires a user config change or an action outside Ferrum.
 - Use `/safety low|medium|high` to choose structural shell execution policy for `bash`, `wait`, and shell shortcuts. This is not a sandbox. See [`docs/security.md`](docs/security.md), [`docs/tool-authority.md`](docs/tool-authority.md), and [`docs/tools.md`](docs/tools.md#bash).
+- Provider, MCP, tool, repository, session, image, and filename text is treated as untrusted terminal data and sanitized before rendering. Native inspection and image paths have bounded input/output, count, cancellation, or deadline contracts documented in [`docs/resource-boundaries.md`](docs/resource-boundaries.md).
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 - See [`docs/security.md`](docs/security.md) for security research notes and Ferrum's current posture.
 

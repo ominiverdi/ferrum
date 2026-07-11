@@ -1,4 +1,5 @@
 mod agent;
+mod atomic_file;
 mod auth;
 mod cancel;
 mod cli;
@@ -9,6 +10,7 @@ mod persistence;
 mod providers;
 mod session;
 mod skills;
+mod terminal_text;
 mod text_truncate;
 mod tools;
 mod ui_colors;
@@ -19,7 +21,14 @@ use clap::Parser;
 use config::ToolSelection;
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    if let Err(error) = run().await {
+        eprintln!("Error: {}", terminal_text::sanitize(&format!("{error:#}")));
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<()> {
     let args = cli::Args::parse();
     let mut config = config::Config::load()?;
     let mcp_enabled = if args.no_mcp {

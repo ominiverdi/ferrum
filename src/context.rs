@@ -1,6 +1,6 @@
 use crate::text_truncate::truncate_to_max_bytes;
 use anyhow::{Context, Result};
-use std::{collections::HashSet, fs, path::Path};
+use std::{collections::HashSet, fs::File, io::Read, path::Path};
 
 const MAX_CONTEXT_BYTES: usize = 128 * 1024;
 const CONTEXT_PREFIX: &str = "Project and user instructions from AGENTS.md files. Follow later, more specific files when instructions conflict.\n\n";
@@ -19,70 +19,85 @@ pub fn load_context(config_dir: &Path, cwd: &Path) -> Result<Option<String>> {
     }
 
     let mut seen = HashSet::new();
-    let mut sections = Vec::new();
+    let mut selected_newest_first = Vec::new();
+    let max_without_marker = MAX_CONTEXT_BYTES.saturating_sub(CONTEXT_TRUNCATED_MARKER.len());
+    let mut used = CONTEXT_PREFIX.len();
+    let mut omitted = false;
 
-    for path in paths {
+    for path in paths.into_iter().rev() {
         let key = path.canonicalize().unwrap_or_else(|_| path.clone());
         if !seen.insert(key) || !path.exists() {
             continue;
         }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read context file {}", path.display()))?;
-        if text.trim().is_empty() {
+
+        let separator_len = if selected_newest_first.is_empty() {
+            0
+        } else {
+            CONTEXT_SEPARATOR.len()
+        };
+        let header = format!("# {}\n\n", display_path(&path, cwd));
+        let available = max_without_marker
+            .saturating_sub(used)
+            .saturating_sub(separator_len)
+            .saturating_sub(header.len());
+        if available == 0 {
+            omitted = true;
+            break;
+        }
+
+        let (text, truncated) = read_bounded_utf8(&path, available)?;
+        let text = text.trim();
+        if text.is_empty() {
+            omitted |= truncated;
             continue;
         }
-        sections.push(format!("# {}\n\n{}", display_path(&path, cwd), text.trim()));
+        let mut section = header;
+        section.push_str(text);
+        used = used
+            .saturating_add(separator_len)
+            .saturating_add(section.len());
+        selected_newest_first.push(section);
+        if truncated {
+            omitted = true;
+            break;
+        }
     }
 
-    if sections.is_empty() {
+    if selected_newest_first.is_empty() {
         return Ok(None);
     }
 
-    let selected = select_context_sections(sections);
-    let mut context = format!("{CONTEXT_PREFIX}{}", selected.join(CONTEXT_SEPARATOR));
-    if context.len() > MAX_CONTEXT_BYTES {
-        context = truncate_to_max_bytes(
-            &context,
-            MAX_CONTEXT_BYTES.saturating_sub(CONTEXT_TRUNCATED_MARKER.len()),
-        );
+    selected_newest_first.reverse();
+    let mut context = format!(
+        "{CONTEXT_PREFIX}{}",
+        selected_newest_first.join(CONTEXT_SEPARATOR)
+    );
+    if omitted {
+        let available = MAX_CONTEXT_BYTES.saturating_sub(CONTEXT_TRUNCATED_MARKER.len());
+        context = truncate_to_max_bytes(&context, available);
         context.push_str(CONTEXT_TRUNCATED_MARKER);
     }
     Ok(Some(context))
 }
 
-fn select_context_sections(sections: Vec<String>) -> Vec<String> {
-    let mut selected_newest_first = Vec::new();
-    let mut used = CONTEXT_PREFIX.len();
-    let marker_budget = CONTEXT_TRUNCATED_MARKER.len();
-    let max_without_marker = MAX_CONTEXT_BYTES.saturating_sub(marker_budget);
-    let mut omitted = false;
+fn read_bounded_utf8(path: &Path, limit: usize) -> Result<(String, bool)> {
+    let file = File::open(path)
+        .with_context(|| format!("failed to read context file {}", path.display()))?;
+    let mut bytes = Vec::with_capacity(limit.min(16 * 1024).saturating_add(1));
+    file.take(limit.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read context file {}", path.display()))?;
+    let truncated = bytes.len() > limit;
+    bytes.truncate(limit);
 
-    for section in sections.into_iter().rev() {
-        let separator = if selected_newest_first.is_empty() {
-            0
-        } else {
-            CONTEXT_SEPARATOR.len()
-        };
-        let needed = separator.saturating_add(section.len());
-        if used.saturating_add(needed) <= max_without_marker {
-            used = used.saturating_add(needed);
-            selected_newest_first.push(section);
-            continue;
-        }
-
-        omitted = true;
-        if selected_newest_first.is_empty() {
-            let available = max_without_marker.saturating_sub(used);
-            selected_newest_first.push(truncate_to_max_bytes(&section, available));
-            break;
+    if truncated {
+        while std::str::from_utf8(&bytes).is_err_and(|error| error.error_len().is_none()) {
+            bytes.pop();
         }
     }
-
-    selected_newest_first.reverse();
-    if omitted {
-        selected_newest_first.push(CONTEXT_TRUNCATED_MARKER.trim().to_string());
-    }
-    selected_newest_first
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("context file is not UTF-8: {}", path.display()))?;
+    Ok((text, truncated))
 }
 
 fn push_context_candidates(paths: &mut Vec<std::path::PathBuf>, dir: &Path) {
@@ -99,6 +114,7 @@ fn display_path(path: &Path, cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn loads_global_and_project_context() {
@@ -135,6 +151,22 @@ mod tests {
 
         assert!(context.contains("cwd-specific-instruction"));
         assert!(context.contains("AGENTS.md context truncated"));
-        assert!(context.len() <= MAX_CONTEXT_BYTES + CONTEXT_TRUNCATED_MARKER.len());
+        assert!(context.len() <= MAX_CONTEXT_BYTES);
+    }
+
+    #[test]
+    fn does_not_read_invalid_data_beyond_remaining_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir_all(&repo).unwrap();
+        let mut bytes = vec![b'x'; MAX_CONTEXT_BYTES * 2];
+        bytes.push(0xff);
+        fs::write(repo.join("AGENTS.md"), bytes).unwrap();
+
+        let context = load_context(&config, &repo).unwrap().unwrap();
+        assert!(context.contains("AGENTS.md context truncated"));
+        assert!(context.len() <= MAX_CONTEXT_BYTES);
     }
 }
