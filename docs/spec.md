@@ -137,6 +137,7 @@ thinking = "off"
 [tools]
 allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
+writable_roots = ["."]
 
 [providers.openai-codex]
 type = "openai-codex"
@@ -184,7 +185,7 @@ Ferrum loads context from `AGENTS.md` and `agents.md` files:
 
 Files are deduplicated, bounded, and included in the system prompt. More specific later files override earlier instructions when conflicts exist.
 
-Ferrum also injects runtime context describing current version, provider, provider model, thinking level, safety level, cwd, config dir, and supported interactive commands. The embedded default runtime system prompt can be fully overridden with `~/.config/ferrum/system.md`; Ferrum renders known `{{placeholder}}` values from current runtime config and leaves unknown placeholders unchanged.
+Ferrum also injects runtime context describing current version, provider, provider model, thinking level, safety level, writable roots, cwd, config dir, and supported interactive commands. The embedded default runtime system prompt can be fully overridden with `~/.config/ferrum/system.md`; Ferrum renders known `{{placeholder}}` values from current runtime config and leaves unknown placeholders unchanged.
 
 ## Sessions
 
@@ -326,6 +327,7 @@ Config policy:
 [tools]
 allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
+writable_roots = ["."]
 ```
 
 `allow` is optional and caps the available tool set. `deny` removes tools. Invalid requested tools fail before the model request. Resolved tool lists are stored in session metadata for visibility and audit, but resume uses the current process/config policy so new default tools can appear automatically unless limited by policy.
@@ -344,19 +346,19 @@ Read a text file with optional offset/limit. Output is truncated safely.
 
 ### `write`
 
-Create or overwrite a file. Creates parent directories.
+Create or overwrite a file under a configured writable root. Creates parent directories.
 
 ### `edit`
 
-Exact text replacement. Each old text must match exactly once. Multiple non-overlapping edits supported. Preserve UTF-8 BOM and existing LF/CRLF line endings.
+Exact text replacement under a configured writable root. Each old text must match exactly once. Multiple non-overlapping edits supported. Preserve UTF-8 BOM and existing LF/CRLF line endings.
 
 ### `bash`
 
-Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Commands pass through a safety-tiered shell guard controlled by `/safety low|medium|high`. The guard rejects destructive commands, opaque shell expansion, shell compound/control syntax, shell wrapper launches, backslash-newline continuations, tar execution hooks, sensitive-path writes, and stricter generated-code/network/script forms at `high`, including direct compiler entrypoints.
+Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Before execution, Ferrum parses the complete Bash syntax tree with byte/node/depth limits and applies `/safety low|medium|high`. Parse errors and unsupported authority fail closed; here-document bodies remain data. Supported wrappers are recursively inspected, dynamic executable positions and indirect shell launch are rejected, and recognized shell mutations must remain under `[tools].writable_roots`. `high` uses a conservative inspection command set. This is policy, not process isolation.
 
 ### `wait`
 
-Wait in the foreground, then run a bash command using the same bash execution, safety guard, and cleanup path. The wait duration is capped at 30 minutes. Interactive users can abort with `Esc` or `Ctrl-C`. Exposed only when `bash` is available.
+Wait in the foreground, then run a bash command using the same execution tier, writable-root policy, and cleanup path. The wait duration is capped at 30 minutes. Interactive users can abort with `Esc` or `Ctrl-C`. Exposed only when `bash` is available.
 
 ### `grep`
 
@@ -476,7 +478,10 @@ ferrum/
       mod.rs
       path.rs
       read.rs
+      shell_guard.rs
+      shell_policy.rs
       write.rs
+      write_policy.rs
 ```
 
 ## Quality bar

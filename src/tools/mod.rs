@@ -6,8 +6,10 @@ pub mod ls;
 pub mod path;
 pub mod read;
 pub mod shell_guard;
+mod shell_policy;
 pub mod wait;
 pub mod write;
+pub mod write_policy;
 
 use crate::{agent::tools::ToolDefinition, config::SafetyLevel};
 use anyhow::Result;
@@ -54,7 +56,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "bash".to_string(),
-            description: "Run focused bash commands in the current working directory with a timeout. Commands pass through a lightweight shell safety guard that rejects destructive or obfuscated shell patterns. Prefer find/grep/ls tools for broad filesystem exploration; if using shell find/grep, exclude .git, target, and node_modules. Use nohup with redirected logs for background jobs or commands that should outlive the tool call."
+            description: "Run focused bash commands in the current working directory with a timeout. Commands are parsed structurally and checked against the selected execution tier and configured writable roots. Ferrum is not a sandbox. Prefer find/grep/ls tools for broad filesystem exploration; if using shell find/grep, exclude .git, target, and node_modules. Use nohup with redirected logs for background jobs or commands that should outlive the tool call."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -68,7 +70,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "wait".to_string(),
-            description: "Wait in the foreground, then run a bash command using the same permissions, timeout, output limits, process cleanup, and shell safety guard as the bash tool. Use this for scheduled follow-up checks up to 30 minutes. Esc or Ctrl-C aborts the wait or command."
+            description: "Wait in the foreground, then run a bash command using the same permissions, timeout, output limits, process cleanup, execution tier, and writable-root policy as the bash tool. Use this for scheduled follow-up checks up to 30 minutes. Esc or Ctrl-C aborts the wait or command."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -83,7 +85,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "write".to_string(),
-            description: "Create or overwrite a text file. Creates parent directories.".to_string(),
+            description: "Create or overwrite a text file under a configured writable root. Creates parent directories.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -96,7 +98,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "edit".to_string(),
-            description: "Apply exact text replacements to a file. Each old_text must match exactly once and edits must not overlap. Preserves BOM and existing LF/CRLF line endings.".to_string(),
+            description: "Apply exact text replacements to a file under a configured writable root. Each old_text must match exactly once and edits must not overlap. Preserves BOM and existing LF/CRLF line endings.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -169,7 +171,16 @@ pub async fn execute_with_cancel(
     cancel: Option<Arc<AtomicBool>>,
     progress: bool,
 ) -> Result<String> {
-    execute_with_cancel_and_safety(name, input, cwd, cancel, progress, SafetyLevel::Medium).await
+    execute_with_cancel_and_safety(
+        name,
+        input,
+        cwd,
+        cancel,
+        progress,
+        SafetyLevel::Medium,
+        &[std::path::PathBuf::from(".")],
+    )
+    .await
 }
 
 pub async fn execute_with_cancel_and_safety(
@@ -179,6 +190,7 @@ pub async fn execute_with_cancel_and_safety(
     cancel: Option<Arc<AtomicBool>>,
     progress: bool,
     safety: SafetyLevel,
+    writable_roots: &[std::path::PathBuf],
 ) -> Result<String> {
     match name {
         "read" => {
@@ -200,7 +212,7 @@ pub async fn execute_with_cancel_and_safety(
         }
         "bash" => {
             let command = required_str(input, "command")?;
-            shell_guard::validate(command, safety)?;
+            shell_guard::validate_with_policy(command, cwd, writable_roots, safety)?;
             let timeout = input
                 .get("timeout_seconds")
                 .and_then(|v| v.as_u64())
@@ -225,7 +237,7 @@ pub async fn execute_with_cancel_and_safety(
                 );
             }
             let command = required_str(input, "command")?;
-            shell_guard::validate(command, safety)?;
+            shell_guard::validate_with_policy(command, cwd, writable_roots, safety)?;
             let timeout = input
                 .get("timeout_seconds")
                 .and_then(|v| v.as_u64())
@@ -249,7 +261,9 @@ pub async fn execute_with_cancel_and_safety(
         "write" => {
             let path = required_str(input, "path")?;
             let content = required_str(input, "content")?;
-            write::write_text(&path::resolve_to_cwd(path, cwd)?, content)
+            let resolved = path::resolve_to_cwd(path, cwd)?;
+            write_policy::validate_mutation_path(&resolved, cwd, writable_roots)?;
+            write::write_text(&resolved, content)
         }
         "edit" => {
             let path = required_str(input, "path")?;
@@ -257,7 +271,9 @@ pub async fn execute_with_cancel_and_safety(
                 .get("edits")
                 .ok_or_else(|| anyhow::anyhow!("missing required field: edits"))?;
             let edits: Vec<edit::EditSpec> = serde_json::from_value(edits_value.clone())?;
-            edit::replace_exact(&path::resolve_to_cwd(path, cwd)?, &edits)
+            let resolved = path::resolve_to_cwd(path, cwd)?;
+            write_policy::validate_mutation_path(&resolved, cwd, writable_roots)?;
+            edit::replace_exact(&resolved, &edits)
         }
         "grep" => {
             let pattern = required_str(input, "pattern")?;
@@ -402,7 +418,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("bash command rejected by safety guard")
+                .contains("bash command rejected by execution policy")
         );
     }
 
@@ -419,7 +435,91 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("bash command rejected by safety guard")
+                .contains("bash command rejected by execution policy")
         );
+    }
+
+    #[tokio::test]
+    async fn bash_enforces_writable_roots_before_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().join("outside.txt");
+        let input = serde_json::json!({
+            "command": format!("printf blocked > {}", outside_path.display()),
+        });
+
+        let error = execute("bash", &input, root.path()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured writable roots")
+        );
+        assert!(!outside_path.exists());
+    }
+
+    #[tokio::test]
+    async fn bash_treats_heredoc_body_as_data() {
+        let root = tempfile::tempdir().unwrap();
+        let input = serde_json::json!({
+            "command": "cat <<'EOF'\nrm -rf /\nEOF\n",
+        });
+
+        let output = execute("bash", &input, root.path()).await.unwrap();
+        assert!(output.contains("stdout:\nrm -rf /"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn native_mutations_are_limited_to_writable_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().join("outside.txt");
+        let input = serde_json::json!({
+            "path": outside_path,
+            "content": "blocked",
+        });
+
+        let error = execute("write", &input, root.path()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured writable roots")
+        );
+        assert!(!outside_path.exists());
+
+        execute_with_cancel_and_safety(
+            "write",
+            &input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::Medium,
+            &[std::path::PathBuf::from("."), outside.path().to_path_buf()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(outside_path).unwrap(), "blocked");
+    }
+
+    #[tokio::test]
+    async fn native_edit_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().join("outside.txt");
+        std::fs::write(&outside_path, "before").unwrap();
+        symlink(&outside_path, root.path().join("linked.txt")).unwrap();
+        let input = serde_json::json!({
+            "path": "linked.txt",
+            "edits": [{"old_text": "before", "new_text": "after"}],
+        });
+
+        let error = execute("edit", &input, root.path()).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured writable roots")
+        );
+        assert_eq!(std::fs::read_to_string(outside_path).unwrap(), "before");
     }
 }

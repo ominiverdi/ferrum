@@ -93,7 +93,7 @@ Supported values are \f[B]off\f[R], \f[B]minimal\f[R], \f[B]low\f[R],
 \f[B]medium\f[R], \f[B]high\f[R], and \f[B]xhigh\f[R].
 .TP
 \f[B]\[en]safety\f[R] LEVEL
-Override shell safety level for this process.
+Override tool execution safety level for this process.
 Supported values are \f[B]low\f[R], \f[B]medium\f[R], and
 \f[B]high\f[R].
 .TP
@@ -131,15 +131,7 @@ Ferrum\[cq]s default native tool set includes:
 \f[B]wait\f[R], \f[B]grep\f[R], \f[B]find\f[R], \f[B]ls\f[R],
 \f[B]history_search\f[R], and \f[B]history_read\f[R].
 .PP
-The \f[V]bash\f[R] and \f[V]wait\f[R] tools apply a safety-tiered shell
-guard before execution.
-Use \f[B]\[en]safety low|medium|high\f[R] at startup or \f[B]/safety
-low|medium|high\f[R] interactively to choose the trade-off.
-The default \f[B]medium\f[R] tier rejects destructive patterns, shell
-compound/control syntax, shell wrapper launches, backslash-newline
-continuations, tar execution hooks, and rewriteable opaque shell syntax
-while allowing common coding commands such as Python one-liners and
-network tools.
+The \f[V]bash\f[R] and \f[V]wait\f[R] tools parse complete Bash syntax and apply a tiered execution policy. Native \f[V]write\f[R]/\f[V]edit\f[R] and recognized shell mutations are limited to \f[V][tools].writable_roots\f[R], which defaults to the working directory. Use \f[B]\[en]safety low|medium|high\f[R] at startup or \f[B]/safety low|medium|high\f[R] interactively. The default \f[B]medium\f[R] tier supports trusted-checkout development while rejecting command substitution, dynamic executables, hidden wrapper authority, and direct interpreter payloads. This policy is not a sandbox.
 .PP
 MCP tool names are namespaced and sanitized as **mcp__SERVER__TOOL\f[B].
 Ferrum rejects sanitized-name collisions, accepts newline-delimited JSON
@@ -221,7 +213,7 @@ Manage MCP server availability for the current session.
 Set thinking level.
 .TP
 \f[B]/safety\f[R] LEVEL
-Set shell safety level.
+Set tool execution safety level.
 .TP
 \f[B]/diff\f[R] MODE
 Set diff display mode.

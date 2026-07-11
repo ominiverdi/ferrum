@@ -26,6 +26,7 @@ pub struct Config {
     pub safety: SafetyLevel,
     pub tools_allow: Option<Vec<String>>,
     pub tools_deny: Vec<String>,
+    pub writable_roots: Vec<PathBuf>,
     pub tool_selection: Option<ToolSelection>,
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -254,6 +255,12 @@ struct FileToolsConfig {
     allow: Option<Vec<String>>,
     #[serde(default)]
     deny: Vec<String>,
+    #[serde(default = "default_writable_roots")]
+    writable_roots: Vec<PathBuf>,
+}
+
+fn default_writable_roots() -> Vec<PathBuf> {
+    vec![PathBuf::from(".")]
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -335,6 +342,11 @@ impl Config {
             .map(validate_tool_name_list)
             .transpose()?;
         let tools_deny = validate_tool_name_list(tools_config.deny)?;
+        let writable_roots = if tools_config.writable_roots.is_empty() {
+            default_writable_roots()
+        } else {
+            tools_config.writable_roots
+        };
 
         let colors = ColorPalette::load(&config_dir)?;
 
@@ -387,6 +399,7 @@ impl Config {
                 .unwrap_or(SafetyLevel::Medium),
             tools_allow,
             tools_deny,
+            writable_roots,
             tool_selection: None,
             mcp_servers: file_config.mcp.map(|mcp| mcp.servers).unwrap_or_default(),
         })
@@ -739,6 +752,7 @@ mod tests {
         fs::write(dir.path().join("config.toml"), "safety = \"low\"\n").unwrap();
         let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         assert_eq!(config.safety, SafetyLevel::Low);
+        assert_eq!(config.writable_roots, vec![PathBuf::from(".")]);
 
         config
             .apply_cli_overrides(None, None, None, Some("high"), None, None, None)
@@ -755,6 +769,7 @@ mod tests {
 [tools]
 allow = ["read", "grep"]
 deny = ["bash"]
+writable_roots = [".", "/tmp/ferrum-output"]
 "#,
         )
         .unwrap();
@@ -764,6 +779,10 @@ deny = ["bash"]
             Some(vec!["read".to_string(), "grep".to_string()])
         );
         assert_eq!(config.tools_deny, vec!["bash".to_string()]);
+        assert_eq!(
+            config.writable_roots,
+            vec![PathBuf::from("."), PathBuf::from("/tmp/ferrum-output")]
+        );
 
         config
             .apply_cli_overrides(

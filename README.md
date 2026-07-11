@@ -29,7 +29,7 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 - OpenAI-compatible providers for remote APIs and local servers
 - Config-backed provider registry
 - Live model listing for supported providers
-- Built-in tools: `read`, `write`, `edit`, safety-tiered `bash`, `wait`, `grep`, `find`, `ls`
+- Built-in tools: `read`, writable-root-bound `write`/`edit`, structurally parsed tiered `bash`/`wait`, `grep`, `find`, `ls`
 - Model-facing session history tools: `history_search`, `history_read`
 - Tool exposure control with `--tools` and config allow/deny lists
 - Semantic UI color palette with `~/.config/ferrum/colors.toml` and `/colors auto|on|off`
@@ -148,6 +148,7 @@ max_context_tokens = 256000
 [tools]
 allow = ["read", "grep", "find", "bash", "wait"]
 deny = ["write", "edit"]
+writable_roots = ["."]
 
 [providers.openai-codex]
 type = "openai-codex"
@@ -268,7 +269,7 @@ Shell shortcuts:
 - Colors: [`docs/colors.md`](docs/colors.md)
 - Providers: [`docs/providers.md`](docs/providers.md)
 - Tools: [`docs/tools.md`](docs/tools.md)
-- Safety notes: [`docs/security.md`](docs/security.md) for shell guard tiers, MCP caveats, host-filesystem risk, and higher-risk workflow guidance
+- Safety notes: [`docs/security.md`](docs/security.md) for execution tiers, writable roots, MCP caveats, host-filesystem risk, and higher-risk workflow guidance
 - Sessions: [`docs/sessions.md`](docs/sessions.md)
 - Usage accounting: [`docs/usage.md`](docs/usage.md)
 - Context accounting and compaction boundaries: [`docs/context-accounting.md`](docs/context-accounting.md)
@@ -286,9 +287,9 @@ Shell shortcuts:
 
 - API keys are read from environment variables or provider OAuth storage.
 - Tools run with your local user permissions.
-- `bash`, `write`, and `edit` can mutate files.
-- Ferrum has no per-tool confirmation prompts. Exposed tool calls execute directly in both print and interactive mode.
-- Use `/safety low|medium|high` to choose shell guard strictness for `bash`, `wait`, and shell shortcuts. See [`docs/security.md`](docs/security.md) and [`docs/tools.md`](docs/tools.md#bash) for covered command shapes.
+- `bash`, `write`, and `edit` can mutate files, but native and recognized shell mutations are limited to user-configured writable roots.
+- Ferrum has no model-grantable confirmation prompt. A denied path requires a user config change or an action outside Ferrum.
+- Use `/safety low|medium|high` to choose structural shell execution policy for `bash`, `wait`, and shell shortcuts. This is not a sandbox. See [`docs/security.md`](docs/security.md), [`docs/tool-authority.md`](docs/tool-authority.md), and [`docs/tools.md`](docs/tools.md#bash).
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 - See [`docs/security.md`](docs/security.md) for security research notes and Ferrum's current posture.
 

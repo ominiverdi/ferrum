@@ -6,11 +6,9 @@ cover, what they do not cover, and how to use them for higher-risk work.
 
 ## Design stance
 
-Ferrum does not try to prove arbitrary shell safe. It uses a practical guard:
-allow normal focused commands, reject destructive or ambiguous shapes before
-Bash starts, and prefer native tools for routine file work.
+Ferrum does not try to prove arbitrary programs safe. It parses submitted Bash structurally, applies a tiered execution policy, and limits native and statically recognized shell mutations to user-configured writable roots. Ambiguous or unsupported authority fails closed before Bash starts.
 
-The shell guard is a hard rejection layer, not an approval prompt.
+The policy is a hard rejection layer, not an approval prompt or sandbox. Full design and regression matrix: [tool-authority.md](tool-authority.md).
 
 ## Current baseline
 
@@ -21,12 +19,11 @@ security review by GitHub user Komzpa / Darafei Praliaskouski (`me@komzpa.net`).
   `history_search`, and `history_read`.
 - Tool exposure can be narrowed with `--tools`, `--no-tools`, and `[tools]`
   config.
-- `bash`, `wait`, and interactive shell shortcuts `!` / `!!` use the same shell
-  safety tier.
+- `bash`, `wait`, and interactive shell shortcuts `!` / `!!` use the same structural shell execution tier and writable-root policy.
 - `--safety low|medium|high` sets the process startup tier.
 - `/safety low|medium|high` changes the tier interactively.
-- Ferrum is not a sandbox and does not isolate `$HOME`.
-- Non-shell tools such as `write` and `edit` still mutate files by design.
+- Ferrum is not a sandbox and does not isolate `$HOME` or contain the system calls of an allowed executable.
+- Native `write` and `edit` default to the working directory as their only writable root.
 
 Ferrum also hardens adjacent tool plumbing: MCP inbound `Content-Length` frames
 are capped before allocation, sanitized MCP tool-name collisions are rejected,
@@ -52,20 +49,16 @@ Ferrum risk mostly comes from which tools are exposed.
 - Ferrum does not treat MCP tool descriptions or output as trusted; raw MCP
   stderr is withheld from model-visible errors, but tool-provided content can still
   contain secrets or prompt injection.
-- `--safety` controls shell execution only. It does not sandbox `write`, `edit`,
-  MCP servers, or the filesystem.
+- `--safety` controls shell execution authority. Native `write` and `edit` always enforce `[tools].writable_roots`. The policy does not sandbox MCP servers or allowed executables.
 
 For higher-risk work, reduce tool authority first. Use `--safety high` when
 shell remains exposed.
 
 ## Safety tiers
 
-- `low`: permissive. Allows common shell syntax; blocks destructive commands and
-  obvious obfuscation.
-- `medium`: default. Allows normal coding commands; blocks destructive commands,
-  inline interpreter payloads, and ambiguous shell tricks like command substitution.
-- `high`: strict. Allows simple inspection/build commands; also blocks common
-  direct network-capable commands, inline interpreters, direct scripts, and broad disk writes.
+- `low`: broad host authority. Allows ordinary commands and inspectable read-only command substitution, but rejects dynamic executables, hidden mutation, unsupported wrappers, and out-of-root writes.
+- `medium`: default development policy. Also rejects command substitution and direct interpreter payloads. Build/test runners can execute trusted checkout code with the user's authority.
+- `high`: inspection policy. Allows a conservative command set and rejects shell mutation, network clients, interpreters, and unknown executables.
 
 Tier differences:
 
@@ -74,11 +67,16 @@ Tier differences:
 - `curl https://example.com`: allowed at `low` and `medium`, rejected at `high`.
 - `rm -rf /`: rejected at all tiers.
 
+## Writable roots and approval boundary
+
+`[tools].writable_roots` defaults to `["."]`. Ferrum resolves mutation paths through their nearest existing ancestors and rejects native `write`/`edit` calls or recognized shell mutations outside those roots. Existing symlink escapes, dangling symlinks, and multiply linked regular-file targets are rejected. A denial requires an explicit user action: configure the intended root, move the operation, or perform it outside Ferrum. Model text cannot grant itself another root.
+
+This check does not contain an unknown executable's system calls and is not race-free filesystem isolation. Use external isolation for hostile code. Atomic write/edit replacement and stronger path-identity handling are separate hardening work.
+
 ## Related research
 
 GuardFall describes shell-injection classes for AI agents that pass model output
-to `bash -c`. Ferrum's guard is designed around those classes, while keeping the
-normal coding workflow usable.
+to `bash -c`. Ferrum's structural execution policy addresses those classes while keeping normal coding workflows usable.
 
 Reference:
 <https://adversa.ai/blog/opensource-ai-coding-agents-shell-injection-vulnerability/>
@@ -88,9 +86,7 @@ Other agent-security findings point to nearby risks:
 - **TrustFall**: repository trust prompts and repo-owned MCP config can start
   attacker-controlled MCP servers. Ferrum does not load repository-owned MCP
   config; MCP servers come from user config and process CLI choices.
-- **Deny-rule bypasses**: some agents degraded security checks for long compound
-  shell commands. Ferrum's shell guard does not use a subcommand-count fallback
-  that turns denial into approval.
+- **Deny-rule bypasses**: some agents degraded security checks for long compound shell commands. Ferrum parses the complete submission, applies syntax node/depth/byte limits, and does not turn policy uncertainty into approval.
 - **AutoJack**: a browsing agent can cross a localhost trust boundary and reach
   a privileged local service. Ferrum does not expose a local web control plane,
   but local services remain part of the user's host risk.
@@ -115,9 +111,7 @@ ferrum --safety low -p "run exactly: r''m -r''f /"
 Expected: rejected before Bash starts. Since this is rejected at `low`, it is
 also rejected at `medium` and `high`.
 
-Ferrum rejects shell compound syntax and control-flow forms that can hide command
-words from a partial shell tokenizer, including subshell/grouping forms and
-`if`/`while`/`case` blocks.
+Ferrum rejects unsupported compound and control-flow forms, including subshell/grouping forms and `if`/`while`/`case` blocks. They are represented structurally rather than recovered from a partial word tokenizer.
 
 Example:
 
@@ -207,8 +201,7 @@ it does not claim every possible destructive command is known in advance.
 
 ### 6. Untrusted repository content
 
-Repository text, docs, Makefiles, tool output, and MCP output can influence the
-model. Tool policy and the shell guard reduce blast radius.
+Repository text, docs, Makefiles, tool output, and MCP output can influence the model. Tool exposure, writable roots, and the execution policy reduce blast radius.
 
 Example:
 
@@ -296,9 +289,7 @@ Why weak: it gives repository-owned text too much authority over the session.
 
 ### 10. Multi-line scripts
 
-Ferrum checks newline-separated shell segments and rejects backslash-newline
-continuations that would make Bash join text before tokenization. Prefer focused
-commands over large generated scripts.
+Ferrum parses the complete multi-line submission and rejects backslash-newline continuations that obscure command words. Here-document bodies are treated as data rather than reparsed as commands; executable command substitutions in expandable bodies remain subject to the selected tier. Prefer focused commands over large generated scripts.
 
 Example:
 
@@ -361,8 +352,8 @@ Ferrum safety is strongest when these are combined:
 
 - Use native inspection tools before shell.
 - Narrow tools with `--tools` or `--no-tools`.
-- Use `--safety high` for untrusted or unattended work when shell remains
-  exposed.
+- Keep writable roots narrow; default to the working directory.
+- Use `/safety high` for untrusted or unattended inspection when shell remains exposed.
 - Avoid exposing mutation tools unless needed.
 - Avoid shell/mutation tools on untrusted fork PRs.
 - Keep runtime policy in CLI/user config, not repository-owned files.

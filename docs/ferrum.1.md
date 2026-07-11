@@ -83,7 +83,7 @@ prompt.
 **medium**, **high**, and **xhigh**.
 
 **--safety** LEVEL
-: Override shell safety level for this process. Supported values are **low**,
+: Override tool execution safety level for this process. Supported values are **low**,
 **medium**, and **high**.
 
 **--title** TITLE
@@ -116,13 +116,7 @@ Ferrum's default native tool set includes:
 **read**, **write**, **edit**, **bash**, **wait**, **grep**, **find**, **ls**,
 **history_search**, and **history_read**.
 
-The `bash` and `wait` tools apply a safety-tiered shell guard before execution.
-Use **--safety low|medium|high** at startup or **/safety low|medium|high**
-interactively to choose the trade-off. The default **medium** tier rejects
-destructive patterns, shell compound/control syntax, shell wrapper launches,
-backslash-newline continuations, tar execution hooks, and rewriteable opaque
-shell syntax while allowing common coding commands such as Python one-liners and
-network tools.
+The `bash` and `wait` tools parse complete Bash syntax and apply a tiered execution policy. Native `write`/`edit` and recognized shell mutations are limited to `[tools].writable_roots`, which defaults to the working directory. Use **--safety low|medium|high** at startup or **/safety low|medium|high** interactively. The default **medium** tier supports trusted-checkout development while rejecting command substitution, dynamic executables, hidden wrapper authority, and direct interpreter payloads. This policy is not a sandbox.
 
 MCP tool names are namespaced and sanitized as **mcp__SERVER__TOOL**. Ferrum rejects sanitized-name collisions, accepts newline-delimited JSON or **Content-Length** framed inbound MCP messages, rejects oversized incoming frames before allocation, and bounds model-visible MCP metadata.
 
@@ -197,7 +191,7 @@ Common slash commands:
 : Set thinking level.
 
 **/safety** LEVEL
-: Set shell safety level.
+: Set tool execution safety level.
 
 **/diff** MODE
 : Set diff display mode.

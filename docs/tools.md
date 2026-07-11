@@ -122,7 +122,7 @@ Notes:
 
 ## write
 
-Create or overwrite a file. Creates parent directories.
+Create or overwrite a file under a configured writable root. Creates parent directories. `[tools].writable_roots` defaults to the working directory.
 
 ```json
 {
@@ -133,7 +133,7 @@ Create or overwrite a file. Creates parent directories.
 
 ## edit
 
-Exact text replacement.
+Exact text replacement under a configured writable root.
 
 ```json
 {
@@ -183,9 +183,11 @@ Rules:
 
 ## bash
 
-Run a focused bash command in cwd with timeout. Before execution, Ferrum applies a safety-tiered shell guard. The guard canonicalizes simple quote/backslash tricks and rejects destructive or opaque shell patterns according to `/safety low|medium|high`.
+Run a focused bash command in cwd with timeout. Before execution, Ferrum parses the complete Bash input with a real syntax grammar and applies the selected execution tier plus configured writable roots. Parse errors, dynamic executable positions, unsupported authority forms, and ambiguous wrappers fail closed. Here-document bodies are data, not command text.
 
-The guard also rejects shell compound/control syntax, shell interpreter launchers and wrappers such as `sh -c`, `bash -lc`, `busybox sh`, `env sh -c`, and `timeout 1 bash -lc`; backslash-newline continuations; tar execution hooks such as `--to-command` and `--checkpoint-action=exec=...`; sensitive-path writes; and common destructive command shapes. At `high`, it additionally rejects common direct network-capable commands, inline interpreters, direct scripts, broad `dd` writes, direct compiler entrypoints such as `cc`/`gcc`/`clang`/`rustc`/`javac`, and generated-code execution paths such as `go run`/`cargo run`.
+The policy recursively inspects supported wrappers such as `env`, `command`, `nice`, and `timeout`; rejects shell interpreter relaunch, dynamic executables, process substitution, `xargs`, dangerous normalized/globbed operands, and sensitive-path writes; and limits recognized mutations to `[tools].writable_roots`. At `high`, a conservative inspection command set replaces the normal development policy.
+
+Allowed executables still run with the user's host authority. In particular, build tools and tests can execute checkout code at `low` and `medium`. This is not a sandbox; see [tool-authority.md](tool-authority.md).
 
 ```json
 {
@@ -202,7 +204,7 @@ For broad filesystem exploration, prefer the native `find`, `grep`, and `ls` too
 
 ## wait
 
-Wait in the foreground, then run a bash command in cwd using the same execution path and shell safety guard as `bash`.
+Wait in the foreground, then run a bash command in cwd using the same execution tier, writable roots, and command cleanup path as `bash`.
 
 ```json
 {
@@ -304,6 +306,7 @@ Results are appended in the original model-requested order. Mixed or mutating ba
 
 - Tools run with local user permissions.
 - `write`, `edit`, `bash`, and `wait` can mutate files.
-- Ferrum has no per-tool confirmation prompts. Exposed tool calls execute directly in both print and interactive mode.
+- `write`, `edit`, and recognized shell mutations are limited to user-configured writable roots.
+- Ferrum has no model-grantable confirmation prompt. A denied root requires the user to change trusted config or perform the action outside Ferrum.
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 - Secrets must not be written, printed, logged, or committed.

@@ -762,10 +762,16 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- For long-running or background scripts, use nohup with redirected logs and verify separately.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- writable_roots: {{writable_roots}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /session\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
+    let writable_roots = config
+        .writable_roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let replacements = [
         ("{{ferrum_version}}", env!("CARGO_PKG_VERSION").to_string()),
         ("{{provider}}", config.provider_name.clone()),
@@ -782,6 +788,7 @@ fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) ->
         ("{{mcp_enabled}}", config.mcp_enabled.to_string()),
         ("{{diff_mode}}", config.diff_mode.as_str().to_string()),
         ("{{safety}}", config.safety.as_str().to_string()),
+        ("{{writable_roots}}", writable_roots),
     ];
     let mut rendered = template.to_string();
     for (placeholder, value) in replacements {
@@ -1483,6 +1490,7 @@ struct AgentState {
     colors: ColorPalette,
     diff_mode: DiffMode,
     safety: SafetyLevel,
+    writable_roots: Vec<PathBuf>,
     pending_images: Vec<messages::ContentBlock>,
     last_session_list: Vec<session::jsonl::SessionInfo>,
     active_tool_names: HashSet<String>,
@@ -1531,6 +1539,7 @@ impl AgentState {
             colors: config.colors.clone(),
             diff_mode: config.diff_mode,
             safety: config.safety,
+            writable_roots: config.writable_roots.clone(),
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
             active_tool_names: HashSet::new(),
@@ -1667,6 +1676,7 @@ impl AgentState {
             colors: config.colors.clone(),
             diff_mode: config.diff_mode,
             safety: config.safety,
+            writable_roots: config.writable_roots.clone(),
             pending_images: Vec::new(),
             last_session_list: Vec::new(),
             active_tool_names: HashSet::new(),
@@ -2192,11 +2202,13 @@ impl AgentState {
         let cwd = self.cwd.clone();
         let active_tool_names = self.active_tool_names.clone();
         let safety = self.safety;
+        let writable_roots = self.writable_roots.clone();
         let mut handles = Vec::new();
         for (index, (id, name, input)) in tool_uses.into_iter().enumerate() {
             let cwd = cwd.clone();
             let active_tool_names = active_tool_names.clone();
             let cancel = cancel.clone();
+            let writable_roots = writable_roots.clone();
             handles.push(tokio::spawn(async move {
                 let started = Instant::now();
                 let (content, is_error, aborted) = if cancel
@@ -2215,7 +2227,13 @@ impl AgentState {
                     (content, true, false)
                 } else {
                     match builtin_tools::execute_with_cancel_and_safety(
-                        &name, &input, &cwd, cancel, false, safety,
+                        &name,
+                        &input,
+                        &cwd,
+                        cancel,
+                        false,
+                        safety,
+                        &writable_roots,
                     )
                     .await
                     {
@@ -2336,6 +2354,7 @@ impl AgentState {
             cancel,
             interactive,
             self.safety,
+            &self.writable_roots,
         )
         .await
     }
@@ -4521,14 +4540,14 @@ mod context_pressure_tests {
         let config = test_config(temp.path().to_path_buf());
         let cwd = std::path::Path::new("/tmp/work");
         let rendered = render_system_prompt_template(
-            "model={{model}} provider_model={{provider_model}} cwd={{cwd}} max={{max_context_tokens}}",
+            "model={{model}} provider_model={{provider_model}} cwd={{cwd}} max={{max_context_tokens}} roots={{writable_roots}}",
             &config,
             cwd,
         );
 
         assert_eq!(
             rendered,
-            "model=alias provider_model=actual-model cwd=/tmp/work max=1234"
+            "model=alias provider_model=actual-model cwd=/tmp/work max=1234 roots=."
         );
     }
 
@@ -4903,6 +4922,7 @@ mod context_pressure_tests {
             safety: SafetyLevel::Medium,
             tools_allow: None,
             tools_deny: Vec::new(),
+            writable_roots: vec![std::path::PathBuf::from(".")],
             tool_selection: None,
             mcp_servers: Vec::new(),
         }
@@ -5766,7 +5786,12 @@ async fn handle_bang_command(
     }
 
     eprintln!("[bash] {command}");
-    builtin_tools::shell_guard::validate(command, state.safety)?;
+    builtin_tools::shell_guard::validate_with_policy(
+        command,
+        &state.cwd,
+        &state.writable_roots,
+        state.safety,
+    )?;
     let mut abort = ActiveTurnAbort::start(true);
     let token = abort.token();
     let output = builtin_tools::bash::run_with_cancel(
@@ -5842,7 +5867,7 @@ fn handle_command(
             println!(
                 "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
             );
-            println!("  /safety [level]       show or set shell guard: low|medium|high");
+            println!("  /safety [level]       show or set execution policy: low|medium|high");
             println!(
                 "  /diff [mode]          show or set edit diff: unified|compact|full|words|side_by_side"
             );
@@ -6076,13 +6101,13 @@ fn handle_command(
             println!("safety: {}", state.safety.as_str());
             match state.safety {
                 SafetyLevel::Low => println!(
-                    "shell guard: permissive. Allows common shell syntax; blocks destructive commands and obvious obfuscation."
+                    "execution policy: broad. Structurally parses shell, enforces writable roots, and denies dynamic or hidden authority."
                 ),
                 SafetyLevel::Medium => println!(
-                    "shell guard: balanced. Allows normal coding commands; blocks destructive commands and ambiguous shell tricks like command substitution."
+                    "execution policy: development. Also denies command substitution and direct interpreter payloads; trusted checkout builds and tests remain host-authority boundaries."
                 ),
                 SafetyLevel::High => println!(
-                    "shell guard: strict. Allows simple inspection/build commands; also blocks common direct network-capable commands, inline interpreters, direct scripts, and broad disk writes."
+                    "execution policy: inspection. Allows a conservative command set and rejects shell mutations, network clients, interpreters, and unknown executables."
                 ),
             }
             Ok(CommandAction::Continue)

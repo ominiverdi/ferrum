@@ -20,7 +20,7 @@ pub struct Args {
     #[arg(long)]
     pub thinking: Option<String>,
 
-    /// Override shell safety level: low|medium|high
+    /// Override tool execution safety level: low|medium|high
     #[arg(long)]
     pub safety: Option<String>,
 
