@@ -68,7 +68,8 @@ const MAX_IMAGE_BYTES_PER_SESSION: usize = 64 * 1024 * 1024;
 const MAX_IMAGE_BASE64_BYTES_PER_SESSION: usize = MAX_IMAGE_BYTES_PER_SESSION.div_ceil(3) * 4;
 const CLIPBOARD_HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_HELPER_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_PREVIEW_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
+// Kitty RGBA previews are base64-encoded and can exceed 4 MiB at 120x40 cells.
+const MAX_PREVIEW_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Default)]
 struct FerrumLineHelper {
@@ -1040,7 +1041,10 @@ struct ActiveTurnAbort {
 
 impl ActiveTurnAbort {
     fn start(enabled: bool) -> Self {
-        let aborted = Arc::new(AtomicBool::new(false));
+        Self::start_with_token(enabled, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn start_with_token(enabled: bool, aborted: Arc<AtomicBool>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         if !enabled || !io::stdin().is_terminal() {
             return Self {
@@ -2454,23 +2458,14 @@ impl AgentState {
         colors: ColorPalette,
         interactive: bool,
     ) -> ExecutedToolBatch {
-        let mut abort = ActiveTurnAbort::start(interactive);
-        let cancel = abort.token();
-        let results = self
-            .execute_sequential_tools_with_cancel(
-                tool_uses,
-                color_mode,
-                colors,
-                interactive,
-                cancel,
-            )
-            .await;
-        let cancelled = abort.is_cancelled() || results.cancelled;
-        abort.stop();
-        ExecutedToolBatch {
-            tools: results.tools,
-            cancelled,
-        }
+        self.execute_sequential_tools_with_cancel(
+            tool_uses,
+            color_mode,
+            colors,
+            interactive,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
     }
 
     async fn execute_sequential_tools_with_cancel(
@@ -2490,10 +2485,12 @@ impl AgentState {
             let (content, is_error, aborted) = if batch_cancelled {
                 ("aborted before execution".to_string(), true, true)
             } else {
-                match self
+                let mut abort = ActiveTurnAbort::start_with_token(interactive, Arc::clone(&cancel));
+                let result = self
                     .execute_tool(&name, &input, interactive, Some(Arc::clone(&cancel)))
-                    .await
-                {
+                    .await;
+                abort.stop();
+                match result {
                     Ok(output) => {
                         let is_error = bash_preview_indicates_failure(&name, &output);
                         (output, is_error, false)
