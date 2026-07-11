@@ -6,7 +6,7 @@ cover, what they do not cover, and how to use them for higher-risk work.
 
 ## Design stance
 
-Ferrum does not try to prove arbitrary programs safe. It parses submitted Bash structurally, applies a tiered execution policy, and limits native and statically recognized shell mutations to user-configured writable roots. Ambiguous or unsupported authority fails closed before Bash starts.
+Ferrum does not try to prove arbitrary programs safe. It parses submitted Bash structurally and applies a tiered execution policy. At `medium` and `high`, native and statically recognized shell mutations are limited to user-configured writable roots; `low` explicitly grants host mutation authority. Ambiguous or unsupported authority fails closed before Bash starts.
 
 The policy is a hard rejection layer, not an approval prompt or sandbox. Full design and regression matrices: [tool-authority.md](tool-authority.md) and [resource-boundaries.md](resource-boundaries.md).
 
@@ -50,15 +50,15 @@ Ferrum risk mostly comes from which tools are exposed.
 - Ferrum does not treat MCP tool descriptions or output as trusted; raw MCP
   stderr is withheld from model-visible errors, but tool-provided content can still
   contain secrets or prompt injection.
-- `--safety` controls shell execution authority. Native `write` and `edit` always enforce `[tools].writable_roots`. The policy does not sandbox MCP servers or allowed executables.
+- `--safety` controls shell execution and native/shell mutation authority. At `medium` and `high`, native `write`/`edit` and recognized shell mutations enforce `[tools].writable_roots`; `low` bypasses writable roots. The policy does not sandbox MCP servers or allowed executables.
 
 For higher-risk work, reduce tool authority first. Use `--safety high` when
 shell remains exposed.
 
 ## Safety tiers
 
-- `low`: broad host authority. Allows ordinary commands and inspectable read-only command substitution, but rejects dynamic executables, hidden mutation, unsupported wrappers, and out-of-root writes.
-- `medium`: default development policy. Also rejects command substitution and direct interpreter payloads. Build/test runners can execute trusted checkout code with the user's authority.
+- `low`: broad host authority. Allows directory changes with `cd`, ordinary commands, inspectable read-only command substitution, and mutation outside configured roots. It still rejects dynamic executables, hidden mutation, unsupported wrappers, and explicitly catastrophic command shapes.
+- `medium`: default development policy. Rejects command substitution and direct interpreter payloads, and enforces writable roots. Build/test runners can execute trusted checkout code with the user's authority.
 - `high`: inspection policy. Allows a conservative command set and rejects shell mutation, network clients, interpreters, and unknown executables.
 
 Tier differences:
@@ -70,7 +70,7 @@ Tier differences:
 
 ## Writable roots and approval boundary
 
-`[tools].writable_roots` defaults to `["."]`. Ferrum resolves mutation paths through their nearest existing ancestors and rejects native `write`/`edit` calls or recognized shell mutations outside those roots. Existing symlink escapes, dangling symlinks, and multiply linked regular-file targets are rejected. A denial requires an explicit user action: configure the intended root, move the operation, or perform it outside Ferrum. Model text cannot grant itself another root.
+`[tools].writable_roots` defaults to `["."]`. At `medium` and `high`, Ferrum resolves mutation paths through their nearest existing ancestors and rejects native `write`/`edit` calls or recognized shell mutations outside those roots. Existing symlink escapes, dangling symlinks, and multiply linked regular-file targets are rejected. A denial requires an explicit user action: configure the intended root, move the operation, or perform it outside Ferrum. Model text cannot grant itself another root. At `low`, this boundary is intentionally disabled for both native and shell mutations.
 
 This check does not contain an unknown executable's system calls and is not race-free filesystem isolation. Use external isolation for hostile code. Native write/edit replacement uses sibling temporary files, durable sync, target-identity verification, and atomic Linux rename operations; hostile mutation of ancestor directories remains outside Ferrum's guarantees.
 
@@ -353,7 +353,7 @@ Ferrum safety is strongest when these are combined:
 
 - Use native inspection tools before shell.
 - Narrow tools with `--tools` or `--no-tools`.
-- Keep writable roots narrow; default to the working directory.
+- Keep writable roots narrow and use `medium` or `high` when they must be enforced.
 - Use `/safety high` for untrusted or unattended inspection when shell remains exposed.
 - Avoid exposing mutation tools unless needed.
 - Avoid shell/mutation tools on untrusted fork PRs.

@@ -346,15 +346,15 @@ Read a text file with optional offset/limit. Reading is bounded to 50 KiB even f
 
 ### `write`
 
-Create or atomically replace a file under a configured writable root. Creates parent directories, preserves existing permissions, and rejects symlink or changed target identities.
+Create or atomically replace a file. At `medium` and `high`, targets must be under configured writable roots; `low` bypasses writable roots. Creates parent directories, preserves existing permissions, and rejects symlink or changed target identities.
 
 ### `edit`
 
-Exact text replacement under a configured writable root. Each old text must match exactly once. Multiple non-overlapping edits supported. Preserve UTF-8 BOM and existing LF/CRLF line endings. Ferrum reads the target once and commits through synced sibling-temp plus identity-checked atomic replacement.
+Exact text replacement. At `medium` and `high`, targets must be under configured writable roots; `low` bypasses writable roots. Each old text must match exactly once. Multiple non-overlapping edits supported. Preserve UTF-8 BOM and existing LF/CRLF line endings. Ferrum reads the target once and commits through synced sibling-temp plus identity-checked atomic replacement.
 
 ### `bash`
 
-Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Before execution, Ferrum parses the complete Bash syntax tree with byte/node/depth limits and applies `/safety low|medium|high`. Parse errors and unsupported authority fail closed; here-document bodies remain data. Supported wrappers are recursively inspected, dynamic executable positions and indirect shell launch are rejected, and recognized shell mutations must remain under `[tools].writable_roots`. `high` uses a conservative inspection command set. This is policy, not process isolation.
+Run a shell command in cwd. Capture stdout/stderr/exit code. Output is truncated to a bounded tail. Stdin is closed, stdout/stderr are piped, and the command runs in its own process group so timeout/abort can terminate child processes. Before execution, Ferrum parses the complete Bash syntax tree with byte/node/depth limits and applies `/safety low|medium|high`. Parse errors and unsupported authority fail closed; here-document bodies remain data. Supported wrappers are recursively inspected, and dynamic executable positions and indirect shell launch are rejected. At `medium`, recognized shell mutations must remain under `[tools].writable_roots`; `low` permits directory changes with `cd` and bypasses writable roots; `high` uses a conservative inspection command set. This is policy, not process isolation.
 
 ### `wait`
 

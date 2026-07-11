@@ -483,12 +483,16 @@ fn node_text<'a>(node: Node<'_>, source: &'a [u8]) -> Result<&'a str, String> {
 fn validate_shell_path(path: &str, context: &PolicyContext<'_>) -> Result<(), String> {
     let resolved =
         crate::tools::path::resolve_to_cwd(path, context.cwd).map_err(|error| error.to_string())?;
-    crate::tools::write_policy::validate_mutation_path(
-        &resolved,
-        context.cwd,
-        context.writable_roots,
-    )
-    .map_err(|error| error.to_string())
+    let validation = if matches!(context.safety, SafetyLevel::Low) {
+        crate::tools::write_policy::validate_mutation_target(&resolved, context.cwd)
+    } else {
+        crate::tools::write_policy::validate_mutation_path(
+            &resolved,
+            context.cwd,
+            context.writable_roots,
+        )
+    };
+    validation.map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -578,7 +582,7 @@ mod tests {
             root.path(),
             &roots,
             SafetyLevel::Low,
-            false,
+            true,
         );
         assert_policy_decision(
             "touch *.generated",
@@ -629,7 +633,12 @@ mod tests {
         assert_denied_at("HOME=/tmp touch relative.txt", SafetyLevel::Low);
         assert_denied_at("env HOME=/tmp touch relative.txt", SafetyLevel::Low);
         assert_denied_at("GIT_WORK_TREE=/tmp git checkout -- file", SafetyLevel::Low);
-        assert_denied_at("cd /tmp && touch outside.txt", SafetyLevel::Low);
+        assert_allowed_at("cd /tmp && touch outside.txt", SafetyLevel::Low);
+        assert_allowed_at(
+            "cd /home/example/green-city-index && git status --short",
+            SafetyLevel::Low,
+        );
+        assert_denied_at("cd /tmp && touch outside.txt", SafetyLevel::Medium);
         assert_denied_at("trap 'rm /tmp/demo' EXIT", SafetyLevel::Low);
         assert_denied_at("env -S 'cargo test'", SafetyLevel::Low);
         assert_denied_at("unknown-program --inspect", SafetyLevel::High);
@@ -637,6 +646,43 @@ mod tests {
         assert_denied_at("python3 script.py", SafetyLevel::Medium);
         assert_allowed_at("python3 -m pytest", SafetyLevel::Medium);
         assert_denied_at("echo 'unterminated", SafetyLevel::Low);
+    }
+
+    #[test]
+    fn low_safety_bypasses_writable_roots_for_static_mutations() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let roots = [PathBuf::from(".")];
+        let outside_file = outside.path().join("outside.txt");
+
+        assert_policy_decision(
+            &format!("touch {}", outside_file.display()),
+            root.path(),
+            &roots,
+            SafetyLevel::Low,
+            true,
+        );
+        assert_policy_decision(
+            &format!("printf ok > {}", outside_file.display()),
+            root.path(),
+            &roots,
+            SafetyLevel::Low,
+            true,
+        );
+        assert_policy_decision(
+            &format!("touch {}", outside_file.display()),
+            root.path(),
+            &roots,
+            SafetyLevel::Medium,
+            false,
+        );
+        assert_policy_decision(
+            &format!("printf ok > {}", outside_file.display()),
+            root.path(),
+            &roots,
+            SafetyLevel::Medium,
+            false,
+        );
     }
 
     #[test]

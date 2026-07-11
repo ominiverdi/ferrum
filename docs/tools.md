@@ -123,7 +123,7 @@ Notes:
 
 ## write
 
-Create or atomically replace a file under a configured writable root. Creates parent directories. `[tools].writable_roots` defaults to the working directory. Existing permissions are preserved; symlink targets and concurrent target changes are rejected.
+Create or atomically replace a file. At `medium` and `high`, `[tools].writable_roots` limits mutation and defaults to the working directory. `low` bypasses writable roots. Existing permissions are preserved; symlink targets and concurrent target changes are rejected.
 
 ```json
 {
@@ -134,7 +134,7 @@ Create or atomically replace a file under a configured writable root. Creates pa
 
 ## edit
 
-Exact text replacement under a configured writable root. Ferrum reads the target once, validates its identity, and commits through a synced sibling temporary file plus atomic rename.
+Exact text replacement. At `medium` and `high`, the target must be under a configured writable root; `low` bypasses writable roots. Ferrum reads the target once, validates its identity, and commits through a synced sibling temporary file plus atomic rename.
 
 ```json
 {
@@ -186,7 +186,7 @@ Rules:
 
 Run a focused bash command in cwd with timeout. Before execution, Ferrum parses the complete Bash input with a real syntax grammar and applies the selected execution tier plus configured writable roots. Parse errors, dynamic executable positions, unsupported authority forms, and ambiguous wrappers fail closed. Here-document bodies are data, not command text.
 
-The policy recursively inspects supported wrappers such as `env`, `command`, `nice`, and `timeout`; rejects shell interpreter relaunch, dynamic executables, process substitution, `xargs`, dangerous normalized/globbed operands, and sensitive-path writes; and limits recognized mutations to `[tools].writable_roots`. At `high`, a conservative inspection command set replaces the normal development policy.
+The policy recursively inspects supported wrappers such as `env`, `command`, `nice`, and `timeout`; rejects shell interpreter relaunch, dynamic executables, process substitution, `xargs`, dangerous normalized/globbed operands, and sensitive-path writes. At `medium`, recognized mutations are limited to `[tools].writable_roots`. `low` allows directory changes with `cd` and bypasses writable roots for host-authority mutation. At `high`, a conservative inspection command set replaces the normal development policy.
 
 Allowed executables still run with the user's host authority. In particular, build tools and tests can execute checkout code at `low` and `medium`. This is not a sandbox; see [tool-authority.md](tool-authority.md).
 
@@ -307,7 +307,7 @@ Results are appended in the original model-requested order. Mixed or mutating ba
 
 - Tools run with local user permissions.
 - `write`, `edit`, `bash`, and `wait` can mutate files.
-- `write`, `edit`, and recognized shell mutations are limited to user-configured writable roots.
-- Ferrum has no model-grantable confirmation prompt. A denied root requires the user to change trusted config or perform the action outside Ferrum.
+- At `medium` and `high`, `write`, `edit`, and recognized shell mutations are limited to user-configured writable roots. `low` bypasses writable roots and grants host mutation authority.
+- Ferrum has no model-grantable confirmation prompt. At `medium` or `high`, a denied root requires the user to change trusted config or perform the action outside Ferrum.
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 - Secrets must not be written, printed, logged, or committed.

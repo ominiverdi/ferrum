@@ -138,9 +138,12 @@ Ferrum\[cq]s default native tool set includes:
 .PP
 The \f[V]bash\f[R] and \f[V]wait\f[R] tools parse complete Bash syntax
 and apply a tiered execution policy.
-Native \f[V]write\f[R]/\f[V]edit\f[R] and recognized shell mutations are
+At \f[B]medium\f[R] and \f[B]high\f[R], native
+\f[V]write\f[R]/\f[V]edit\f[R] and recognized shell mutations are
 limited to \f[V][tools].writable_roots\f[R], which defaults to the
-working directory; native replacements are identity-checked and atomic.
+working directory; \f[B]low\f[R] permits directory changes with
+\f[V]cd\f[R] and bypasses writable roots for host-authority mutation.
+Native replacements remain identity-checked and atomic.
 Native \f[V]read\f[R], \f[V]grep\f[R], \f[V]find\f[R], and \f[V]ls\f[R]
 enforce bounded line/result/traversal behavior, with cancellation and
 deadlines for searches.

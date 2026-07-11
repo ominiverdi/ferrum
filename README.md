@@ -288,8 +288,8 @@ Shell shortcuts:
 
 - API keys are read from environment variables or provider OAuth storage.
 - Tools run with your local user permissions.
-- `bash`, `write`, and `edit` can mutate files, but native and recognized shell mutations are limited to user-configured writable roots.
-- Ferrum has no model-grantable confirmation prompt. A denied path requires a user config change or an action outside Ferrum.
+- `bash`, `write`, and `edit` can mutate files. At `medium` and `high`, native and recognized shell mutations are limited to user-configured writable roots; `low` explicitly bypasses that boundary and grants host mutation authority.
+- Ferrum has no model-grantable confirmation prompt. At `medium` or `high`, a denied path requires a user config change or an action outside Ferrum.
 - Use `/safety low|medium|high` to choose structural shell execution policy for `bash`, `wait`, and shell shortcuts. This is not a sandbox. See [`docs/security.md`](docs/security.md), [`docs/tool-authority.md`](docs/tool-authority.md), and [`docs/tools.md`](docs/tools.md#bash).
 - Provider, MCP, tool, repository, session, image, and filename text is treated as untrusted terminal data and sanitized before rendering. Native inspection and image paths have bounded input/output, count, cancellation, or deadline contracts documented in [`docs/resource-boundaries.md`](docs/resource-boundaries.md).
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.

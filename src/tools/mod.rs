@@ -85,7 +85,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "write".to_string(),
-            description: "Create or atomically replace a text file under a configured writable root. Creates parent directories, preserves existing permissions, and rejects changed target identity.".to_string(),
+            description: "Create or atomically replace a text file. Configured writable roots apply at medium/high safety; low safety grants host mutation authority. Creates parent directories, preserves existing permissions, and rejects changed target identity.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -98,7 +98,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "edit".to_string(),
-            description: "Apply exact text replacements atomically to a file under a configured writable root. Each old_text must match exactly once and edits must not overlap. Preserves BOM, existing LF/CRLF line endings, permissions, and target identity.".to_string(),
+            description: "Apply exact text replacements atomically. Configured writable roots apply at medium/high safety; low safety grants host mutation authority. Each old_text must match exactly once and edits must not overlap. Preserves BOM, existing LF/CRLF line endings, permissions, and target identity.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -262,7 +262,11 @@ pub async fn execute_with_cancel_and_safety(
             let path = required_str(input, "path")?;
             let content = required_str(input, "content")?;
             let resolved = path::resolve_to_cwd(path, cwd)?;
-            write_policy::validate_mutation_path(&resolved, cwd, writable_roots)?;
+            if matches!(safety, SafetyLevel::Low) {
+                write_policy::validate_mutation_target(&resolved, cwd)?;
+            } else {
+                write_policy::validate_mutation_path(&resolved, cwd, writable_roots)?;
+            }
             write::write_text(&resolved, content)
         }
         "edit" => {
@@ -272,7 +276,11 @@ pub async fn execute_with_cancel_and_safety(
                 .ok_or_else(|| anyhow::anyhow!("missing required field: edits"))?;
             let edits: Vec<edit::EditSpec> = serde_json::from_value(edits_value.clone())?;
             let resolved = path::resolve_to_cwd(path, cwd)?;
-            write_policy::validate_mutation_path(&resolved, cwd, writable_roots)?;
+            if matches!(safety, SafetyLevel::Low) {
+                write_policy::validate_mutation_target(&resolved, cwd)?;
+            } else {
+                write_policy::validate_mutation_path(&resolved, cwd, writable_roots)?;
+            }
             edit::replace_exact(&resolved, &edits)
         }
         "grep" => {
@@ -495,6 +503,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn low_safety_bash_can_change_directory_and_mutate_outside_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let marker = outside.path().join("marker.txt");
+        let input = serde_json::json!({
+            "command": format!("cd {} && printf done > marker.txt", outside.path().display()),
+        });
+
+        execute_with_cancel_and_safety(
+            "bash",
+            &input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::Low,
+            &[std::path::PathBuf::from(".")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "done");
+    }
+
+    #[tokio::test]
     async fn bash_treats_heredoc_body_as_data() {
         let root = tempfile::tempdir().unwrap();
         let input = serde_json::json!({
@@ -535,6 +567,47 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(std::fs::read_to_string(outside_path).unwrap(), "blocked");
+    }
+
+    #[tokio::test]
+    async fn low_safety_native_mutations_bypass_writable_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().join("outside.txt");
+        let write_input = serde_json::json!({
+            "path": outside_path,
+            "content": "before",
+        });
+
+        execute_with_cancel_and_safety(
+            "write",
+            &write_input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::Low,
+            &[std::path::PathBuf::from(".")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&outside_path).unwrap(), "before");
+
+        let edit_input = serde_json::json!({
+            "path": outside_path,
+            "edits": [{"old_text": "before", "new_text": "after"}],
+        });
+        execute_with_cancel_and_safety(
+            "edit",
+            &edit_input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::Low,
+            &[std::path::PathBuf::from(".")],
+        )
+        .await
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(outside_path).unwrap(), "after");
     }
 
     #[tokio::test]

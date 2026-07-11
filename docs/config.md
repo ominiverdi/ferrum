@@ -273,7 +273,7 @@ writable_roots = ["."]
 
 `allow` is optional. When present, it is the maximum allowed tool set. `deny` removes tools from the default or requested set. If `--tools` requests an unknown, denied, or not-allowed tool, Ferrum fails before the model request. `wait` is available only when `bash` is available. Include `history_search` and `history_read` in `allow` if you want model-facing current-session history lookup while using an allow list.
 
-`writable_roots` defaults to `["."]`. Relative roots are resolved from Ferrum's working directory. Native `write`/`edit` calls and statically recognized shell mutations must remain under one of these trusted user-configured roots after existing-ancestor and symlink resolution. Add an absolute path only when the model should be able to mutate it; repository text cannot change this setting.
+`writable_roots` defaults to `["."]`. Relative roots are resolved from Ferrum's working directory. At `medium` and `high`, native `write`/`edit` calls and statically recognized shell mutations must remain under one of these trusted user-configured roots after existing-ancestor and symlink resolution. `low` explicitly bypasses writable roots for native and shell mutations and therefore grants the model the invoking user's host filesystem authority. Add an absolute path when `medium` should authorize mutation there; repository text cannot change this setting.
 
 Ferrum stores the resolved tool list in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
@@ -377,7 +377,7 @@ Interactive:
 
 ### safety
 
-Controls structural shell execution policy for model-facing `bash`, `wait`, and interactive shell shortcuts. Native `write` and `edit` always enforce `[tools].writable_roots`, independent of tier.
+Controls structural execution and mutation policy for model-facing `bash`, `wait`, native `write`/`edit`, and interactive shell shortcuts.
 
 Supported values:
 
@@ -407,8 +407,8 @@ Interactive:
 
 Tiers:
 
-- `low`: broad host authority. Allows ordinary commands and inspectable read-only command substitution, while rejecting dynamic executables, hidden mutation, unsupported wrappers, and writes outside configured roots.
-- `medium`: default development policy. Also rejects command substitution and direct interpreter payloads. Build/test runners remain explicit host-authority boundaries for trusted checkouts.
+- `low`: broad host authority. Allows directory changes with `cd`, ordinary commands, inspectable read-only command substitution, and native or shell mutations outside configured writable roots. It still rejects dynamic executables, hidden mutation, unsupported wrappers, and explicitly catastrophic command shapes.
+- `medium`: default development policy. Rejects command substitution and direct interpreter payloads, and enforces writable roots. Build/test runners remain explicit host-authority boundaries for trusted checkouts.
 - `high`: conservative inspection policy. Allows a small command set and rejects shell mutations, network clients, interpreters, and unknown executables.
 
 Ferrum parses complete Bash syntax before execution, treats here-document bodies as data, and fails closed on parse errors or unsupported authority forms. This policy is not process isolation; see [tool-authority.md](tool-authority.md).

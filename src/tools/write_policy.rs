@@ -6,17 +6,7 @@ use std::{
 };
 
 pub fn validate_mutation_path(path: &Path, cwd: &Path, roots: &[PathBuf]) -> Result<()> {
-    let target = absolute_path(path, cwd)?;
-    if let Ok(metadata) = std::fs::symlink_metadata(&target)
-        && metadata.file_type().is_file()
-        && metadata.nlink() > 1
-    {
-        anyhow::bail!(
-            "mutation target has multiple hard links and is not authorized: {}",
-            path.display()
-        );
-    }
-    let target = canonicalize_with_missing_tail(&target)?;
+    let target = resolved_mutation_target(path, cwd)?;
     let roots = canonical_roots(cwd, roots)?;
     if roots.iter().any(|root| target.starts_with(root)) {
         return Ok(());
@@ -32,6 +22,24 @@ pub fn validate_mutation_path(path: &Path, cwd: &Path, roots: &[PathBuf]) -> Res
         path.display(),
         rendered
     )
+}
+
+pub fn validate_mutation_target(path: &Path, cwd: &Path) -> Result<()> {
+    resolved_mutation_target(path, cwd).map(|_| ())
+}
+
+fn resolved_mutation_target(path: &Path, cwd: &Path) -> Result<PathBuf> {
+    let target = absolute_path(path, cwd)?;
+    if let Ok(metadata) = std::fs::symlink_metadata(&target)
+        && metadata.file_type().is_file()
+        && metadata.nlink() > 1
+    {
+        anyhow::bail!(
+            "mutation target has multiple hard links and is not authorized: {}",
+            path.display()
+        );
+    }
+    canonicalize_with_missing_tail(&target)
 }
 
 pub fn canonical_roots(cwd: &Path, roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
@@ -197,6 +205,26 @@ mod tests {
                 .contains("failed to resolve mutation path")
         );
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn target_validation_allows_paths_without_enforcing_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        validate_mutation_target(&outside.path().join("file.txt"), temp.path()).unwrap();
+    }
+
+    #[test]
+    fn target_validation_still_rejects_hard_link_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("target.txt");
+        let alias = temp.path().join("linked.txt");
+        std::fs::write(&target, "keep").unwrap();
+        std::fs::hard_link(&target, &alias).unwrap();
+
+        let error = validate_mutation_target(&alias, temp.path()).unwrap_err();
+        assert!(error.to_string().contains("multiple hard links"));
     }
 
     #[test]

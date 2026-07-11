@@ -6600,7 +6600,7 @@ fn handle_command(
             println!("safety: {}", state.safety.as_str());
             match state.safety {
                 SafetyLevel::Low => println!(
-                    "execution policy: broad. Structurally parses shell, enforces writable roots, and denies dynamic or hidden authority."
+                    "execution policy: broad host authority. Allows directory changes with cd and bypasses writable roots for native and shell mutations while retaining structural catastrophic-command checks."
                 ),
                 SafetyLevel::Medium => println!(
                     "execution policy: development. Also denies command substitution and direct interpreter payloads; trusted checkout builds and tests remain host-authority boundaries."

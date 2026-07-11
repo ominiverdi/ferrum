@@ -150,7 +150,7 @@ fn evaluate_command_inner(
         return Some("privilege escalation command".to_string());
     }
 
-    if is_dynamic_shell_builtin(&base) {
+    if is_dynamic_shell_builtin(&base) && !(matches!(safety, SafetyLevel::Low) && base == "cd") {
         return Some("dynamic shell execution command".to_string());
     }
 
@@ -568,9 +568,12 @@ fn mutation_policy_reason(
             Ok(path) => path,
             Err(error) => return Some(error.to_string()),
         };
-        if let Err(error) =
+        let validation = if matches!(safety, SafetyLevel::Low) {
+            crate::tools::write_policy::validate_mutation_target(&resolved, cwd)
+        } else {
             crate::tools::write_policy::validate_mutation_path(&resolved, cwd, writable_roots)
-        {
+        };
+        if let Err(error) = validation {
             return Some(error.to_string());
         }
     }
