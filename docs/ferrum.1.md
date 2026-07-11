@@ -187,7 +187,7 @@ Common slash commands:
 : Switch model.
 
 **/models**
-: List models known to the active provider.
+: List models known to the active provider and cache them for **/model** Tab completion until the active provider changes.
 
 **/provider** NAME
 : Switch provider.

@@ -266,7 +266,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 
 `/new` and `/sessions new` both start a fresh session.
 
-Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths.
+Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths. After `/models` succeeds, its provider model ids are available to `/model <Tab>` completion until the active provider changes.
 
 Shell shortcuts:
 

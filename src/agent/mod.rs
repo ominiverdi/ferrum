@@ -78,6 +78,7 @@ struct FerrumLineHelper {
     command_hints: HashMap<&'static str, &'static str>,
     skill_names: Vec<String>,
     model_names: Vec<String>,
+    cached_provider_model_names: Vec<String>,
     provider_names: Vec<String>,
     palette_names: Vec<String>,
 }
@@ -232,9 +233,28 @@ impl FerrumLineHelper {
             command_hints,
             skill_names,
             model_names,
+            cached_provider_model_names: Vec::new(),
             provider_names,
             palette_names,
         }
+    }
+
+    fn cache_model_names(&mut self, config: &Config, models: &[String]) {
+        self.cached_provider_model_names = models.to_vec();
+        self.rebuild_model_names(config);
+    }
+
+    fn clear_cached_provider_model_names(&mut self, config: &Config) {
+        self.cached_provider_model_names.clear();
+        self.rebuild_model_names(config);
+    }
+
+    fn rebuild_model_names(&mut self, config: &Config) {
+        self.model_names = model_command_words(config);
+        self.model_names
+            .extend(self.cached_provider_model_names.iter().cloned());
+        self.model_names.sort();
+        self.model_names.dedup();
     }
 }
 
@@ -648,6 +668,9 @@ pub async fn run_interactive(
                             models,
                             notices,
                         })) => {
+                            if let Some(helper) = rl.helper_mut() {
+                                helper.cache_model_names(config, &models);
+                            }
                             for notice in notices {
                                 println!("{}", terminal_text::sanitize(&notice));
                             }
@@ -688,8 +711,19 @@ pub async fn run_interactive(
                     continue;
                 }
                 if should_handle_as_command(input, &state.cwd) {
+                    let previous_provider = config.provider_name.clone();
+                    let previous_model = config.model.clone();
                     match handle_command(input, config, &mut state) {
-                        Ok(CommandAction::Continue) => continue,
+                        Ok(CommandAction::Continue) => {
+                            if let Some(helper) = rl.helper_mut() {
+                                if config.provider_name != previous_provider {
+                                    helper.clear_cached_provider_model_names(config);
+                                } else if config.model != previous_model {
+                                    helper.rebuild_model_names(config);
+                                }
+                            }
+                            continue;
+                        }
                         Ok(CommandAction::Quit) => {
                             state.checkpoint_session()?;
                             save_history_private(&mut rl, &history);
@@ -5009,6 +5043,45 @@ mod context_pressure_tests {
                 .any(|candidate| candidate.replacement == "catppuccin")
         );
         assert_completion(&helper, &ctx, "/mcp l", "list");
+    }
+
+    #[test]
+    fn models_command_results_extend_model_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut helper = FerrumLineHelper::new(&[], &config);
+        helper.cache_model_names(
+            &config,
+            &[
+                "remote-large".to_string(),
+                "remote-small".to_string(),
+                "remote-small".to_string(),
+            ],
+        );
+        let history = DefaultHistory::default();
+        let ctx = rustyline::Context::new(&history);
+
+        assert_completion(&helper, &ctx, "/model remote-l", "remote-large");
+        assert_completion(&helper, &ctx, "/model ali", "alias");
+        assert_eq!(
+            helper
+                .model_names
+                .iter()
+                .filter(|name| name.as_str() == "remote-small")
+                .count(),
+            1
+        );
+
+        config.model = "new-current".to_string();
+        helper.rebuild_model_names(&config);
+        assert_completion(&helper, &ctx, "/model new-c", "new-current");
+        assert_completion(&helper, &ctx, "/model remote-l", "remote-large");
+
+        helper.clear_cached_provider_model_names(&config);
+        let (_start, candidates) = helper
+            .complete("/model remote-", "/model remote-".len(), &ctx)
+            .unwrap();
+        assert!(candidates.is_empty());
     }
 
     #[test]
