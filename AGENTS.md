@@ -20,8 +20,8 @@ Ferrum is a new project, not a compatibility port.
 - Run local validation before publishing:
   ```bash
   cargo fmt --check
-  cargo test
-  cargo build --release
+  cargo test --locked
+  cargo build --locked --release
   ```
 - Wait for explicit user approval before pushing, tagging, creating releases, uploading assets, or otherwise publishing.
 - Never publish untested or user-unapproved code.
@@ -39,8 +39,8 @@ Ferrum is a new project, not a compatibility port.
 - Create the Codeberg release locally with `tea` and upload locally built assets. This is the primary and preferred release path.
 - For tagged Linux releases, always build release assets with:
   ```bash
-  cargo build --release
-  scripts/package-linux.sh vX.Y.Z
+  cargo build --locked --release
+  FERRUM_REPRODUCIBILITY_CHECK=1 scripts/package-linux.sh vX.Y.Z
   ```
 - Upload all generated `dist/` release assets to Codeberg:
   - `ferrum-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`

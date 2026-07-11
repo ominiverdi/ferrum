@@ -88,15 +88,20 @@ tea releases ls --repo ominiverdi/ferrum
 Create a release entry and upload assets in one command:
 
 ```bash
-version=v0.5.0
+version=vX.Y.Z
+plain_version=${version#v}
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 
 tea releases create "$version" \
   --title "Ferrum $version" \
   --note-file "/tmp/ferrum-${version}-notes.md" \
-  --asset "/tmp/${package}.tar.gz" \
-  --asset "/tmp/${package}.tar.gz.sha256" \
+  --asset "dist/${package}.tar.gz" \
+  --asset "dist/${package}.tar.gz.sha256" \
+  --asset "dist/ferrum_${plain_version}_amd64.deb" \
+  --asset "dist/ferrum_${plain_version}_amd64.deb.sha256" \
+  --asset "dist/ferrum-${plain_version}-1.x86_64.rpm" \
+  --asset "dist/ferrum-${plain_version}-1.x86_64.rpm.sha256" \
   --repo ominiverdi/ferrum \
   --login codeberg.org
 ```
@@ -104,13 +109,18 @@ tea releases create "$version" \
 If the release already exists and only missing assets need to be uploaded:
 
 ```bash
-version=v0.5.0
+version=vX.Y.Z
+plain_version=${version#v}
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 
 tea releases assets create "$version" \
-  "/tmp/${package}.tar.gz" \
-  "/tmp/${package}.tar.gz.sha256" \
+  "dist/${package}.tar.gz" \
+  "dist/${package}.tar.gz.sha256" \
+  "dist/ferrum_${plain_version}_amd64.deb" \
+  "dist/ferrum_${plain_version}_amd64.deb.sha256" \
+  "dist/ferrum-${plain_version}-1.x86_64.rpm" \
+  "dist/ferrum-${plain_version}-1.x86_64.rpm.sha256" \
   --repo ominiverdi/ferrum \
   --login codeberg.org
 ```

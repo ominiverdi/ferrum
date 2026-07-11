@@ -6,9 +6,12 @@ Before public release:
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo build --release
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo build --locked --release
+bash bench/test.sh
+bash scripts/test-package-linux.sh
+bash scripts/check-release-docs.sh
 ```
 
 Check for accidental files:
@@ -29,47 +32,51 @@ Do not commit generated or local files:
 
 ## Versioning
 
-Set the next version in `Cargo.toml`, `Cargo.lock`, and install docs.
-
-Example:
-
-```toml
-version = "0.6.7"
-```
-
-## Tag release
-
-Use annotated tags and push Codeberg first, then the GitHub mirror:
+`release-version.txt` is the single source of truth for published install examples. Set the Cargo package version, update `Cargo.lock`, then synchronize every install surface:
 
 ```bash
-version=v0.6.7
+scripts/sync-release-version.sh v0.6.9
+scripts/check-release-docs.sh
+```
+
+The tag, `Cargo.toml`, generated binary, and `release-version.txt` must match exactly. The release workflow rejects non-stable-semver tags and mismatches before building assets.
+
+## Prepare release tag
+
+Create the annotated tag locally. Do not push it until the complete package set and clean-image tests pass:
+
+```bash
+version=v0.6.9
 notes=/tmp/ferrum-${version}-notes.md
 
 git tag -a "$version" -F "$notes"
-git push origin main "$version"
-git push github main "$version"
 ```
 
-In the primary local clone, `origin` should point to Codeberg and `github` should point to the GitHub mirror. Pushing a `v*` tag to GitHub triggers `.github/workflows/release.yml` and uploads backup binary assets to the GitHub release.
+In the primary local clone, `origin` should point to Codeberg and `github` should point to the GitHub mirror.
 
 ## Release assets
 
-Build and package the Linux x86_64 assets locally after validation:
+Build all Linux assets from committed source in the pinned compatibility container:
 
 ```bash
-cargo build --release
-scripts/package-linux.sh v0.6.7
+FERRUM_REPRODUCIBILITY_CHECK=1 scripts/package-linux.sh v0.6.9
 ```
+
+Podman or Docker is required. The wrapper rejects dirty source, verifies tag/Cargo/binary version equality, rebuilds with `cargo build --locked --release`, derives architecture and runtime requirements, and publishes `dist/` only after all six assets succeed. It never accepts `target/release/ferrum` from the host and never modifies `Cargo.toml`.
+
+The builder is pinned to Rust 1.90.0 on Debian 12. The GNU tarball therefore has a Debian 12 compatibility baseline (glibc 2.36 and OpenSSL 3); exact maximum GLIBC symbol, needed shared libraries, compiler versions, source commit, binary hash, and builder identity are embedded as `BUILD-PROVENANCE.txt`. Debian dependencies come from `dpkg-shlibdeps`; RPM requirements use `cargo-generate-rpm` builtin ELF analysis.
+
+`FERRUM_REPRODUCIBILITY_CHECK=1` performs two clean builds with `SOURCE_DATE_EPOCH`, path remapping, disabled incremental compilation/build IDs, normalized tar ownership/timestamps/order, and deterministic gzip, then compares every asset hash before publishing.
 
 The script writes assets to `dist/`:
 
 ```text
-ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz
-ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz.sha256
-ferrum_0.6.7_amd64.deb
-ferrum_0.6.7_amd64.deb.sha256
-ferrum-0.6.7-1.x86_64.rpm
-ferrum-0.6.7-1.x86_64.rpm.sha256
+ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz
+ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz.sha256
+ferrum_0.6.9_amd64.deb
+ferrum_0.6.9_amd64.deb.sha256
+ferrum-0.6.9-1.x86_64.rpm
+ferrum-0.6.9-1.x86_64.rpm.sha256
 ```
 
 The tarball includes:
@@ -78,6 +85,7 @@ The tarball includes:
 ferrum
 README.md
 LICENSE
+BUILD-PROVENANCE.txt
 docs/ferrum.1
 ```
 
@@ -87,33 +95,43 @@ The Debian and RPM packages install:
 /usr/bin/ferrum
 /usr/share/doc/ferrum/README.md
 /usr/share/doc/ferrum/LICENSE
+/usr/share/doc/ferrum/BUILD-PROVENANCE.txt
 /usr/share/man/man1/ferrum.1.gz  # Debian
 /usr/share/man/man1/ferrum.1     # RPM
 ```
 
-RPM packaging requires `cargo-generate-rpm`:
-
-```bash
-cargo install cargo-generate-rpm
-```
+No host RPM tooling is required; the pinned builder image contains the exact packaging tools.
 
 Verify local packages:
 
 ```bash
 cd dist
-sha256sum -c ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum_0.6.7_amd64.deb.sha256
-sha256sum -c ferrum-0.6.7-1.x86_64.rpm.sha256
-dpkg-deb --info ferrum_0.6.7_amd64.deb
-dpkg-deb --contents ferrum_0.6.7_amd64.deb | head
+sha256sum -c ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum_0.6.9_amd64.deb.sha256
+sha256sum -c ferrum-0.6.9-1.x86_64.rpm.sha256
+dpkg-deb --info ferrum_0.6.9_amd64.deb
+dpkg-deb --contents ferrum_0.6.9_amd64.deb | head
 ```
+
+The GitHub release workflow repeats the locked validation, performs the two-build reproducibility check, installs the Debian and RPM packages in pinned clean Debian 12 and Fedora 43 images, records GitHub artifact attestations, and publishes the same six-file asset contract as Codeberg.
+
+## Publish tag
+
+Only after local validation succeeds, push Codeberg first and then the GitHub mirror:
+
+```bash
+git push origin main "$version"
+git push github main "$version"
+```
+
+Pushing the `v*` tag to GitHub triggers `.github/workflows/release.yml`.
 
 ## Codeberg release
 
 Create the Codeberg release with `tea` after pushing the tag:
 
 ```bash
-version=v0.6.7
+version=v0.6.9
 tea releases create "$version" \
   --title "Ferrum $version" \
   --note-file "/tmp/ferrum-${version}-notes.md" \
@@ -123,7 +141,7 @@ tea releases create "$version" \
 Upload release assets:
 
 ```bash
-version=v0.6.7
+version=v0.6.9
 tea releases assets create "$version" \
   dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz \
   dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256 \
@@ -139,7 +157,7 @@ If the release already exists, upload only missing assets.
 Verify Codeberg assets:
 
 ```bash
-version=v0.6.7
+version=v0.6.9
 plain_version=${version#v}
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
@@ -181,9 +199,9 @@ Release notes should include Codeberg primary install commands.
 Tarball:
 
 ```bash
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.7/ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.6.7-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.6.7-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.9/ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.6.9-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.6.9-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -192,43 +210,43 @@ man ferrum
 Debian/Ubuntu:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.7/ferrum_0.6.7_amd64.deb
-sudo apt install ./ferrum_0.6.7_amd64.deb
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.9/ferrum_0.6.9_amd64.deb
+sudo apt install ./ferrum_0.6.9_amd64.deb
 ferrum --help
 ```
 
 Fedora/RHEL/openSUSE:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.7/ferrum-0.6.7-1.x86_64.rpm
-sudo dnf install ./ferrum-0.6.7-1.x86_64.rpm
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.9/ferrum-0.6.9-1.x86_64.rpm
+sudo dnf install ./ferrum-0.6.9-1.x86_64.rpm
 ferrum --help
 ```
 
-Use `sudo zypper install ./ferrum-0.6.7-1.x86_64.rpm` on openSUSE.
+Use `sudo zypper install ./ferrum-0.6.9-1.x86_64.rpm` on openSUSE.
 
 From source, use Cargo:
 
 ```bash
 git clone https://codeberg.org/ominiverdi/ferrum.git
 cd ferrum
-cargo install --path .
+cargo install --locked --path .
 ferrum --help
 ```
 
 Optional checksum verification:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.7/ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.7/ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.9/ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.9/ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## CI
 
-GitHub Actions provides mirror CI through `.github/workflows/ci.yml`. Codeberg Forgejo Actions is intentionally not configured because hosted runner availability is too inconsistent for the project workflow. Local validation remains required before every push and release.
+GitHub Actions provides pinned mirror CI through `.github/workflows/ci.yml`. Release actions are pinned by commit, the Rust toolchain is 1.90.0, dependency auditing is required, and the release builder/test images use immutable digests. Codeberg Forgejo Actions is intentionally not configured because hosted runner availability is too inconsistent for the project workflow. Local locked validation remains required before every push and release.
 
-Codeberg remains the primary release host; create releases locally with `tea`. GitHub Actions may also build backup release assets from pushed tags.
+Codeberg remains the primary release host; create releases locally with `tea`. GitHub publishes an attested backup release containing the same six assets.
 
 ## License
 

@@ -5,62 +5,115 @@ on:
     tags:
       - 'v*'
 
-jobs:
-  linux-binary:
-    name: Linux x86_64 binary
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+jobs:
+  linux-packages:
+    name: Linux release assets
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable action commit
+        with:
+          toolchain: 1.90.0
           components: clippy, rustfmt
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+
+      - name: Verify release tag and source version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          [[ "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo "release tag is not stable semver: $tag" >&2
+            exit 1
+          }
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | sed -n 's/.*"name":"ferrum","version":"\([^"]*\)".*/\1/p' \
+            | head -n1)"
+          [[ "$tag" == "v$cargo_version" ]] || {
+            echo "release tag/Cargo version mismatch: tag=$tag Cargo.toml=$cargo_version" >&2
+            exit 1
+          }
+          [[ "$(git rev-list -n1 "$tag")" == "$GITHUB_SHA" ]] || {
+            echo "release tag does not identify the checked-out commit" >&2
+            exit 1
+          }
+          [[ "$(cat release-version.txt)" == "$tag" ]] || {
+            echo "release install docs are not synchronized to $tag" >&2
+            exit 1
+          }
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
-      - name: Test benchmark scripts
-        run: bash bench/test.sh
+      - name: Test benchmark and release scripts
+        run: |
+          bash bench/test.sh
+          bash scripts/test-package-linux.sh
+          bash scripts/check-release-docs.sh
 
       - name: Audit dependencies
         run: |
           cargo install cargo-audit --locked --version 0.22.2
-          cargo audit
+          cargo audit --deny warnings
 
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
-      - name: Build release
-        run: cargo build --release
+      - name: Build validation binary
+        run: cargo build --locked --release
 
-      - name: Package
+      - name: Build reproducible package set in controlled container
+        env:
+          FERRUM_RELEASE_TAG: ${{ github.ref_name }}
+          FERRUM_REPRODUCIBILITY_CHECK: '1'
+          PACKAGE_CONTAINER_RUNTIME: docker
+        run: scripts/package-linux.sh "$GITHUB_REF_NAME"
+
+      - name: Verify package checksums and contracts
         shell: bash
         run: |
           set -euo pipefail
-          target="x86_64-unknown-linux-gnu"
-          version="${GITHUB_REF_NAME}"
-          package="ferrum-${version}-${target}"
-          mkdir -p "${package}"
-          cp target/release/ferrum "${package}/"
-          cp README.md LICENSE "${package}/"
-          mkdir -p "${package}/docs"
-          cp docs/ferrum.1 "${package}/docs/"
-          tar -czf "${package}.tar.gz" "${package}"
-          sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
+          cd dist
+          sha256sum -c "ferrum-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+          sha256sum -c "ferrum_${GITHUB_REF_NAME#v}_amd64.deb.sha256"
+          sha256sum -c "ferrum-${GITHUB_REF_NAME#v}-1.x86_64.rpm.sha256"
+          [[ "$(find . -maxdepth 1 -type f | wc -l)" -eq 6 ]]
 
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+      - name: Install Debian package in clean Debian 12 image
+        run: |
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            docker.io/library/debian@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df \
+            sh -euxc 'apt-get update; apt-get install -y /dist/*.deb; ferrum --version'
+
+      - name: Install RPM package in clean Fedora 43 image
+        run: |
+          docker run --rm \
+            -v "$PWD/dist:/dist:ro" \
+            registry.fedoraproject.org/fedora@sha256:6c11e30de5df4d8bea61f9c522bb4ae7c350f7b2ba9a2978da838fefd2041f02 \
+            sh -euxc 'dnf install -y /dist/*.rpm; ferrum --version'
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
-          files: |
-            ferrum-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
-            ferrum-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz.sha256
+          subject-path: dist/*
+
+      - name: Upload all release assets
+        uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631 # v2.2.2
+        with:
+          files: dist/*

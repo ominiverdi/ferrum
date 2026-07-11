@@ -42,9 +42,9 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 Download the latest release asset from Codeberg.
 
 ```bash
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.7/ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.6.7-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.6.7-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.9/ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.6.9-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.6.9-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -53,9 +53,9 @@ man ferrum
 Optional checksum verification:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.7/ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.7/ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.9/ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.6.9/ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.6.9-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ### From source
@@ -65,7 +65,7 @@ Install with Cargo:
 ```bash
 git clone https://codeberg.org/ominiverdi/ferrum.git
 cd ferrum
-cargo install --path .
+cargo install --locked --path .
 ferrum --help
 ```
 

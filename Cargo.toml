@@ -8,6 +8,9 @@ readme = "README.md"
 keywords = ["ai", "agent", "cli", "coding"]
 categories = ["command-line-utilities", "development-tools"]
 
+[package.metadata.generate-rpm]
+# Release assets are supplied by scripts/package-linux-inner.sh with --set-metadata.
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
