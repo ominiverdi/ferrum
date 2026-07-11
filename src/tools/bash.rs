@@ -764,18 +764,24 @@ mod tests {
     #[tokio::test]
     async fn cancellation_after_process_exit_keeps_exited_outcome() {
         let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("shell-finishing");
+        let cwd = temp.path().to_path_buf();
+        let command = format!(
+            "setsid sleep 1 & echo completed; touch {}",
+            shell_quote(marker.to_string_lossy().as_ref())
+        );
         let cancel = Arc::new(AtomicBool::new(false));
         let trigger = Arc::clone(&cancel);
         let handle = tokio::spawn(async move {
-            run_with_cancel(
-                "setsid sleep 1 & echo completed",
-                temp.path(),
-                Duration::from_secs(5),
-                Some(cancel),
-            )
-            .await
-            .unwrap()
+            run_with_cancel(&command, &cwd, Duration::from_secs(5), Some(cancel))
+                .await
+                .unwrap()
         });
+        let marker_deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.exists() && Instant::now() < marker_deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(marker.exists(), "shell did not reach its final command");
         tokio::time::sleep(Duration::from_millis(100)).await;
         trigger.store(true, Ordering::Release);
         let output = handle.await.unwrap();
