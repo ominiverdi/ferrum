@@ -221,7 +221,7 @@ Fields:
 - `actual_model`: model id sent to the provider; defaults to the alias name
 - `max_context_tokens`: model-specific operating context budget
 
-This lets each model or alias use a tuned context budget while preserving friendly names for interactive `/model` selection. `/model <Tab>` starts with these configured aliases and the current model; after a successful `/models` call it also completes model ids returned by the active provider. The cache is process-local and cleared when the active provider changes.
+This lets each model or alias use a tuned context budget while preserving friendly names for interactive `/model` selection. `/model <Tab>` starts with these configured aliases and the current model; after a successful `/models` call it also completes bounded, command-safe single-token model ids returned by the active provider. The cache is process-local and cleared when the active provider changes.
 
 ### max_context_tokens
 

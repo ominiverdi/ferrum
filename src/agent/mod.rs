@@ -72,6 +72,9 @@ const CLIPBOARD_HELPER_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_HELPER_TIMEOUT: Duration = Duration::from_secs(10);
 // Kitty RGBA previews are base64-encoded and can exceed 4 MiB at 120x40 cells.
 const MAX_PREVIEW_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_CACHED_PROVIDER_MODEL_NAMES: usize = 512;
+const MAX_CACHED_PROVIDER_MODEL_NAME_BYTES: usize = 256;
+const MAX_CACHED_PROVIDER_MODEL_BYTES: usize = 64 * 1024;
 
 #[derive(Default)]
 struct FerrumLineHelper {
@@ -240,7 +243,7 @@ impl FerrumLineHelper {
     }
 
     fn cache_model_names(&mut self, config: &Config, models: &[String]) {
-        self.cached_provider_model_names = models.to_vec();
+        self.cached_provider_model_names = cacheable_provider_model_names(models);
         self.rebuild_model_names(config);
     }
 
@@ -301,6 +304,37 @@ fn model_command_words(config: &Config) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+fn cacheable_provider_model_names(models: &[String]) -> Vec<String> {
+    let mut accepted = Vec::new();
+    let mut seen = HashSet::new();
+    let mut total_bytes = 0usize;
+
+    for name in models {
+        if accepted.len() >= MAX_CACHED_PROVIDER_MODEL_NAMES {
+            break;
+        }
+        if name.is_empty()
+            || name.len() > MAX_CACHED_PROVIDER_MODEL_NAME_BYTES
+            || name
+                .chars()
+                .any(|character| character.is_whitespace() || character.is_control())
+            || !seen.insert(name.as_str())
+        {
+            continue;
+        }
+        let Some(next_total_bytes) = total_bytes.checked_add(name.len()) else {
+            continue;
+        };
+        if next_total_bytes > MAX_CACHED_PROVIDER_MODEL_BYTES {
+            continue;
+        }
+        total_bytes = next_total_bytes;
+        accepted.push(name.clone());
+    }
+
+    accepted
 }
 
 fn provider_command_words(config: &Config) -> Vec<String> {
@@ -5082,6 +5116,46 @@ mod context_pressure_tests {
             .complete("/model remote-", "/model remote-".len(), &ctx)
             .unwrap();
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn provider_model_completion_cache_rejects_unsafe_names() {
+        let names = vec![
+            "safe-model".to_string(),
+            "remote model".to_string(),
+            "escape\u{1b}[31m".to_string(),
+            String::new(),
+            "x".repeat(MAX_CACHED_PROVIDER_MODEL_NAME_BYTES + 1),
+        ];
+
+        assert_eq!(
+            cacheable_provider_model_names(&names),
+            vec!["safe-model".to_string()]
+        );
+    }
+
+    #[test]
+    fn provider_model_completion_cache_is_count_and_aggregate_bounded() {
+        let too_many = (0..MAX_CACHED_PROVIDER_MODEL_NAMES + 32)
+            .map(|index| format!("model-{index}"))
+            .collect::<Vec<_>>();
+        let count_bounded = cacheable_provider_model_names(&too_many);
+        assert_eq!(count_bounded.len(), MAX_CACHED_PROVIDER_MODEL_NAMES);
+
+        let large_names = (0..MAX_CACHED_PROVIDER_MODEL_NAMES)
+            .map(|index| {
+                format!(
+                    "{index:04}-{}",
+                    "x".repeat(MAX_CACHED_PROVIDER_MODEL_NAME_BYTES - 5)
+                )
+            })
+            .collect::<Vec<_>>();
+        let aggregate_bounded = cacheable_provider_model_names(&large_names);
+        assert!(aggregate_bounded.len() < MAX_CACHED_PROVIDER_MODEL_NAMES);
+        assert!(
+            aggregate_bounded.iter().map(String::len).sum::<usize>()
+                <= MAX_CACHED_PROVIDER_MODEL_BYTES
+        );
     }
 
     #[test]
