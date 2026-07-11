@@ -900,15 +900,31 @@ fn estimated_usage_for_response(
     }
 }
 
+fn estimated_tool_tokens(tools: &[tools::ToolDefinition]) -> usize {
+    serde_json::to_vec(tools)
+        .map(|bytes| bytes.len().div_ceil(4))
+        .unwrap_or(0)
+}
+
 fn estimated_request_tokens(
     messages: &[messages::Message],
     tools: &[tools::ToolDefinition],
 ) -> usize {
-    let message_tokens = estimated_tokens_for_messages(messages);
-    let tool_tokens = serde_json::to_vec(tools)
-        .map(|bytes| bytes.len().div_ceil(4))
-        .unwrap_or(0);
-    message_tokens.saturating_add(tool_tokens)
+    estimated_tokens_for_messages(messages).saturating_add(estimated_tool_tokens(tools))
+}
+
+fn projected_request_tokens(
+    messages: &[messages::Message],
+    tools: &[tools::ToolDefinition],
+    pending_messages: &[messages::Message],
+) -> usize {
+    let mut request_messages = Vec::with_capacity(messages.len() + pending_messages.len());
+    request_messages.extend_from_slice(messages);
+    request_messages.extend_from_slice(pending_messages);
+    let local_estimate = estimated_request_tokens(&request_messages, tools);
+    let usage_projection = context_tokens_from_usage(messages)
+        .map(|tokens| tokens.saturating_add(estimated_tokens_for_messages(pending_messages)));
+    usage_projection.map_or(local_estimate, |tokens| tokens.max(local_estimate))
 }
 
 struct ActiveTurnAbort {
@@ -1647,56 +1663,6 @@ impl AgentState {
     }
 
     async fn run_turn(&mut self, prompt: String, config: &Config, interactive: bool) -> Result<()> {
-        let stats = self.stats();
-        if should_auto_compact(stats.estimated_tokens, config.max_context_tokens) {
-            let percent = context_usage_percent(stats.estimated_tokens, config.max_context_tokens);
-            eprintln!(
-                "[session] context {percent}% used ({}/{} estimated tokens); compacting before limit",
-                stats.estimated_tokens, config.max_context_tokens
-            );
-            let outcome = self.compact(config, None, true, None).await?;
-            self.last_context_warning_bucket = None;
-            match outcome {
-                CompactionOutcome::Compacted {
-                    before_tokens,
-                    after_tokens,
-                } => {
-                    eprintln!(
-                        "[session] compacted context: {before_tokens} -> {after_tokens} estimated tokens"
-                    );
-                    if should_auto_compact(after_tokens, config.max_context_tokens) {
-                        let percent =
-                            context_usage_percent(after_tokens, config.max_context_tokens);
-                        eprintln!(
-                            "[session] context remains above budget after compaction ({percent}% used, {after_tokens}/{} estimated tokens); continuing, but provider context errors are possible",
-                            config.max_context_tokens
-                        );
-                    }
-                }
-                CompactionOutcome::Skipped {
-                    reason,
-                    before_tokens,
-                    ..
-                } => {
-                    eprintln!("[session] compaction skipped: {reason}");
-                    if should_auto_compact(before_tokens, config.max_context_tokens) {
-                        let percent =
-                            context_usage_percent(before_tokens, config.max_context_tokens);
-                        eprintln!(
-                            "[session] context remains above budget without compaction ({percent}% used, {before_tokens}/{} estimated tokens); continuing, but provider context errors are possible",
-                            config.max_context_tokens
-                        );
-                    }
-                }
-            }
-        } else {
-            self.maybe_warn_context_pressure(
-                stats.estimated_tokens,
-                config.max_context_tokens,
-                interactive,
-            );
-        }
-
         let images = std::mem::take(&mut self.pending_images);
         let user = if images.is_empty() {
             messages::Message::text(messages::Role::User, prompt)
@@ -1736,6 +1702,8 @@ impl AgentState {
         let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
         let mut overflow_recovery_attempted = false;
         let force_final_reason = loop {
+            self.ensure_provider_request_budget(config, &tools, &[], "model request")
+                .await?;
             model_request_index += 1;
             if interactive && model_request_index > 1 {
                 render_turn_separator(self.color_mode, &self.colors);
@@ -1915,13 +1883,21 @@ impl AgentState {
         };
 
         eprintln!("[loop-guard] stopped tool use: {force_final_reason}");
-        let mut final_messages = self.messages.clone();
-        final_messages.push(messages::Message::text(
+        let final_instruction = messages::Message::text(
             messages::Role::System,
             format!(
                 "Adaptive loop guard stopped tool use: {force_final_reason}. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
             ),
-        ));
+        );
+        self.ensure_provider_request_budget(
+            config,
+            &[],
+            std::slice::from_ref(&final_instruction),
+            "final synthesis",
+        )
+        .await?;
+        let mut final_messages = self.messages.clone();
+        final_messages.push(final_instruction.clone());
         let mut final_overflow_recovery_attempted = overflow_recovery_attempted;
         let final_response = loop {
             model_request_index += 1;
@@ -2002,13 +1978,15 @@ impl AgentState {
                             "[session] final synthesis overflow recovery compaction skipped: {reason}"
                         ),
                     }
+                    self.ensure_provider_request_budget(
+                        config,
+                        &[],
+                        std::slice::from_ref(&final_instruction),
+                        "final synthesis retry",
+                    )
+                    .await?;
                     final_messages = self.messages.clone();
-                    final_messages.push(messages::Message::text(
-                        messages::Role::System,
-                        format!(
-                            "Adaptive loop guard stopped tool use: {force_final_reason}. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
-                        ),
-                    ));
+                    final_messages.push(final_instruction.clone());
                 }
                 Err(error) => return Err(error),
             }
@@ -2427,6 +2405,48 @@ impl AgentState {
         }
     }
 
+    async fn ensure_provider_request_budget(
+        &mut self,
+        config: &Config,
+        tools: &[tools::ToolDefinition],
+        pending_messages: &[messages::Message],
+        phase: &str,
+    ) -> Result<()> {
+        let projected = projected_request_tokens(&self.messages, tools, pending_messages);
+        if !should_auto_compact(projected, config.max_context_tokens) {
+            return Ok(());
+        }
+
+        let percent = context_usage_percent(projected, config.max_context_tokens);
+        eprintln!(
+            "[session] projected {phase} context is {percent}% ({projected}/{} tokens); compacting before request",
+            config.max_context_tokens
+        );
+        let outcome = self.compact(config, None, true, None).await?;
+        self.last_context_warning_bucket = None;
+        match outcome {
+            CompactionOutcome::Compacted {
+                before_tokens,
+                after_tokens,
+            } => eprintln!(
+                "[session] compacted message estimate: {before_tokens} -> {after_tokens} tokens"
+            ),
+            CompactionOutcome::Skipped { reason, .. } => {
+                eprintln!("[session] compaction skipped before {phase}: {reason}")
+            }
+        }
+
+        let projected = projected_request_tokens(&self.messages, tools, pending_messages);
+        if should_auto_compact(projected, config.max_context_tokens) {
+            let percent = context_usage_percent(projected, config.max_context_tokens);
+            anyhow::bail!(
+                "cannot send {phase}: projected context remains above the safe request budget after compaction ({percent}% used, {projected}/{} tokens)",
+                config.max_context_tokens
+            );
+        }
+        Ok(())
+    }
+
     fn maybe_warn_context_pressure(
         &mut self,
         estimated_tokens: usize,
@@ -2642,11 +2662,20 @@ impl AgentState {
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<CompactionOutcome> {
         let before_tokens = estimated_tokens_for_messages(&self.messages);
-        let (system_messages, conversation): (Vec<_>, Vec<_>) = self
+        let (mut system_messages, conversation): (Vec<_>, Vec<_>) = self
             .messages
             .iter()
             .cloned()
             .partition(|message| matches!(message.role, messages::Role::System));
+        let mut prior_summaries = Vec::new();
+        system_messages.retain(|message| {
+            if message_is_compaction_summary(message) {
+                prior_summaries.push(message.clone());
+                false
+            } else {
+                true
+            }
+        });
 
         if conversation.is_empty() {
             return Ok(CompactionOutcome::Skipped {
@@ -2659,6 +2688,11 @@ impl AgentState {
         let keep_recent_tokens = COMPACTION_KEEP_RECENT_TOKENS.min(config.max_context_tokens / 2);
         let split_index = split_for_compaction(&conversation, keep_recent_tokens.max(1));
         let split_index = avoid_orphan_tool_results(&conversation, split_index);
+        let protected_user = conversation
+            .iter()
+            .rposition(|message| matches!(message.role, messages::Role::User))
+            .filter(|index| *index < split_index)
+            .map(|index| clear_message_usage(conversation[index].clone()));
         let (to_summarize, recent) = conversation.split_at(split_index);
         if to_summarize.is_empty() {
             return Ok(CompactionOutcome::Skipped {
@@ -2668,10 +2702,12 @@ impl AgentState {
             });
         }
 
+        let mut summary_inputs = prior_summaries;
+        summary_inputs.extend_from_slice(to_summarize);
         let summary = compaction_summary_or_fallback(
-            self.generate_compaction_summary(config, to_summarize, custom_instructions, cancel)
+            self.generate_compaction_summary(config, &summary_inputs, custom_instructions, cancel)
                 .await,
-            to_summarize,
+            &summary_inputs,
             custom_instructions,
             force,
         )?;
@@ -2684,9 +2720,16 @@ impl AgentState {
             ),
         );
 
+        let mut retained_messages =
+            Vec::with_capacity(recent.len() + usize::from(protected_user.is_some()));
+        if let Some(user) = protected_user {
+            retained_messages.push(user);
+        }
+        retained_messages.extend(recent.iter().cloned().map(clear_message_usage));
+
         let mut compacted_messages = system_messages;
         compacted_messages.push(summary_message.clone());
-        compacted_messages.extend(recent.iter().cloned().map(clear_message_usage));
+        compacted_messages.extend(retained_messages.iter().cloned());
         let after_tokens = estimated_tokens_for_messages(&compacted_messages);
 
         if !force && after_tokens >= before_tokens {
@@ -2698,6 +2741,9 @@ impl AgentState {
         }
 
         self.session.append_compaction(summary.trim())?;
+        for message in &retained_messages {
+            self.session.append_message(message)?;
+        }
         self.messages = compacted_messages;
         Ok(CompactionOutcome::Compacted {
             before_tokens,
@@ -2721,6 +2767,19 @@ impl AgentState {
             ),
             messages::Message::text(messages::Role::User, prompt),
         ];
+        if cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            anyhow::bail!("aborted");
+        }
+        let projected = estimated_request_tokens(&request_messages, &[]);
+        if should_auto_compact(projected, config.max_context_tokens) {
+            anyhow::bail!(
+                "compaction summary request exceeds the safe context budget ({projected}/{} estimated tokens)",
+                config.max_context_tokens
+            );
+        }
         let mut on_event = |_event: providers::StreamEvent| {};
         let response = provider
             .complete_streaming(
@@ -4009,12 +4068,146 @@ mod context_pressure_tests {
         assert!(estimated_tokens_for_message(&image) > 10_000);
     }
 
+    #[tokio::test]
+    async fn oversized_current_user_request_fails_before_provider_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 6_000;
+        config.base_max_context_tokens = 6_000;
+        let mut state = AgentState::new(&config).unwrap();
+        let user = messages::Message::text(messages::Role::User, "x".repeat(40_000));
+        state.session.append_message(&user).unwrap();
+        state.messages.push(user);
+
+        let error = state
+            .ensure_provider_request_budget(&config, &[], &[], "model request")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("safe request budget"));
+        assert!(state.messages.iter().any(|message| {
+            matches!(message.role, messages::Role::User)
+                && message.text_content() == "x".repeat(40_000)
+        }));
+    }
+
+    #[tokio::test]
+    async fn multi_round_tool_loop_compacts_before_next_provider_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 6_000;
+        config.base_max_context_tokens = 6_000;
+        config.tools_allow = Some(vec!["read".to_string()]);
+        std::fs::write(temp.path().join("loop.txt"), "x".repeat(20_000)).unwrap();
+
+        let mut state = AgentState::new(&config).unwrap();
+        state.cwd = temp.path().to_path_buf();
+        state
+            .run_turn("__ferrum_test_repeat_read__".to_string(), &config, false)
+            .await
+            .unwrap();
+
+        let info = session::jsonl::session_info(state.session.path())
+            .unwrap()
+            .unwrap();
+        assert!(info.compaction_count >= 2);
+        let loaded = session::jsonl::load_messages(state.session.path()).unwrap();
+        assert!(loaded.iter().any(|message| {
+            matches!(message.role, messages::Role::User)
+                && message.text_content() == "__ferrum_test_repeat_read__"
+        }));
+        assert!(!loaded.first().is_some_and(message_has_tool_result));
+    }
+
+    #[test]
+    fn projected_budget_includes_forced_final_instruction() {
+        let messages = vec![assistant_with_usage(3_500)];
+        let final_instruction = messages::Message::text(messages::Role::System, "x".repeat(2_000));
+        assert!(!should_auto_compact(
+            projected_request_tokens(&messages, &[], &[]),
+            4_000,
+        ));
+        assert!(should_auto_compact(
+            projected_request_tokens(&messages, &[], &[final_instruction]),
+            4_000,
+        ));
+    }
+
+    #[test]
+    fn projected_budget_detects_gradual_rounds_and_large_tool_results() {
+        let mut messages = vec![messages::Message::text(messages::Role::User, "request")];
+        let mut crossed_on_round = None;
+        for round in 1..=20 {
+            messages.push(messages::Message {
+                role: messages::Role::Assistant,
+                content: vec![messages::ContentBlock::ToolUse {
+                    id: format!("call_{round}"),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "file.txt"}),
+                }],
+                usage: None,
+            });
+            messages.push(messages::Message {
+                role: messages::Role::Tool,
+                content: vec![messages::ContentBlock::ToolResult {
+                    tool_use_id: format!("call_{round}"),
+                    content: "x".repeat(1_000),
+                    is_error: false,
+                }],
+                usage: None,
+            });
+            let projected = projected_request_tokens(&messages, &[], &[]);
+            if should_auto_compact(projected, 4_000) {
+                crossed_on_round = Some(round);
+                break;
+            }
+        }
+        assert!(crossed_on_round.is_some_and(|round| round > 1));
+
+        let large_result = messages::Message {
+            role: messages::Role::Tool,
+            content: vec![messages::ContentBlock::ToolResult {
+                tool_use_id: "large".to_string(),
+                content: "x".repeat(20_000),
+                is_error: false,
+            }],
+            usage: None,
+        };
+        assert!(should_auto_compact(
+            projected_request_tokens(&[large_result], &[], &[]),
+            4_000,
+        ));
+    }
+
+    #[test]
+    fn projected_request_budget_includes_pending_messages_tools_and_usage() {
+        let base = vec![assistant_with_usage(10_000)];
+        let pending = vec![messages::Message::text(
+            messages::Role::User,
+            "x".repeat(8_000),
+        )];
+        let tools = vec![tools::ToolDefinition {
+            name: "large_tool".to_string(),
+            description: "d".repeat(40_000),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+
+        let projected = projected_request_tokens(&base, &tools, &pending);
+        let without_tools = projected_request_tokens(&base, &[], &pending);
+
+        assert!(projected >= 12_000);
+        assert!(projected > without_tools);
+        assert!(
+            projected >= estimated_request_tokens(&[base[0].clone(), pending[0].clone()], &tools,)
+        );
+    }
+
     #[test]
     fn large_image_turn_triggers_context_pressure_before_provider_rejects() {
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
-        state.messages.push(messages::Message {
+        let state = AgentState::new(&config).unwrap();
+        let image = messages::Message {
             role: messages::Role::User,
             content: vec![
                 messages::ContentBlock::Text {
@@ -4028,14 +4221,11 @@ mod context_pressure_tests {
                 },
             ],
             usage: None,
-        });
+        };
 
-        let stats = state.stats();
+        let projected = projected_request_tokens(&state.messages, &[], &[image]);
 
-        assert!(should_auto_compact(
-            stats.estimated_tokens,
-            config.max_context_tokens
-        ));
+        assert!(should_auto_compact(projected, config.max_context_tokens));
     }
 
     #[test]
@@ -4186,6 +4376,81 @@ mod context_pressure_tests {
 
         assert!(summary.len() < LOCAL_COMPACTION_SUMMARY_MAX_CHARS + 2_000);
         assert!(summary.contains("omitted from local fallback summary"));
+    }
+
+    #[tokio::test]
+    async fn compaction_reappends_retained_messages_for_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 20_000;
+        config.base_max_context_tokens = 20_000;
+        let mut state = AgentState::new(&config).unwrap();
+        let conversation = vec![
+            messages::Message::text(messages::Role::User, "x".repeat(80_000)),
+            messages::Message::text(messages::Role::User, "current request"),
+            messages::Message {
+                role: messages::Role::Assistant,
+                content: vec![messages::ContentBlock::ToolUse {
+                    id: "call_current".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path": "current.txt"}),
+                }],
+                usage: None,
+            },
+            messages::Message {
+                role: messages::Role::Tool,
+                content: vec![messages::ContentBlock::ToolResult {
+                    tool_use_id: "call_current".to_string(),
+                    content: "current result".to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+            },
+        ];
+        for message in &conversation {
+            state.session.append_message(message).unwrap();
+            state.messages.push(message.clone());
+        }
+
+        state.compact(&config, None, true, None).await.unwrap();
+
+        let loaded = session::jsonl::load_messages(state.session.path()).unwrap();
+        assert!(loaded.iter().any(|message| {
+            matches!(message.role, messages::Role::User)
+                && message.text_content() == "current request"
+        }));
+        let call_index = loaded
+            .iter()
+            .position(|message| {
+                message.content.iter().any(|block| {
+                    matches!(block, messages::ContentBlock::ToolUse { id, .. } if id == "call_current")
+                })
+            })
+            .unwrap();
+        let result_index = loaded
+            .iter()
+            .position(|message| {
+                message.content.iter().any(|block| {
+                    matches!(block, messages::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "call_current")
+                })
+            })
+            .unwrap();
+        assert!(call_index < result_index);
+    }
+
+    #[test]
+    fn compaction_split_keeps_recent_messages_within_budget() {
+        let messages = vec![
+            messages::Message::text(messages::Role::User, "x".repeat(8_000)),
+            messages::Message::text(messages::Role::Assistant, "recent"),
+        ];
+        assert_eq!(split_for_compaction(&messages, 100), 1);
+
+        let oversized_latest = vec![messages::Message::text(
+            messages::Role::Tool,
+            "x".repeat(8_000),
+        )];
+        assert_eq!(split_for_compaction(&oversized_latest, 100), 1);
     }
 
     #[test]
@@ -4544,10 +4809,11 @@ enum CompactionOutcome {
 fn split_for_compaction(messages: &[messages::Message], keep_recent_tokens: usize) -> usize {
     let mut accumulated = 0usize;
     for (index, message) in messages.iter().enumerate().rev() {
-        accumulated = accumulated.saturating_add(estimated_tokens_for_message(message));
-        if accumulated >= keep_recent_tokens {
-            return index;
+        let tokens = estimated_tokens_for_message(message);
+        if accumulated.saturating_add(tokens) > keep_recent_tokens {
+            return index + 1;
         }
+        accumulated = accumulated.saturating_add(tokens);
     }
     0
 }

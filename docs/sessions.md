@@ -149,11 +149,11 @@ actual_model = "gpt-5.5"
 max_context_tokens = 6000
 ```
 
-Ferrum warns as context usage rises: 75-84% every 5%, 85-91% every 3%, and 92-94% every 1%. It compacts automatically at 95% so the compaction request has headroom.
+Ferrum warns as context usage rises: 75-84% every 5%, 85-91% every 3%, and 92-94% every 1%. Before every provider request, including each tool-loop continuation and forced final synthesis, it projects the request from provider-informed usage, local message estimates, pending messages, and active tool definitions. Automatic compaction keeps a 16,384-token reserve on larger context windows and uses the 95% threshold on smaller windows. Ferrum refuses a request with a clear context-budget error if compaction cannot reduce it below the safe threshold.
 
 ## Compaction
 
-`/compact` summarizes older conversation with the current provider model, keeps recent context, and stores a `compaction` entry. The summary is loaded back as system context when the session is resumed.
+`/compact` summarizes older conversation with the current provider model, keeps recent context, and stores a `compaction` entry. Retained recent messages are re-appended after that entry so resuming reconstructs the same active context. If mid-turn compaction summarizes earlier tool rounds, Ferrum retains the current user request explicitly. The summary is loaded back as system context when the session is resumed.
 
 Manual compaction is skipped when there is nothing old enough to summarize or when the resulting context would not be smaller. Automatic compaction can force a fallback local summary if model-generated compaction fails while the session is over budget. Ferrum avoids retaining orphan tool results whose matching tool calls were summarized away.
 

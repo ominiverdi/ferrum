@@ -239,7 +239,7 @@ Ferrum compaction is Pi-inspired but simpler:
 6. For manual `/compact`, skip if there is nothing old enough to summarize or if the resulting context is not smaller.
 7. For automatic over-budget compaction, fall back to a local heuristic summary if model-generated compaction fails.
 
-Automatic compaction starts at 95% of the active context budget. Ferrum emits context-pressure warnings before that point and reports when compaction still leaves the session above budget.
+Automatic compaction runs as a preflight before every provider request, including each tool-loop continuation and forced final synthesis. The projection uses the larger of provider-informed current usage and the local message estimate, includes pending messages and active tool schemas, and reserves 16,384 tokens on larger context windows (95% on smaller windows). If compaction cannot bring the projected request below that safe threshold, Ferrum fails with an explicit context-budget error instead of knowingly sending an over-budget request.
 
 The summary format tracks goal, constraints, progress, blockers, key decisions, next steps, and critical context.
 

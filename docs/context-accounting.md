@@ -101,7 +101,7 @@ because the new provider usage was produced after the compaction boundary.
 
 ### Step 1: boundary-aware stats
 
-Implemented: current context accounting ignores usage from assistant messages before the latest compaction boundary. Because retained recent messages were written before the new compaction entry but appear after the summary in the in-memory context, compaction also clears usage on retained messages. Boundaries are recognized from Ferrum's in-memory compaction summary message and the summary marker loaded from persisted sessions.
+Implemented: current context accounting ignores usage from assistant messages before the latest compaction boundary. Compaction clears usage on retained assistant messages and re-appends retained messages after the persisted compaction entry, so in-memory and resumed sessions share the same boundary. Current-request preflight uses the larger of this provider-informed value and the complete local request estimate, including pending messages and tool schemas.
 
 Original implementation options considered:
 

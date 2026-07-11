@@ -32,12 +32,27 @@ impl Provider for FakeProvider {
                     &script, messages,
                 )));
             }
+            if messages.iter().any(|message| {
+                matches!(message.role, Role::System)
+                    && message
+                        .text_content()
+                        .contains("You are a context summarization assistant")
+            }) {
+                return Ok(ProviderResponse::message(Message::text(
+                    Role::Assistant,
+                    "fake compaction summary\n",
+                )));
+            }
             let last_user = messages
                 .iter()
                 .rev()
                 .find(|message| matches!(message.role, Role::User))
                 .map(Message::text_content)
                 .unwrap_or_default();
+            #[cfg(test)]
+            if last_user == "__ferrum_test_repeat_read__" {
+                return Ok(ProviderResponse::message(repeat_read_response(messages)));
+            }
             Ok(ProviderResponse::message(Message::text(
                 Role::Assistant,
                 format!("fake provider response: {last_user}\n"),
