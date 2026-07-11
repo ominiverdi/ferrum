@@ -42,6 +42,8 @@ Ferrum risk mostly comes from which tools are exposed.
 - `write` and `edit` mutate files.
 - `bash` and `wait` run local commands.
 - MCP servers are external programs; their output becomes model context.
+- Ferrum rejects authenticated non-loopback provider URLs using cleartext HTTP unless the provider explicitly sets `allow_insecure_http = true`; loopback and authless local endpoints remain supported. Provider HTTP clients do not follow redirects, preventing credentials from being forwarded to an unexpected endpoint.
+- Provider response bodies, SSE framing, aggregate stream bytes, output fields, and tool calls are bounded. Malformed or incomplete streams fail the turn rather than becoming empty replies.
 - Fork PRs and third-party repositories are untrusted input.
 - Ferrum does not load repository-owned config to change tool policy.
 - Ferrum does not treat MCP tool descriptions or output as trusted; raw MCP

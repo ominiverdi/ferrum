@@ -1711,7 +1711,7 @@ impl AgentState {
             io::stdout().flush()?;
         }
 
-        let provider = providers::from_config(&config.provider);
+        let provider = providers::from_config(&config.provider)?;
         let mut tools = builtin_tools::definitions();
         tools.extend(history_tool_definitions());
         if self.mcp_enabled {
@@ -1785,7 +1785,10 @@ impl AgentState {
                     println!("aborted");
                     return Ok(());
                 }
-                Err(error) if is_context_overflow_error(&error) && !overflow_recovery_attempted => {
+                Err(error)
+                    if providers::is_context_overflow_error(&error)
+                        && !overflow_recovery_attempted =>
+                {
                     overflow_recovery_attempted = true;
                     eprintln!(
                         "[session] provider reported context overflow; compacting and retrying once"
@@ -1979,7 +1982,8 @@ impl AgentState {
                     return Ok(());
                 }
                 Err(error)
-                    if is_context_overflow_error(&error) && !final_overflow_recovery_attempted =>
+                    if providers::is_context_overflow_error(&error)
+                        && !final_overflow_recovery_attempted =>
                 {
                     final_overflow_recovery_attempted = true;
                     eprintln!(
@@ -2708,7 +2712,7 @@ impl AgentState {
         custom_instructions: Option<&str>,
         cancel: Option<Arc<AtomicBool>>,
     ) -> Result<String> {
-        let provider = providers::from_config(&config.provider);
+        let provider = providers::from_config(&config.provider)?;
         let prompt = compaction_prompt(messages, custom_instructions);
         let request_messages = vec![
             messages::Message::text(
@@ -3575,36 +3579,6 @@ fn format_age(modified: SystemTime) -> String {
     } else {
         format!("{}w", minutes / (60 * 24 * 7))
     }
-}
-
-fn is_context_overflow_error(error: &anyhow::Error) -> bool {
-    let text = error.to_string().to_ascii_lowercase();
-    let overflow_patterns = [
-        "prompt is too long",
-        "request_too_large",
-        "input is too long for requested model",
-        "exceeds the context window",
-        "maximum context length",
-        "input token count",
-        "maximum prompt length",
-        "reduce the length of the messages",
-        "context window exceeds limit",
-        "exceeded model token limit",
-        "too large for model",
-        "model_context_window_exceeded",
-        "prompt too long",
-        "context length exceeded",
-        "context_length_exceeded",
-        "too many tokens",
-        "token limit exceeded",
-    ];
-    let non_overflow_patterns = ["rate limit", "too many requests", "throttling"];
-    overflow_patterns
-        .iter()
-        .any(|pattern| text.contains(pattern))
-        && !non_overflow_patterns
-            .iter()
-            .any(|pattern| text.contains(pattern))
 }
 
 fn should_auto_compact(estimated_tokens: usize, max_context_tokens: usize) -> bool {

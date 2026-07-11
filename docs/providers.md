@@ -41,13 +41,17 @@ default_model = "gpt-5.5"
 GET https://chatgpt.com/backend-api/codex/models?client_version=<version>
 ```
 
-Ferrum queries the latest stable Codex CLI release for each `/models` command and uses that version for model discovery. If the release lookup or model request fails, it falls back to the current tested Codex CLI version. Set `FERRUM_CODEX_CLIENT_VERSION` to bypass release discovery and force a specific compatibility version:
+Ferrum queries the latest stable Codex CLI release for each `/models` command and uses that version for model discovery. If release discovery fails, it uses the current tested Codex CLI version. If an automatically discovered version receives a typed client-version compatibility rejection, Ferrum retries model discovery with the tested fallback. Set `FERRUM_CODEX_CLIENT_VERSION` to bypass release discovery and force a specific compatibility version; explicit overrides are never silently replaced:
 
 ```bash
 export FERRUM_CODEX_CLIENT_VERSION=0.144.0
 ```
 
-Ferrum bounds Codex and streaming OpenAI-compatible requests with a 60-second initial-response timeout and a 90-second idle timeout between stream chunks. Initial Codex timeouts use the normal transient retry policy; a stalled stream fails without replaying partial output.
+Ferrum applies a 60-second initial-response deadline, bounded idle and total deadlines while collecting non-streaming/status bodies, and a 90-second idle deadline between streaming chunks. Streaming has no total duration limit while chunks continue arriving.
+
+Codex retries rejected requests for HTTP 408, 429, and 5xx responses and retries connection failures up to three times. `Retry-After` is honored up to 60 seconds. Each retry prints its reason, delay, and retry count; exhaustion prints an explicit final summary with retries and total attempts. Initial-response timeouts and failures after response streaming begins are not retried because the provider may already be processing the request or may have emitted partial visible output.
+
+Provider bodies, SSE lines/events, aggregate response bytes, output text, reasoning, tool calls, and tool arguments are bounded. Ferrum incrementally decodes UTF-8, accepts standard SSE field syntax, stops reading at the protocol terminal event (`response.completed` for Codex or `[DONE]` for OpenAI-compatible chat streams), and rejects malformed or prematurely closed streams instead of turning them into empty replies.
 
 You can override the base URL with:
 
@@ -73,9 +77,13 @@ api_key_env = "EXAMPLE_API_KEY"
 default_model = "example-model"
 streaming = true
 stream_usage = true
+# Required only to send credentials to a non-loopback http:// URL:
+# allow_insecure_http = true
 ```
 
-`streaming` and `stream_usage` default to `true` for OpenAI-compatible providers. If a provider rejects OpenAI's `stream_options.include_usage`, Ferrum retries the request once without usage options and records estimated usage when provider usage is absent. Set `stream_usage = false` for providers known to reject usage-in-streaming options, to skip that retry path. Set `streaming = false` for providers with incompatible streaming responses.
+`streaming` and `stream_usage` default to `true` for OpenAI-compatible providers. If a provider rejects OpenAI's `stream_options.include_usage`, Ferrum retries the rejected request once without usage options and records estimated usage when provider usage is absent. Set `stream_usage = false` for providers known to reject usage-in-streaming options, to skip that compatibility retry. Set `streaming = false` for providers with incompatible streaming responses.
+
+Ferrum allows cleartext `http://` for loopback providers and authless endpoints. An authenticated non-loopback `http://` provider is rejected by default because it would expose the bearer credential in transit. Prefer HTTPS. If a trusted deployment explicitly requires authenticated remote cleartext HTTP, set `allow_insecure_http = true` in that provider entry.
 
 If top-level `model` is omitted, Ferrum uses the selected provider's `default_model`. A top-level `model` still takes precedence.
 

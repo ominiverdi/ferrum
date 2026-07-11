@@ -219,6 +219,8 @@ pub struct ProviderDefinition {
     pub default_model: Option<String>,
     pub streaming: Option<bool>,
     pub stream_usage: Option<bool>,
+    #[serde(default)]
+    pub allow_insecure_http: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -585,22 +587,35 @@ fn provider_from_definition(
 ) -> Result<ProviderConfig> {
     match definition.kind.as_str() {
         "fake" => Ok(ProviderConfig::Fake),
-        "openai-compatible" => Ok(ProviderConfig::OpenAiCompat {
-            api_key_env: definition.api_key_env.clone(),
-            base_url: definition
+        "openai-compatible" => {
+            let base_url = definition
                 .base_url
                 .clone()
-                .with_context(|| format!("providers.{name}.base_url is required"))?,
-            streaming: definition.streaming.unwrap_or(true),
-            stream_usage: definition.stream_usage.unwrap_or(true),
-        }),
-        "openai-codex" => Ok(ProviderConfig::OpenAiCodex {
-            base_url: definition
+                .with_context(|| format!("providers.{name}.base_url is required"))?;
+            validate_provider_base_url(
+                name,
+                &base_url,
+                definition.api_key_env.is_some(),
+                definition.allow_insecure_http,
+            )?;
+            Ok(ProviderConfig::OpenAiCompat {
+                api_key_env: definition.api_key_env.clone(),
+                base_url,
+                streaming: definition.streaming.unwrap_or(true),
+                stream_usage: definition.stream_usage.unwrap_or(true),
+            })
+        }
+        "openai-codex" => {
+            let base_url = definition
                 .base_url
                 .clone()
-                .unwrap_or_else(|| "https://chatgpt.com/backend-api".to_string()),
-            auth_path: config_dir.join("auth.json"),
-        }),
+                .unwrap_or_else(|| "https://chatgpt.com/backend-api".to_string());
+            validate_provider_base_url(name, &base_url, true, definition.allow_insecure_http)?;
+            Ok(ProviderConfig::OpenAiCodex {
+                base_url,
+                auth_path: config_dir.join("auth.json"),
+            })
+        }
         other => anyhow::bail!("unsupported provider type for {name}: {other}"),
     }
 }
@@ -608,19 +623,63 @@ fn provider_from_definition(
 fn legacy_provider_from_name(name: &str, config_dir: &std::path::Path) -> Result<ProviderConfig> {
     match name {
         "fake" => Ok(ProviderConfig::Fake),
-        "openai" | "openai-compatible" => Ok(ProviderConfig::OpenAiCompat {
-            api_key_env: Some("OPENAI_API_KEY".to_string()),
-            base_url: env::var("OPENAI_BASE_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-            streaming: true,
-            stream_usage: true,
-        }),
-        "openai-codex" => Ok(ProviderConfig::OpenAiCodex {
-            base_url: env::var("OPENAI_CODEX_BASE_URL")
-                .unwrap_or_else(|_| "https://chatgpt.com/backend-api".to_string()),
-            auth_path: config_dir.join("auth.json"),
-        }),
+        "openai" | "openai-compatible" => {
+            let base_url = env::var("OPENAI_BASE_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+            validate_provider_base_url(name, &base_url, true, false)?;
+            Ok(ProviderConfig::OpenAiCompat {
+                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                base_url,
+                streaming: true,
+                stream_usage: true,
+            })
+        }
+        "openai-codex" => {
+            let base_url = env::var("OPENAI_CODEX_BASE_URL")
+                .unwrap_or_else(|_| "https://chatgpt.com/backend-api".to_string());
+            validate_provider_base_url(name, &base_url, true, false)?;
+            Ok(ProviderConfig::OpenAiCodex {
+                base_url,
+                auth_path: config_dir.join("auth.json"),
+            })
+        }
         other => anyhow::bail!("unsupported provider: {other}"),
+    }
+}
+
+fn validate_provider_base_url(
+    name: &str,
+    base_url: &str,
+    authenticated: bool,
+    allow_insecure_http: bool,
+) -> Result<()> {
+    let url = url::Url::parse(base_url)
+        .with_context(|| format!("provider {name} has an invalid base_url"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        anyhow::bail!("provider {name} base_url must use http or https");
+    }
+    if url.host().is_none() {
+        anyhow::bail!("provider {name} base_url must include a host");
+    }
+    let authenticated = authenticated || !url.username().is_empty() || url.password().is_some();
+    if url.scheme() == "http"
+        && authenticated
+        && !allow_insecure_http
+        && !url_host_is_loopback(&url)
+    {
+        anyhow::bail!(
+            "provider {name} would send credentials over non-loopback cleartext HTTP; use HTTPS or set allow_insecure_http = true explicitly"
+        );
+    }
+    Ok(())
+}
+
+fn url_host_is_loopback(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -737,6 +796,72 @@ deny = ["bash"]
             )
             .unwrap();
         assert_eq!(config.tool_selection, Some(ToolSelection::None));
+    }
+
+    #[test]
+    fn rejects_authenticated_remote_cleartext_provider_by_default() {
+        let definition = ProviderDefinition {
+            kind: "openai-compatible".to_string(),
+            base_url: Some("http://example.com/v1".to_string()),
+            api_key_env: Some("EXAMPLE_API_KEY".to_string()),
+            default_model: None,
+            streaming: None,
+            stream_usage: None,
+            allow_insecure_http: false,
+        };
+        let error = provider_from_definition(
+            "remote",
+            &definition,
+            std::path::Path::new("/tmp/ferrum-config-test"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cleartext HTTP"));
+    }
+
+    #[test]
+    fn permits_explicit_or_loopback_authenticated_cleartext_provider() {
+        let mut definition = ProviderDefinition {
+            kind: "openai-compatible".to_string(),
+            base_url: Some("http://127.0.0.1:8080/v1".to_string()),
+            api_key_env: Some("EXAMPLE_API_KEY".to_string()),
+            default_model: None,
+            streaming: None,
+            stream_usage: None,
+            allow_insecure_http: false,
+        };
+        assert!(
+            provider_from_definition(
+                "local",
+                &definition,
+                std::path::Path::new("/tmp/ferrum-config-test"),
+            )
+            .is_ok()
+        );
+
+        definition.base_url = Some("http://example.com/v1".to_string());
+        definition.allow_insecure_http = true;
+        assert!(
+            provider_from_definition(
+                "remote",
+                &definition,
+                std::path::Path::new("/tmp/ferrum-config-test"),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn permits_authless_remote_cleartext_provider() {
+        validate_provider_base_url("authless", "http://example.com/v1", false, false).unwrap();
+        assert!(
+            validate_provider_base_url(
+                "url-auth",
+                "http://user:password@example.com/v1",
+                false,
+                false,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,4 +1,10 @@
-use super::{Provider, ProviderResponse, StreamEvent, TokenUsage};
+use super::{
+    Provider, ProviderFailure, ProviderResponse, StreamEvent, TokenUsage,
+    transport::{
+        BodyLimits, MAX_PROVIDER_ERROR_BODY_BYTES, MAX_PROVIDER_JSON_BODY_BYTES, SseControl,
+        collect_response_body, consume_sse_response,
+    },
+};
 use crate::{
     agent::{
         messages::{ContentBlock, Message, Role, sanitize_thinking_text},
@@ -7,10 +13,10 @@ use crate::{
     auth::openai_codex,
     cancel::{self, WaitError},
     config::ThinkingLevel,
+    text_truncate::truncate_to_max_bytes,
 };
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, Response, StatusCode, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -27,6 +33,16 @@ use std::{
 
 const PROVIDER_INITIAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const PROVIDER_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const PROVIDER_BODY_TOTAL_TIMEOUT: Duration = Duration::from_secs(120);
+const PROVIDER_ERROR_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const PROVIDER_ERROR_BODY_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PROVIDER_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROVIDER_THINKING_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROVIDER_TOOL_ARGUMENT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_PROVIDER_FIELD_BYTES: usize = 16 * 1024;
+const MAX_PROVIDER_ERROR_DISPLAY_BYTES: usize = 8 * 1024;
+const MAX_PROVIDER_EVENTS: usize = 100_000;
 
 pub struct OpenAiCompatProvider {
     api_key_env: Option<String>,
@@ -43,20 +59,151 @@ fn metrics_enabled() -> bool {
     )
 }
 
+fn success_body_limits() -> BodyLimits {
+    BodyLimits {
+        max_bytes: MAX_PROVIDER_JSON_BODY_BYTES,
+        idle_timeout: PROVIDER_BODY_IDLE_TIMEOUT,
+        total_timeout: PROVIDER_BODY_TOTAL_TIMEOUT,
+    }
+}
+
+fn error_body_limits() -> BodyLimits {
+    BodyLimits {
+        max_bytes: MAX_PROVIDER_ERROR_BODY_BYTES,
+        idle_timeout: PROVIDER_ERROR_BODY_IDLE_TIMEOUT,
+        total_timeout: PROVIDER_ERROR_BODY_TOTAL_TIMEOUT,
+    }
+}
+
+async fn collect_provider_body(
+    response: Response,
+    cancelled: Option<&Arc<AtomicBool>>,
+    success: bool,
+    label: &str,
+) -> Result<Vec<u8>> {
+    collect_response_body(
+        response,
+        cancelled,
+        if success {
+            success_body_limits()
+        } else {
+            error_body_limits()
+        },
+        label,
+    )
+    .await
+}
+
+fn provider_stream_error(error: anyhow::Error, label: &str) -> anyhow::Error {
+    if error.to_string() == "aborted" {
+        return error;
+    }
+    error.context(format!(
+        "{label} failed after the provider accepted the request; Ferrum did not retry it to avoid replaying partial output"
+    ))
+}
+
+fn utf8_body<'a>(body: &'a [u8], label: &str) -> Result<&'a str> {
+    std::str::from_utf8(body).with_context(|| format!("{label} was not valid UTF-8"))
+}
+
+fn provider_status_error(label: &str, status: StatusCode, body: &[u8]) -> anyhow::Error {
+    let text = String::from_utf8_lossy(body);
+    let text = if text.len() > MAX_PROVIDER_ERROR_DISPLAY_BYTES {
+        format!(
+            "{} [truncated]",
+            truncate_to_max_bytes(&text, MAX_PROVIDER_ERROR_DISPLAY_BYTES)
+        )
+    } else {
+        text.into_owned()
+    };
+    let message = format!("{label} returned {status}: {text}");
+    if is_structured_context_overflow(status, body) {
+        return ProviderFailure::ContextOverflow { message }.into();
+    }
+    anyhow::anyhow!(message)
+}
+
+fn is_structured_context_overflow(status: StatusCode, body: &[u8]) -> bool {
+    if status == StatusCode::PAYLOAD_TOO_LARGE {
+        return true;
+    }
+    if status != StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    structured_context_overflow_value(&value)
+}
+
+fn structured_context_overflow_value(value: &serde_json::Value) -> bool {
+    let error = value
+        .get("error")
+        .or_else(|| {
+            value
+                .get("response")
+                .and_then(|response| response.get("error"))
+        })
+        .unwrap_or(value);
+    let code = error
+        .get("code")
+        .or_else(|| error.get("type"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    matches!(
+        code,
+        "context_length_exceeded"
+            | "model_context_window_exceeded"
+            | "request_too_large"
+            | "prompt_too_long"
+            | "input_too_long"
+    )
+}
+
+fn optional_string_field<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+    label: &str,
+) -> Result<Option<&'a str>> {
+    match value.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .with_context(|| format!("{label} `{field}` must be a string")),
+    }
+}
+
+fn push_bounded(target: &mut String, value: &str, max_bytes: usize, field: &str) -> Result<()> {
+    if target.len().saturating_add(value.len()) > max_bytes {
+        anyhow::bail!("provider {field} exceeded {max_bytes} bytes");
+    }
+    target.push_str(value);
+    Ok(())
+}
+
+fn validate_field(value: &str, max_bytes: usize, field: &str) -> Result<()> {
+    if value.len() > max_bytes {
+        anyhow::bail!("provider {field} exceeded {max_bytes} bytes");
+    }
+    Ok(())
+}
+
 impl OpenAiCompatProvider {
     pub fn new(
         api_key_env: Option<String>,
         base_url: String,
         streaming: bool,
         stream_usage: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             api_key_env,
             base_url: base_url.trim_end_matches('/').to_string(),
             streaming,
             stream_usage,
-            client: Client::new(),
-        }
+            client: Client::builder().redirect(Policy::none()).build()?,
+        })
     }
 }
 
@@ -95,19 +242,32 @@ impl Provider for OpenAiCompatProvider {
             if let Some(api_key) = api_key.as_deref() {
                 http_request = http_request.bearer_auth(api_key);
             }
-            let response = http_request
-                .json(&request)
-                .send()
-                .await
-                .context("OpenAI-compatible request failed")?;
+            let response = cancel::race_timeout(
+                http_request.json(&request).send(),
+                None,
+                PROVIDER_INITIAL_RESPONSE_TIMEOUT,
+            )
+            .await
+            .map_err(|error| match error {
+                WaitError::Cancelled => anyhow::anyhow!("aborted"),
+                WaitError::TimedOut => anyhow::anyhow!(
+                    "OpenAI-compatible provider did not respond within {}s",
+                    PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
+                ),
+            })?
+            .context("OpenAI-compatible request failed")?;
 
             let status = response.status();
-            let text = response
-                .text()
-                .await
-                .context("failed to read provider response")?;
-            let text = if !status.is_success() {
-                if reasoning_effort.is_some() && is_reasoning_effort_unsupported_error(&text) {
+            let body = collect_provider_body(
+                response,
+                None,
+                status.is_success(),
+                "OpenAI-compatible response",
+            )
+            .await?;
+            let body = if !status.is_success() {
+                let text = utf8_body(&body, "OpenAI-compatible error response")?;
+                if reasoning_effort.is_some() && is_reasoning_effort_unsupported_error(text) {
                     let retry_request = ChatRequest {
                         reasoning_effort: None,
                         ..request
@@ -118,31 +278,54 @@ impl Provider for OpenAiCompatProvider {
                     if let Some(api_key) = api_key.as_deref() {
                         retry_http_request = retry_http_request.bearer_auth(api_key);
                     }
-                    let retry_response = retry_http_request
-                        .json(&retry_request)
-                        .send()
-                        .await
-                        .context("OpenAI-compatible reasoning retry failed")?;
+                    let retry_response = cancel::race_timeout(
+                        retry_http_request.json(&retry_request).send(),
+                        None,
+                        PROVIDER_INITIAL_RESPONSE_TIMEOUT,
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        WaitError::Cancelled => anyhow::anyhow!("aborted"),
+                        WaitError::TimedOut => anyhow::anyhow!(
+                            "OpenAI-compatible reasoning retry did not respond within {}s",
+                            PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
+                        ),
+                    })?
+                    .context("OpenAI-compatible reasoning retry failed")?;
                     let retry_status = retry_response.status();
-                    let retry_text = retry_response
-                        .text()
-                        .await
-                        .context("failed to read provider retry response")?;
+                    let retry_body = collect_provider_body(
+                        retry_response,
+                        None,
+                        retry_status.is_success(),
+                        "OpenAI-compatible reasoning retry response",
+                    )
+                    .await?;
                     if !retry_status.is_success() {
-                        anyhow::bail!(
-                            "OpenAI-compatible provider returned {retry_status}: {retry_text}"
-                        );
+                        return Err(provider_status_error(
+                            "OpenAI-compatible provider",
+                            retry_status,
+                            &retry_body,
+                        ));
                     }
-                    retry_text
+                    retry_body
                 } else {
-                    anyhow::bail!("OpenAI-compatible provider returned {status}: {text}");
+                    return Err(provider_status_error(
+                        "OpenAI-compatible provider",
+                        status,
+                        &body,
+                    ));
                 }
             } else {
-                text
+                body
             };
 
-            let body: ChatResponse = serde_json::from_str(&text)
-                .with_context(|| format!("failed to parse provider response: {text}"))?;
+            let body: ChatResponse = serde_json::from_slice(&body)
+                .context("failed to parse OpenAI-compatible provider response")?;
+            if body.choices.len() > MAX_PARALLEL_TOOL_CALLS {
+                anyhow::bail!(
+                    "OpenAI-compatible response exceeded {MAX_PARALLEL_TOOL_CALLS} choices"
+                );
+            }
             let usage = body.usage.as_ref().map(OpenAiUsage::to_token_usage);
             let message = body.choices.into_iter().next().map(|choice| choice.message);
             Ok(ProviderResponse {
@@ -207,11 +390,15 @@ impl Provider for OpenAiCompatProvider {
             .await?;
             let status = response.status();
             if !status.is_success() {
-                let text = response
-                    .text()
-                    .await
-                    .context("failed to read provider error response")?;
-                if self.stream_usage && is_stream_usage_unsupported_error(&text) {
+                let body = collect_provider_body(
+                    response,
+                    cancelled.as_ref(),
+                    false,
+                    "OpenAI-compatible error response",
+                )
+                .await?;
+                let text = utf8_body(&body, "OpenAI-compatible error response")?;
+                if self.stream_usage && is_stream_usage_unsupported_error(text) {
                     response = send_openai_compat_stream_request(
                         self,
                         api_key.as_deref(),
@@ -227,16 +414,21 @@ impl Provider for OpenAiCompatProvider {
                     .await?;
                     let retry_status = response.status();
                     if !retry_status.is_success() {
-                        let retry_text = response
-                            .text()
-                            .await
-                            .context("failed to read provider retry error response")?;
-                        anyhow::bail!(
-                            "OpenAI-compatible provider returned {retry_status}: {retry_text}"
-                        );
+                        let retry_body = collect_provider_body(
+                            response,
+                            cancelled.as_ref(),
+                            false,
+                            "OpenAI-compatible retry error response",
+                        )
+                        .await?;
+                        return Err(provider_status_error(
+                            "OpenAI-compatible provider",
+                            retry_status,
+                            &retry_body,
+                        ));
                     }
                 } else if thinking.as_openai().is_some()
-                    && is_reasoning_effort_unsupported_error(&text)
+                    && is_reasoning_effort_unsupported_error(text)
                 {
                     response = send_openai_compat_stream_request(
                         self,
@@ -253,51 +445,47 @@ impl Provider for OpenAiCompatProvider {
                     .await?;
                     let retry_status = response.status();
                     if !retry_status.is_success() {
-                        let retry_text = response
-                            .text()
-                            .await
-                            .context("failed to read provider reasoning retry error response")?;
-                        anyhow::bail!(
-                            "OpenAI-compatible provider returned {retry_status}: {retry_text}"
-                        );
+                        let retry_body = collect_provider_body(
+                            response,
+                            cancelled.as_ref(),
+                            false,
+                            "OpenAI-compatible reasoning retry error response",
+                        )
+                        .await?;
+                        return Err(provider_status_error(
+                            "OpenAI-compatible provider",
+                            retry_status,
+                            &retry_body,
+                        ));
                     }
                 } else {
-                    anyhow::bail!("OpenAI-compatible provider returned {status}: {text}");
+                    return Err(provider_status_error(
+                        "OpenAI-compatible provider",
+                        status,
+                        &body,
+                    ));
                 }
             }
 
             let mut parser = ChatSseParser::default();
-            let mut buffer = String::new();
-            let mut stream = response.bytes_stream();
-            loop {
-                let next = cancel::race_timeout(
-                    stream.next(),
-                    cancelled.as_ref(),
-                    PROVIDER_STREAM_IDLE_TIMEOUT,
-                )
-                .await;
-                let chunk = match next {
-                    Ok(Some(chunk)) => chunk,
-                    Ok(None) => break,
-                    Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
-                    Err(WaitError::TimedOut) => anyhow::bail!(
-                        "OpenAI-compatible stream idle for {}s",
-                        PROVIDER_STREAM_IDLE_TIMEOUT.as_secs()
-                    ),
-                };
-                let chunk = chunk.context("failed to read OpenAI-compatible stream")?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(index) = buffer.find('\n') {
-                    let line = buffer[..index].trim_end_matches('\r').to_string();
-                    buffer.drain(..=index);
-                    parser.process_line(&line, Some(on_event))?;
-                }
-            }
-            if !buffer.is_empty() {
-                let line = buffer.trim_end_matches('\r').to_string();
-                parser.process_line(&line, Some(on_event))?;
-            }
-            parser.finish()
+            consume_sse_response(
+                response,
+                cancelled.as_ref(),
+                PROVIDER_STREAM_IDLE_TIMEOUT,
+                "OpenAI-compatible stream",
+                |data| {
+                    if parser.process_data(data, Some(on_event))? {
+                        Ok(SseControl::Stop)
+                    } else {
+                        Ok(SseControl::Continue)
+                    }
+                },
+            )
+            .await
+            .map_err(|error| provider_stream_error(error, "OpenAI-compatible stream"))?;
+            parser
+                .finish()
+                .map_err(|error| provider_stream_error(error, "OpenAI-compatible stream"))
         })
     }
 }
@@ -397,12 +585,12 @@ pub struct OpenAiCodexProvider {
 }
 
 impl OpenAiCodexProvider {
-    pub fn new(base_url: String, auth_path: PathBuf) -> Self {
-        Self {
+    pub fn new(base_url: String, auth_path: PathBuf) -> Result<Self> {
+        Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             auth_path,
-            client: Client::new(),
-        }
+            client: Client::builder().redirect(Policy::none()).build()?,
+        })
     }
 
     fn responses_url(&self) -> String {
@@ -460,24 +648,25 @@ impl Provider for OpenAiCodexProvider {
                 None,
             )
             .await?;
-            let text = cancel::race_timeout(response.text(), None, PROVIDER_STREAM_IDLE_TIMEOUT)
-                .await
-                .map_err(|error| match error {
-                    WaitError::Cancelled => anyhow::anyhow!("aborted"),
-                    WaitError::TimedOut => anyhow::anyhow!(
-                        "OpenAI Codex response idle for {}s",
-                        PROVIDER_STREAM_IDLE_TIMEOUT.as_secs()
-                    ),
-                })??;
-            Ok(ProviderResponse::message(
-                extract_sse_responses_message(&text).unwrap_or_else(|| {
-                    let content = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
-                        .and_then(|body| extract_responses_text(&body))
-                        .unwrap_or_default();
-                    Message::text(Role::Assistant, content)
-                }),
-            ))
+            let mut parser = ResponsesSseParser::default();
+            consume_sse_response(
+                response,
+                None,
+                PROVIDER_STREAM_IDLE_TIMEOUT,
+                "OpenAI Codex stream",
+                |data| {
+                    if parser.process_data(data, None)? {
+                        Ok(SseControl::Stop)
+                    } else {
+                        Ok(SseControl::Continue)
+                    }
+                },
+            )
+            .await
+            .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))?;
+            parser
+                .finish()
+                .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))
         })
     }
 
@@ -528,43 +717,31 @@ impl Provider for OpenAiCodexProvider {
             .await?;
 
             let mut parser = ResponsesSseParser::default();
-            let mut buffer = String::new();
-            let mut stream = response.bytes_stream();
-            loop {
-                let next = cancel::race_timeout(
-                    stream.next(),
-                    cancelled.as_ref(),
-                    PROVIDER_STREAM_IDLE_TIMEOUT,
-                )
-                .await;
-                let chunk = match next {
-                    Ok(Some(chunk)) => chunk,
-                    Ok(None) => break,
-                    Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
-                    Err(WaitError::TimedOut) => anyhow::bail!(
-                        "OpenAI Codex stream idle for {}s",
-                        PROVIDER_STREAM_IDLE_TIMEOUT.as_secs()
-                    ),
-                };
-                let chunk = chunk.context("failed to read OpenAI Codex stream")?;
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-                while let Some(index) = buffer.find('\n') {
-                    let line = buffer[..index].trim_end_matches('\r').to_string();
-                    buffer.drain(..=index);
-                    parser.process_line(&line, Some(on_event));
-                }
-            }
-            if !buffer.is_empty() {
-                let line = buffer.trim_end_matches('\r').to_string();
-                parser.process_line(&line, Some(on_event));
-            }
-            parser.finish()
+            consume_sse_response(
+                response,
+                cancelled.as_ref(),
+                PROVIDER_STREAM_IDLE_TIMEOUT,
+                "OpenAI Codex stream",
+                |data| {
+                    if parser.process_data(data, Some(on_event))? {
+                        Ok(SseControl::Stop)
+                    } else {
+                        Ok(SseControl::Continue)
+                    }
+                },
+            )
+            .await
+            .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))?;
+            parser
+                .finish()
+                .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))
         })
     }
 }
 
 const CODEX_MAX_RETRIES: usize = 3;
 const CODEX_RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
+const CODEX_MAX_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 async fn send_codex_request_with_retries(
     client: &Client,
@@ -574,7 +751,7 @@ async fn send_codex_request_with_retries(
     request: &CodexResponsesRequest<'_>,
     cancelled: Option<&Arc<AtomicBool>>,
 ) -> Result<Response> {
-    let mut attempt = 0usize;
+    let mut retries = 0usize;
     loop {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
             anyhow::bail!("aborted");
@@ -596,21 +773,8 @@ async fn send_codex_request_with_retries(
         let response = match response {
             Ok(response) => response,
             Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
-            Err(WaitError::TimedOut) if attempt < CODEX_MAX_RETRIES => {
-                attempt += 1;
-                sleep_before_codex_retry(
-                    attempt,
-                    &format!(
-                        "OpenAI Codex did not respond within {}s",
-                        PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
-                    ),
-                    cancelled,
-                )
-                .await?;
-                continue;
-            }
             Err(WaitError::TimedOut) => anyhow::bail!(
-                "OpenAI Codex did not respond within {}s",
+                "OpenAI Codex did not respond within {}s; the request may have reached the provider, so Ferrum did not retry it",
                 PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
             ),
         };
@@ -619,35 +783,36 @@ async fn send_codex_request_with_retries(
             Ok(response) => {
                 let status = response.status();
                 let retryable = is_retryable_codex_status(status);
-                let text = response
-                    .text()
-                    .await
-                    .context("failed to read OpenAI Codex error response")?;
-                if retryable && attempt < CODEX_MAX_RETRIES {
-                    attempt += 1;
-                    sleep_before_codex_retry(
-                        attempt,
-                        &format!("OpenAI Codex returned {status}: {text}"),
-                        cancelled,
-                    )
-                    .await?;
+                let retry_after = retry_after_delay(response.headers());
+                let body = match collect_provider_body(
+                    response,
+                    cancelled,
+                    false,
+                    "OpenAI Codex error response",
+                )
+                .await
+                {
+                    Ok(body) => body,
+                    Err(error) => return Err(final_codex_error(error, retries)),
+                };
+                let error = provider_status_error("OpenAI Codex", status, &body);
+                if retryable && retries < CODEX_MAX_RETRIES {
+                    retries += 1;
+                    sleep_before_codex_retry(retries, &error.to_string(), retry_after, cancelled)
+                        .await?;
                     continue;
                 }
-                anyhow::bail!("OpenAI Codex returned {status}: {text}");
+                return Err(final_codex_error(error, retries));
             }
             Err(error) => {
                 let retryable = is_retryable_codex_send_error(&error);
-                if retryable && attempt < CODEX_MAX_RETRIES {
-                    attempt += 1;
-                    sleep_before_codex_retry(
-                        attempt,
-                        &format!("OpenAI Codex request failed: {error}"),
-                        cancelled,
-                    )
-                    .await?;
+                let error = anyhow::Error::new(error).context("OpenAI Codex request failed");
+                if retryable && retries < CODEX_MAX_RETRIES {
+                    retries += 1;
+                    sleep_before_codex_retry(retries, &error.to_string(), None, cancelled).await?;
                     continue;
                 }
-                return Err(error).context("OpenAI Codex request failed");
+                return Err(final_codex_error(error, retries));
             }
         }
     }
@@ -660,18 +825,52 @@ fn is_retryable_codex_status(status: StatusCode) -> bool {
 }
 
 fn is_retryable_codex_send_error(error: &reqwest::Error) -> bool {
-    error.is_connect() || error.is_timeout() || error.is_body()
+    error.is_connect()
+}
+
+fn retry_after_delay(headers: &header::HeaderMap) -> Option<Duration> {
+    let value = headers.get(header::RETRY_AFTER)?.to_str().ok()?.trim();
+    let delay = value
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+        .or_else(|| {
+            let when = httpdate::parse_http_date(value).ok()?;
+            Some(
+                when.duration_since(std::time::SystemTime::now())
+                    .unwrap_or(Duration::ZERO),
+            )
+        })?;
+    Some(delay.min(CODEX_MAX_RETRY_AFTER))
+}
+
+fn final_codex_error(error: anyhow::Error, retries: usize) -> anyhow::Error {
+    if error.to_string() == "aborted" || retries == 0 {
+        return error;
+    }
+    let summary = truncate_to_max_bytes(&error.to_string(), 1_000);
+    eprintln!(
+        "[provider] OpenAI Codex request failed after {retries} retries ({} total attempts); no retries remain: {summary}",
+        retries + 1
+    );
+    error.context(format!(
+        "OpenAI Codex request failed after {retries} retries ({} total attempts); no retries remain",
+        retries + 1
+    ))
 }
 
 async fn sleep_before_codex_retry(
-    attempt: usize,
+    retry: usize,
     reason: &str,
+    retry_after: Option<Duration>,
     cancelled: Option<&Arc<AtomicBool>>,
 ) -> Result<()> {
-    let delay = CODEX_RETRY_BASE_DELAY * (1 << (attempt - 1));
+    let exponential = CODEX_RETRY_BASE_DELAY * (1 << (retry - 1));
+    let delay = retry_after.unwrap_or(exponential);
+    let reason = truncate_to_max_bytes(reason, 1_000);
     eprintln!(
-        "[provider] {reason}; retrying in {}s ({attempt}/{CODEX_MAX_RETRIES})",
-        delay.as_secs()
+        "[provider] {reason}; retrying in {:.1}s ({retry}/{CODEX_MAX_RETRIES})",
+        delay.as_secs_f64()
     );
     match cancel::race(tokio::time::sleep(delay), cancelled).await {
         Ok(()) => Ok(()),
@@ -709,7 +908,7 @@ struct ChatMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<&'static str>,
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -802,12 +1001,22 @@ impl ChatMessage {
             })
             .collect();
         let has_tool_calls = !tool_calls.is_empty();
+        let reasoning_content = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking { text, .. } if !text.is_empty() => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
         Self {
             role,
             content,
             tool_call_id,
             tool_calls: has_tool_calls.then_some(tool_calls),
-            reasoning_content: (role == "assistant" && has_tool_calls).then_some(""),
+            reasoning_content: (role == "assistant" && !reasoning_content.is_empty())
+                .then_some(reasoning_content),
         }
     }
 }
@@ -919,15 +1128,28 @@ fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Result<Messag
         .or(message.reasoning)
         .filter(|text| !text.trim().is_empty())
     {
+        validate_field(&text, MAX_PROVIDER_THINKING_BYTES, "reasoning text")?;
         content.push(ContentBlock::Thinking {
             text,
             signature: None,
         });
     }
     if let Some(text) = message.content.filter(|text| !text.is_empty()) {
+        validate_field(&text, MAX_PROVIDER_OUTPUT_BYTES, "output text")?;
         content.push(ContentBlock::Text { text });
     }
-    for call in message.tool_calls.unwrap_or_default() {
+    let tool_calls = message.tool_calls.unwrap_or_default();
+    if tool_calls.len() > MAX_PARALLEL_TOOL_CALLS {
+        anyhow::bail!("OpenAI-compatible response exceeded {MAX_PARALLEL_TOOL_CALLS} tool calls");
+    }
+    for call in tool_calls {
+        validate_field(&call.id, MAX_PROVIDER_FIELD_BYTES, "tool-call id")?;
+        validate_field(&call.function.name, MAX_PROVIDER_FIELD_BYTES, "tool name")?;
+        validate_field(
+            &call.function.arguments,
+            MAX_PROVIDER_TOOL_ARGUMENT_BYTES,
+            "tool arguments",
+        )?;
         let input = serde_json::from_str(&call.function.arguments).with_context(|| {
             format!(
                 "failed to parse tool-call arguments for `{}` as JSON",
@@ -958,6 +1180,8 @@ struct ChatSseParser {
     thinking: String,
     tool_calls: Vec<ChatStreamToolCall>,
     usage: Option<TokenUsage>,
+    events: usize,
+    done: bool,
 }
 
 #[derive(Default)]
@@ -968,64 +1192,127 @@ struct ChatStreamToolCall {
 }
 
 impl ChatSseParser {
+    #[cfg(test)]
     fn process_line(
         &mut self,
         line: &str,
-        mut on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
-    ) -> Result<()> {
-        let Some(data) = line.strip_prefix("data: ") else {
-            return Ok(());
+        on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) -> Result<bool> {
+        let Some(mut data) = line.strip_prefix("data:") else {
+            return Ok(false);
         };
-        if data == "[DONE]" {
-            return Ok(());
+        if let Some(stripped) = data.strip_prefix(' ') {
+            data = stripped;
         }
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
-            return Ok(());
-        };
-        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null())
-            && let Ok(parsed) = serde_json::from_value::<OpenAiUsage>(usage.clone())
-        {
+        self.process_data(data, on_event)
+    }
+
+    fn process_data(
+        &mut self,
+        data: &str,
+        mut on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) -> Result<bool> {
+        if self.done {
+            anyhow::bail!("OpenAI-compatible stream emitted data after [DONE]");
+        }
+        if data == "[DONE]" {
+            self.done = true;
+            return Ok(true);
+        }
+        self.events = self.events.saturating_add(1);
+        if self.events > MAX_PROVIDER_EVENTS {
+            anyhow::bail!("OpenAI-compatible stream exceeded {MAX_PROVIDER_EVENTS} events");
+        }
+        let event = serde_json::from_str::<serde_json::Value>(data)
+            .context("failed to parse OpenAI-compatible SSE event")?;
+        event
+            .as_object()
+            .context("OpenAI-compatible SSE event must be an object")?;
+        if event.get("error").is_some_and(|error| !error.is_null()) {
+            let message = format!(
+                "OpenAI-compatible stream returned an error event: {}",
+                truncate_to_max_bytes(data, 1_000)
+            );
+            if structured_context_overflow_value(&event) {
+                return Err(ProviderFailure::ContextOverflow { message }.into());
+            }
+            anyhow::bail!(message);
+        }
+        if let Some(usage) = event.get("usage").filter(|usage| !usage.is_null()) {
+            let parsed = serde_json::from_value::<OpenAiUsage>(usage.clone())
+                .context("failed to parse OpenAI-compatible stream usage")?;
             self.usage = Some(parsed.to_token_usage());
         }
-        for choice in event
+        let choices = event
             .get("choices")
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-        {
-            let Some(delta) = choice.get("delta") else {
-                continue;
-            };
-            if let Some(text) = delta.get("content").and_then(|value| value.as_str()) {
-                self.output.push_str(text);
+            .map(|value| {
+                value
+                    .as_array()
+                    .context("OpenAI-compatible SSE choices must be an array")
+            })
+            .transpose()?;
+        if choices.is_some_and(|choices| choices.len() > MAX_PARALLEL_TOOL_CALLS) {
+            anyhow::bail!("OpenAI-compatible SSE event exceeded {MAX_PARALLEL_TOOL_CALLS} choices");
+        }
+        for choice in choices.into_iter().flatten() {
+            let choice = choice
+                .as_object()
+                .context("OpenAI-compatible SSE choice must be an object")?;
+            let delta = choice
+                .get("delta")
+                .context("OpenAI-compatible SSE choice missing `delta`")?;
+            delta
+                .as_object()
+                .context("OpenAI-compatible SSE choice `delta` must be an object")?;
+            if let Some(text) = optional_string_field(delta, "content", "OpenAI-compatible delta")?
+            {
+                push_bounded(
+                    &mut self.output,
+                    text,
+                    MAX_PROVIDER_OUTPUT_BYTES,
+                    "output text",
+                )?;
                 if let Some(on_event) = on_event.as_deref_mut() {
                     on_event(StreamEvent::TextDelta(text.to_string()));
                 }
             }
-            if let Some(text) = delta
-                .get("reasoning_content")
-                .or_else(|| delta.get("reasoning"))
-                .and_then(|value| value.as_str())
-            {
+            let reasoning =
+                optional_string_field(delta, "reasoning_content", "OpenAI-compatible delta")?.or(
+                    optional_string_field(delta, "reasoning", "OpenAI-compatible delta")?,
+                );
+            if let Some(text) = reasoning {
                 let text = sanitize_thinking_text(text);
                 if text.is_empty() {
                     continue;
                 }
-                self.thinking.push_str(&text);
+                push_bounded(
+                    &mut self.thinking,
+                    &text,
+                    MAX_PROVIDER_THINKING_BYTES,
+                    "reasoning text",
+                )?;
                 if let Some(on_event) = on_event.as_deref_mut() {
                     on_event(StreamEvent::ThinkingDelta(text));
                 }
             }
-            for tool_call in delta
+            let tool_calls = delta
                 .get("tool_calls")
-                .and_then(|value| value.as_array())
-                .into_iter()
-                .flatten()
-            {
-                let raw_index = tool_call
-                    .get("index")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(self.tool_calls.len() as u64);
+                .map(|value| {
+                    value
+                        .as_array()
+                        .context("OpenAI-compatible delta `tool_calls` must be an array")
+                })
+                .transpose()?;
+            for tool_call in tool_calls.into_iter().flatten() {
+                tool_call
+                    .as_object()
+                    .context("OpenAI-compatible streamed tool call must be an object")?;
+                let raw_index = match tool_call.get("index") {
+                    None => self.tool_calls.len() as u64,
+                    Some(value) => value
+                        .as_u64()
+                        .context("streamed tool-call index must be a non-negative integer")?,
+                };
                 let index = usize::try_from(raw_index)
                     .context("streamed tool-call index does not fit in memory")?;
                 if index >= MAX_PARALLEL_TOOL_CALLS {
@@ -1044,25 +1331,48 @@ impl ChatSseParser {
                     self.tool_calls.push(ChatStreamToolCall::default());
                 }
                 let current = &mut self.tool_calls[index];
-                if let Some(id) = tool_call.get("id").and_then(|value| value.as_str()) {
+                if let Some(id) =
+                    optional_string_field(tool_call, "id", "OpenAI-compatible tool call")?
+                {
+                    validate_field(id, MAX_PROVIDER_FIELD_BYTES, "tool-call id")?;
                     current.id = id.to_string();
                 }
                 if let Some(function) = tool_call.get("function") {
-                    if let Some(name) = function.get("name").and_then(|value| value.as_str()) {
-                        current.name.push_str(name);
+                    function
+                        .as_object()
+                        .context("OpenAI-compatible tool `function` must be an object")?;
+                    let name =
+                        optional_string_field(function, "name", "OpenAI-compatible tool function")?;
+                    if let Some(name) = name {
+                        push_bounded(
+                            &mut current.name,
+                            name,
+                            MAX_PROVIDER_FIELD_BYTES,
+                            "tool name",
+                        )?;
                     }
-                    if let Some(arguments) =
-                        function.get("arguments").and_then(|value| value.as_str())
-                    {
-                        current.arguments.push_str(arguments);
+                    if let Some(arguments) = optional_string_field(
+                        function,
+                        "arguments",
+                        "OpenAI-compatible tool function",
+                    )? {
+                        push_bounded(
+                            &mut current.arguments,
+                            arguments,
+                            MAX_PROVIDER_TOOL_ARGUMENT_BYTES,
+                            "tool arguments",
+                        )?;
                     }
                 }
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     fn finish(self) -> Result<ProviderResponse> {
+        if !self.done {
+            anyhow::bail!("OpenAI-compatible stream ended without [DONE]");
+        }
         let mut content = Vec::new();
         if !self.thinking.trim().is_empty() {
             content.push(ContentBlock::Thinking {
@@ -1075,7 +1385,7 @@ impl ChatSseParser {
         }
         for call in self.tool_calls {
             if call.name.is_empty() {
-                continue;
+                anyhow::bail!("OpenAI-compatible stream produced a tool call without a name");
             }
             let input = serde_json::from_str(&call.arguments).with_context(|| {
                 format!(
@@ -1333,76 +1643,138 @@ struct ResponsesSseParser {
     current_calls: BTreeMap<String, (String, String, String, String)>,
     pending_call_args: BTreeMap<String, String>,
     error: Option<String>,
+    events: usize,
+    completed: bool,
 }
 
 impl ResponsesSseParser {
+    #[cfg(test)]
     fn process_line(
         &mut self,
         line: &str,
-        mut on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
-    ) {
-        let Some(data) = line.strip_prefix("data: ") else {
-            return;
+        on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) -> Result<bool> {
+        let Some(mut data) = line.strip_prefix("data:") else {
+            return Ok(false);
         };
-        if data == "[DONE]" {
-            return;
+        if let Some(stripped) = data.strip_prefix(' ') {
+            data = stripped;
         }
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
-            return;
-        };
+        self.process_data(data, on_event)
+    }
+
+    fn process_data(
+        &mut self,
+        data: &str,
+        mut on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) -> Result<bool> {
+        if data == "[DONE]" {
+            return Ok(true);
+        }
+        if self.completed {
+            anyhow::bail!("OpenAI Codex stream emitted data after `response.completed`");
+        }
+        self.events = self.events.saturating_add(1);
+        if self.events > MAX_PROVIDER_EVENTS {
+            anyhow::bail!("OpenAI Codex stream exceeded {MAX_PROVIDER_EVENTS} events");
+        }
+        let event = serde_json::from_str::<serde_json::Value>(data)
+            .context("failed to parse OpenAI Codex SSE event")?;
+        let event_type = event
+            .get("type")
+            .and_then(|value| value.as_str())
+            .context("OpenAI Codex SSE event missing string `type`")?;
+        validate_field(event_type, MAX_PROVIDER_FIELD_BYTES, "event type")?;
+        if matches!(
+            event_type,
+            "response.failed" | "response.incomplete" | "error"
+        ) {
+            let message = format!("OpenAI Codex terminal failure event `{event_type}`");
+            if structured_context_overflow_value(&event) {
+                return Err(ProviderFailure::ContextOverflow { message }.into());
+            }
+            anyhow::bail!(message);
+        }
         if let Some(usage) = event
             .get("response")
             .and_then(|response| response.get("usage"))
             .or_else(|| event.get("usage"))
             .filter(|usage| !usage.is_null())
         {
-            self.absorb_usage(usage);
+            self.absorb_usage(usage)?;
         }
-        let event_type = event.get("type").and_then(|value| value.as_str());
+        let event_type = Some(event_type);
         if let Some(event_type) = event_type {
             emit_codex_usage_metrics_if_enabled(event_type, &event);
             if event_type.contains("reasoning") && event_type.contains("summary") {
-                if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                    self.append_thinking_delta(delta, &mut on_event);
+                if let Some(delta) = optional_string_field(&event, "delta", event_type)? {
+                    self.append_thinking_delta(delta, &mut on_event)?;
                 }
-                if let Some(text) = event.get("text").and_then(|value| value.as_str()) {
-                    self.absorb_completed_thinking(text, &mut on_event);
+                if let Some(text) = optional_string_field(&event, "text", event_type)? {
+                    self.absorb_completed_thinking(text, &mut on_event)?;
                 }
             } else if event_type == "response.reasoning_text.delta"
-                && let Some(delta) = event.get("delta").and_then(|value| value.as_str())
+                && let Some(delta) = optional_string_field(&event, "delta", event_type)?
             {
-                self.append_thinking_delta(delta, &mut on_event);
+                self.append_thinking_delta(delta, &mut on_event)?;
             }
         }
         match event_type {
             Some("response.output_text.delta") => {
-                if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                    self.output.push_str(delta);
-                    if let Some(on_event) = on_event.as_mut() {
-                        on_event(StreamEvent::TextDelta(delta.to_string()));
-                    }
+                let delta = optional_string_field(&event, "delta", "response.output_text.delta")?
+                    .context("OpenAI Codex output-text delta event missing `delta`")?;
+                push_bounded(
+                    &mut self.output,
+                    delta,
+                    MAX_PROVIDER_OUTPUT_BYTES,
+                    "output text",
+                )?;
+                if let Some(on_event) = on_event.as_mut() {
+                    on_event(StreamEvent::TextDelta(delta.to_string()));
                 }
             }
             Some("response.output_text.done") => {
-                if let Some(text) = event.get("text").and_then(|value| value.as_str()) {
-                    self.append_completed_output(text, None);
-                }
+                let text = optional_string_field(&event, "text", "response.output_text.done")?
+                    .context("OpenAI Codex output-text done event missing `text`")?;
+                self.append_completed_output(text, None)?;
             }
             Some("response.completed") => {
-                if let Some(response) = event.get("response") {
-                    self.absorb_completed_response(response);
+                if self.completed {
+                    anyhow::bail!("OpenAI Codex stream emitted duplicate `response.completed`");
                 }
+                self.completed = true;
+                let response = event
+                    .get("response")
+                    .and_then(|value| value.as_object().map(|_| value))
+                    .context("OpenAI Codex completed event missing object `response`")?;
+                self.absorb_completed_response(response)?;
             }
             Some("response.output_item.added") => {
-                if let Some(item) = event.get("item")
-                    && item.get("type").and_then(|value| value.as_str()) == Some("function_call")
-                {
+                let item = event
+                    .get("item")
+                    .and_then(|value| value.as_object().map(|_| value))
+                    .context("OpenAI Codex output-item added event missing object `item`")?;
+                if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
                     match parse_response_function_call_added_item(item) {
                         Ok(mut call) => {
                             let key = response_event_call_key(&event)
                                 .unwrap_or_else(|| response_call_key(item, &call));
+                            validate_field(&key, MAX_PROVIDER_FIELD_BYTES, "tool-call key")?;
                             if let Some(args) = self.pending_call_args.remove(&key) {
-                                call.3.push_str(&args);
+                                push_bounded(
+                                    &mut call.3,
+                                    &args,
+                                    MAX_PROVIDER_TOOL_ARGUMENT_BYTES,
+                                    "tool arguments",
+                                )?;
+                            }
+                            validate_provider_call(&call)?;
+                            if !self.current_calls.contains_key(&key)
+                                && self.current_calls.len() >= MAX_PARALLEL_TOOL_CALLS
+                            {
+                                anyhow::bail!(
+                                    "OpenAI Codex stream exceeded {MAX_PARALLEL_TOOL_CALLS} concurrent tool calls"
+                                );
                             }
                             self.current_calls.insert(key, call);
                         }
@@ -1411,68 +1783,121 @@ impl ResponsesSseParser {
                 }
             }
             Some("response.function_call_arguments.delta") => {
-                if let Some(delta) = event.get("delta").and_then(|value| value.as_str()) {
-                    self.update_current_call_args(&event, |args| args.push_str(delta));
-                }
+                let delta = optional_string_field(
+                    &event,
+                    "delta",
+                    "response.function_call_arguments.delta",
+                )?
+                .context("OpenAI Codex function-call arguments delta event missing `delta`")?;
+                self.update_current_call_args(&event, |args| {
+                    push_bounded(
+                        args,
+                        delta,
+                        MAX_PROVIDER_TOOL_ARGUMENT_BYTES,
+                        "tool arguments",
+                    )
+                })?;
             }
             Some("response.function_call_arguments.done") => {
-                if let Some(done) = event.get("arguments").and_then(|value| value.as_str()) {
-                    self.update_current_call_args(&event, |args| *args = done.to_string());
-                }
+                let done = optional_string_field(
+                    &event,
+                    "arguments",
+                    "response.function_call_arguments.done",
+                )?
+                .context("OpenAI Codex function-call arguments done event missing `arguments`")?;
+                validate_field(done, MAX_PROVIDER_TOOL_ARGUMENT_BYTES, "tool arguments")?;
+                self.update_current_call_args(&event, |args| {
+                    *args = done.to_string();
+                    Ok(())
+                })?;
             }
             Some("response.output_item.done") => {
-                if let Some(item) = event.get("item") {
-                    if item.get("type").and_then(|value| value.as_str()) == Some("reasoning") {
-                        let final_thinking = thinking_text_from_item(item);
-                        if !final_thinking.trim().is_empty() {
-                            self.thinking = final_thinking;
-                        }
-                        self.thinking_signature = Some(item.to_string());
+                let item = event
+                    .get("item")
+                    .and_then(|value| value.as_object().map(|_| value))
+                    .context("OpenAI Codex output-item done event missing object `item`")?;
+                if item.get("type").and_then(|value| value.as_str()) == Some("reasoning") {
+                    let final_thinking = thinking_text_from_item(item);
+                    if !final_thinking.trim().is_empty() {
+                        validate_field(
+                            &final_thinking,
+                            MAX_PROVIDER_THINKING_BYTES,
+                            "reasoning text",
+                        )?;
+                        self.thinking = final_thinking;
                     }
-                    if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
-                        match parse_response_function_call_item(item) {
-                            Ok(call) => {
-                                let key = response_event_call_key(&event)
-                                    .unwrap_or_else(|| response_call_key(item, &call));
-                                self.current_calls.remove(&key);
-                                self.tool_calls.push(call);
+                    let signature = item.to_string();
+                    validate_field(
+                        &signature,
+                        MAX_PROVIDER_TOOL_ARGUMENT_BYTES,
+                        "reasoning signature",
+                    )?;
+                    self.thinking_signature = Some(signature);
+                }
+                if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
+                    match parse_response_function_call_item(item) {
+                        Ok(call) => {
+                            validate_provider_call(&call)?;
+                            let key = response_event_call_key(&event)
+                                .unwrap_or_else(|| response_call_key(item, &call));
+                            self.current_calls.remove(&key);
+                            if self.tool_calls.len() >= MAX_PARALLEL_TOOL_CALLS {
+                                anyhow::bail!(
+                                    "OpenAI Codex stream exceeded {MAX_PARALLEL_TOOL_CALLS} tool calls"
+                                );
                             }
-                            Err(error) => self.error = Some(error.to_string()),
+                            self.tool_calls.push(call);
                         }
+                        Err(error) => self.error = Some(error.to_string()),
                     }
                 }
             }
             _ => {}
         }
+        Ok(self.completed)
     }
 
     fn append_thinking_delta(
         &mut self,
         text: &str,
         on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
-    ) {
+    ) -> Result<()> {
+        validate_field(text, MAX_PROVIDER_THINKING_BYTES, "reasoning delta")?;
         let text = self.sanitize_thinking_delta(text);
         let delta = self.merge_thinking_text(&text);
+        validate_field(
+            &self.thinking,
+            MAX_PROVIDER_THINKING_BYTES,
+            "reasoning text",
+        )?;
         if delta.is_empty() {
-            return;
+            return Ok(());
         }
         if let Some(on_event) = on_event.as_deref_mut() {
             on_event(StreamEvent::ThinkingDelta(delta));
         }
+        Ok(())
     }
 
     fn absorb_completed_thinking(
         &mut self,
         text: &str,
         on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
-    ) {
+    ) -> Result<()> {
+        validate_field(text, MAX_PROVIDER_THINKING_BYTES, "completed reasoning")?;
         let text = sanitize_thinking_text(text);
         let delta = self.merge_thinking_text(&text);
+        validate_field(
+            &self.thinking,
+            MAX_PROVIDER_THINKING_BYTES,
+            "reasoning text",
+        )?;
         if !delta.is_empty()
             && let Some(on_event) = on_event.as_deref_mut()
         {
             on_event(StreamEvent::ThinkingDelta(delta));
         }
+        Ok(())
     }
 
     fn sanitize_thinking_delta(&mut self, text: &str) -> String {
@@ -1558,28 +1983,34 @@ impl ResponsesSseParser {
         &mut self,
         text: &str,
         on_event: Option<&mut (dyn FnMut(StreamEvent) + Send)>,
-    ) {
+    ) -> Result<()> {
         if text.is_empty() || self.output.ends_with(text) {
-            return;
+            return Ok(());
         }
         let delta = text.strip_prefix(&self.output).unwrap_or(text).to_string();
-        self.output.push_str(&delta);
+        push_bounded(
+            &mut self.output,
+            &delta,
+            MAX_PROVIDER_OUTPUT_BYTES,
+            "output text",
+        )?;
         if !delta.is_empty()
             && let Some(on_event) = on_event
         {
             on_event(StreamEvent::TextDelta(delta));
         }
+        Ok(())
     }
 
     fn update_current_call_args(
         &mut self,
         event: &serde_json::Value,
-        update: impl FnOnce(&mut String),
-    ) {
+        update: impl FnOnce(&mut String) -> Result<()>,
+    ) -> Result<()> {
         let Some(key) = response_event_call_key(event) else {
             if self.current_calls.len() == 1 {
                 if let Some((_, _, _, args)) = self.current_calls.values_mut().next() {
-                    update(args);
+                    update(args)?;
                 }
             } else if !self.current_calls.is_empty() {
                 self.error = Some(
@@ -1587,28 +2018,38 @@ impl ResponsesSseParser {
                         .to_string(),
                 );
             }
-            return;
+            return Ok(());
         };
+        validate_field(&key, MAX_PROVIDER_FIELD_BYTES, "tool-call key")?;
         if let Some((_, _, _, args)) = self.current_calls.get_mut(&key) {
-            update(args);
+            update(args)?;
         } else {
+            if !self.pending_call_args.contains_key(&key)
+                && self.pending_call_args.len() >= MAX_PARALLEL_TOOL_CALLS
+            {
+                anyhow::bail!(
+                    "OpenAI Codex stream exceeded {MAX_PARALLEL_TOOL_CALLS} pending tool calls"
+                );
+            }
             let args = self.pending_call_args.entry(key).or_default();
-            update(args);
+            update(args)?;
         }
+        Ok(())
     }
 
-    fn absorb_usage(&mut self, usage: &serde_json::Value) {
-        if let Ok(parsed) = serde_json::from_value::<OpenAiUsage>(usage.clone()) {
-            self.usage = Some(parsed.to_token_usage());
-        }
+    fn absorb_usage(&mut self, usage: &serde_json::Value) -> Result<()> {
+        let parsed = serde_json::from_value::<OpenAiUsage>(usage.clone())
+            .context("failed to parse OpenAI Codex usage")?;
+        self.usage = Some(parsed.to_token_usage());
+        Ok(())
     }
 
-    fn absorb_completed_response(&mut self, response: &serde_json::Value) {
+    fn absorb_completed_response(&mut self, response: &serde_json::Value) -> Result<()> {
         if let Some(usage) = response.get("usage").filter(|usage| !usage.is_null()) {
-            self.absorb_usage(usage);
+            self.absorb_usage(usage)?;
         }
-        if let Some(text) = extract_responses_text(response) {
-            self.append_completed_output(&text, None);
+        if let Some(text) = extract_responses_text(response)? {
+            self.append_completed_output(&text, None)?;
         }
         for item in response
             .get("output")
@@ -1619,18 +2060,35 @@ impl ResponsesSseParser {
             if item.get("type").and_then(|value| value.as_str()) == Some("reasoning") {
                 let final_thinking = thinking_text_from_item(item);
                 if !final_thinking.trim().is_empty() {
+                    validate_field(
+                        &final_thinking,
+                        MAX_PROVIDER_THINKING_BYTES,
+                        "reasoning text",
+                    )?;
                     self.thinking = final_thinking;
                 }
-                self.thinking_signature = Some(item.to_string());
+                let signature = item.to_string();
+                validate_field(
+                    &signature,
+                    MAX_PROVIDER_TOOL_ARGUMENT_BYTES,
+                    "reasoning signature",
+                )?;
+                self.thinking_signature = Some(signature);
             }
             if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
                 match parse_response_function_call_item(item) {
                     Ok(call) => {
+                        validate_provider_call(&call)?;
                         if !self
                             .tool_calls
                             .iter()
                             .any(|existing| existing.0 == call.0 || existing.1 == call.1)
                         {
+                            if self.tool_calls.len() >= MAX_PARALLEL_TOOL_CALLS {
+                                anyhow::bail!(
+                                    "OpenAI Codex stream exceeded {MAX_PARALLEL_TOOL_CALLS} tool calls"
+                                );
+                            }
                             self.tool_calls.push(call.clone());
                         }
                         self.current_calls.remove(&response_call_key(item, &call));
@@ -1639,18 +2097,28 @@ impl ResponsesSseParser {
                 }
             }
         }
+        Ok(())
     }
 
     fn finish(mut self) -> Result<ProviderResponse> {
         if let Some(error) = self.error.take() {
             anyhow::bail!(error);
         }
+        if !self.completed {
+            anyhow::bail!("OpenAI Codex stream ended without `response.completed`");
+        }
         for (_, call) in self.current_calls {
+            validate_provider_call(&call)?;
             if !self
                 .tool_calls
                 .iter()
                 .any(|existing| existing.0 == call.0 || existing.1 == call.1)
             {
+                if self.tool_calls.len() >= MAX_PARALLEL_TOOL_CALLS {
+                    anyhow::bail!(
+                        "OpenAI Codex stream exceeded {MAX_PARALLEL_TOOL_CALLS} tool calls"
+                    );
+                }
                 self.tool_calls.push(call);
             }
         }
@@ -1782,16 +2250,20 @@ fn emit_codex_usage_metrics_if_enabled(event_type: &str, event: &serde_json::Val
     );
 }
 
-fn extract_sse_responses_message_result(text: &str) -> Result<Message> {
+#[cfg(test)]
+fn extract_sse_responses_message(text: &str) -> Result<Message> {
     let mut parser = ResponsesSseParser::default();
     for line in text.lines() {
-        parser.process_line(line, None);
+        parser.process_line(line, None)?;
     }
     parser.finish().map(|response| response.message)
 }
 
-fn extract_sse_responses_message(text: &str) -> Option<Message> {
-    extract_sse_responses_message_result(text).ok()
+fn validate_provider_call(call: &(String, String, String, String)) -> Result<()> {
+    validate_field(&call.0, MAX_PROVIDER_FIELD_BYTES, "tool call id")?;
+    validate_field(&call.1, MAX_PROVIDER_FIELD_BYTES, "tool item id")?;
+    validate_field(&call.2, MAX_PROVIDER_FIELD_BYTES, "tool name")?;
+    validate_field(&call.3, MAX_PROVIDER_TOOL_ARGUMENT_BYTES, "tool arguments")
 }
 
 fn parse_response_function_call_added_item(
@@ -1866,29 +2338,340 @@ fn thinking_text_from_item(item: &serde_json::Value) -> String {
     )
 }
 
-fn extract_responses_text(body: &serde_json::Value) -> Option<String> {
-    if let Some(text) = body.get("output_text").and_then(|value| value.as_str()) {
-        return Some(text.to_string());
+fn extract_responses_text(body: &serde_json::Value) -> Result<Option<String>> {
+    if let Some(value) = body.get("output_text") {
+        let text = value
+            .as_str()
+            .context("OpenAI Codex `output_text` must be a string")?;
+        validate_field(text, MAX_PROVIDER_OUTPUT_BYTES, "output text")?;
+        return Ok(Some(text.to_string()));
     }
-    let mut parts = Vec::new();
-    for item in body.get("output")?.as_array()? {
-        for content in item
-            .get("content")
-            .and_then(|value| value.as_array())
-            .into_iter()
-            .flatten()
-        {
-            if let Some(text) = content.get("text").and_then(|value| value.as_str()) {
-                parts.push(text);
+    let Some(output) = body.get("output") else {
+        return Ok(None);
+    };
+    let output = output
+        .as_array()
+        .context("OpenAI Codex response `output` must be an array")?;
+    let mut text = String::new();
+    for item in output {
+        let Some(content) = item.get("content") else {
+            continue;
+        };
+        let content = content
+            .as_array()
+            .context("OpenAI Codex output-item `content` must be an array")?;
+        for part in content {
+            if let Some(part_text) = optional_string_field(part, "text", "OpenAI Codex content")? {
+                push_bounded(
+                    &mut text,
+                    part_text,
+                    MAX_PROVIDER_OUTPUT_BYTES,
+                    "output text",
+                )?;
             }
         }
     }
-    Some(parts.join(""))
+    Ok(Some(text))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::Instant,
+    };
+
+    fn test_codex_request() -> CodexResponsesRequest<'static> {
+        CodexResponsesRequest {
+            model: "test-model",
+            store: false,
+            stream: true,
+            instructions: "test",
+            input: Vec::new(),
+            text: CodexText { verbosity: "low" },
+            include: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            reasoning: None,
+            parallel_tool_calls: false,
+        }
+    }
+
+    fn spawn_stream_server(
+        body: &'static [u8],
+        hold_open: Duration,
+    ) -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut request = [0u8; 16 * 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+            thread::sleep(hold_open);
+            1
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn spawn_retry_server() -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut requests = 0usize;
+            while requests < CODEX_MAX_RETRIES + 1 && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("retry test server accept failed: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut request = [0u8; 16 * 1024];
+                let _ = stream.read(&mut request);
+                let body = br#"{"error":{"code":"server_busy"}}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nRetry-After: 0\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(body).unwrap();
+                requests += 1;
+            }
+            requests
+        });
+        (format!("http://{address}/responses"), handle)
+    }
+
+    #[test]
+    fn replays_openai_compatible_reasoning_content() {
+        let message = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "provider reasoning".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ],
+            usage: None,
+        };
+        let chat = ChatMessage::from_message(&message);
+        assert_eq!(
+            chat.reasoning_content.as_deref(),
+            Some("provider reasoning")
+        );
+        let value = serde_json::to_value(chat).unwrap();
+        assert_eq!(value["reasoning_content"], "provider reasoning");
+    }
+
+    #[test]
+    fn stream_error_context_preserves_cancellation_and_typed_overflow() {
+        let aborted = provider_stream_error(anyhow::anyhow!("aborted"), "test stream");
+        assert_eq!(aborted.to_string(), "aborted");
+
+        let overflow = provider_stream_error(
+            ProviderFailure::ContextOverflow {
+                message: "overflow".to_string(),
+            }
+            .into(),
+            "test stream",
+        );
+        assert!(crate::providers::is_context_overflow_error(&overflow));
+    }
+
+    #[test]
+    fn typed_context_overflow_requires_structured_provider_signal() {
+        let structured = provider_status_error(
+            "test provider",
+            StatusCode::BAD_REQUEST,
+            br#"{"error":{"code":"context_length_exceeded","message":"too long"}}"#,
+        );
+        assert!(crate::providers::is_context_overflow_error(&structured));
+
+        let unstructured = provider_status_error(
+            "test provider",
+            StatusCode::BAD_REQUEST,
+            br#"{"error":{"code":"bad_request","message":"too many tokens"}}"#,
+        );
+        assert!(!crate::providers::is_context_overflow_error(&unstructured));
+    }
+
+    #[test]
+    fn parses_bounded_retry_after_values() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(header::RETRY_AFTER, header::HeaderValue::from_static("120"));
+        assert_eq!(retry_after_delay(&headers), Some(CODEX_MAX_RETRY_AFTER));
+        headers.insert(
+            header::RETRY_AFTER,
+            header::HeaderValue::from_static("invalid"),
+        );
+        assert_eq!(retry_after_delay(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn streaming_cancellation_remains_an_abort() {
+        let (base_url, server) = spawn_stream_server(b"", Duration::from_millis(200));
+        let provider = OpenAiCompatProvider::new(None, base_url, true, false).unwrap();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let trigger = Arc::clone(&cancelled);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            trigger.store(true, Ordering::Relaxed);
+        });
+        let error = provider
+            .complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::Off,
+                &mut |_| {},
+                Some(cancelled),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "aborted");
+        assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn stream_failure_after_partial_output_is_not_retried() {
+        const BODY: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
+        let (base_url, server) = spawn_stream_server(BODY, Duration::ZERO);
+        let provider = OpenAiCompatProvider::new(None, base_url, true, false).unwrap();
+        let mut events = Vec::new();
+        let error = provider
+            .complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::Off,
+                &mut |event| events.push(event),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(server.join().unwrap(), 1);
+        assert!(error.to_string().contains("did not retry"));
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::TextDelta(text)] if text == "partial"
+        ));
+    }
+
+    #[tokio::test]
+    async fn done_event_stops_reading_before_connection_close() {
+        const BODY: &[u8] =
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata:[DONE]\n\n";
+        let (base_url, server) = spawn_stream_server(BODY, Duration::from_millis(750));
+        let provider = OpenAiCompatProvider::new(None, base_url, true, false).unwrap();
+        let mut events = Vec::new();
+        let response = tokio::time::timeout(
+            Duration::from_millis(500),
+            provider.complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::Off,
+                &mut |event| events.push(event),
+                None,
+            ),
+        )
+        .await
+        .expect("provider waited for connection close after [DONE]")
+        .unwrap();
+        assert_eq!(response.message.display_text(), "done");
+        assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_report_attempt_count() {
+        let (url, server) = spawn_retry_server();
+        let error = send_codex_request_with_retries(
+            &Client::new(),
+            &url,
+            "test-key",
+            "test-account",
+            &test_codex_request(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(server.join().unwrap(), CODEX_MAX_RETRIES + 1);
+        let text = error.to_string();
+        assert!(text.contains("after 3 retries"));
+        assert!(text.contains("4 total attempts"));
+        assert!(text.contains("no retries remain"));
+    }
+
+    #[test]
+    fn rejects_malformed_and_unterminated_provider_streams() {
+        let mut chat = ChatSseParser::default();
+        let error = chat.process_line("data: {not-json}", None).unwrap_err();
+        assert!(error.to_string().contains("failed to parse"));
+
+        let mut codex = ResponsesSseParser::default();
+        codex
+            .process_line(
+                r#"data: {"type":"response.output_text.delta","delta":"partial"}"#,
+                None,
+            )
+            .unwrap();
+        let error = codex.finish().unwrap_err();
+        assert!(error.to_string().contains("response.completed"));
+
+        let mut terminal = ResponsesSseParser::default();
+        let stopped = terminal
+            .process_line(
+                r#"data: {"type":"response.completed","response":{"output_text":"complete"}}"#,
+                None,
+            )
+            .unwrap();
+        assert!(stopped);
+        assert_eq!(
+            terminal.finish().unwrap().message.display_text(),
+            "complete"
+        );
+
+        let mut chat = ChatSseParser::default();
+        chat.process_line(
+            r#"data: {"choices":[{"delta":{"content":"partial"}}]}"#,
+            None,
+        )
+        .unwrap();
+        let error = chat.finish().unwrap_err();
+        assert!(error.to_string().contains("without [DONE]"));
+    }
+
+    #[test]
+    fn enforces_provider_field_budgets() {
+        let mut chat = ChatSseParser::default();
+        let oversized = "x".repeat(MAX_PROVIDER_OUTPUT_BYTES + 1);
+        let event = serde_json::json!({"choices":[{"delta":{"content":oversized}}]});
+        let error = chat.process_data(&event.to_string(), None).unwrap_err();
+        assert!(error.to_string().contains("output text exceeded"));
+    }
 
     #[test]
     fn converts_normalized_text_message() {
@@ -1913,6 +2696,7 @@ mod tests {
                 None,
             )
             .unwrap();
+        parser.process_line("data:[DONE]", None).unwrap();
 
         let response = parser.finish().unwrap();
 
@@ -1977,6 +2761,7 @@ mod tests {
             "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"{\\\"path\\\":\"}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"Cargo.toml\\\"}\"}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"\\\"src\\\"}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
 
@@ -2005,6 +2790,7 @@ mod tests {
             "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"path\\\":\"}\n\n",
             "data: {\"type\":\"response.output_item.added\",\"item_id\":\"fc_1\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\"}}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"Cargo.toml\\\"}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
 
@@ -2028,10 +2814,11 @@ mod tests {
             "data: {\"type\":\"response.output_item.added\",\"item_id\":\"fc_1\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\",\"arguments\":\"\"}}\n\n",
             "data: {\"type\":\"response.output_item.added\",\"item_id\":\"fc_2\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_2\",\"id\":\"fc_2\",\"name\":\"ls\",\"arguments\":\"\"}}\n\n",
             "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
 
-        let error = extract_sse_responses_message_result(sse).unwrap_err();
+        let error = extract_sse_responses_message(sse).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2043,9 +2830,10 @@ mod tests {
     fn rejects_malformed_responses_function_call_missing_name() {
         let sse = concat!(
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"arguments\":\"{}\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
-        let error = extract_sse_responses_message_result(sse).unwrap_err();
+        let error = extract_sse_responses_message(sse).unwrap_err();
         assert!(error.to_string().contains("function_call missing"));
     }
 
@@ -2053,9 +2841,10 @@ mod tests {
     fn rejects_malformed_responses_function_call_missing_arguments() {
         let sse = concat!(
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call_1\",\"id\":\"fc_1\",\"name\":\"read\"}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
-        let error = extract_sse_responses_message_result(sse).unwrap_err();
+        let error = extract_sse_responses_message(sse).unwrap_err();
         assert!(error.to_string().contains("function_call missing"));
     }
 
@@ -2076,6 +2865,19 @@ mod tests {
             &message.content[1],
             ContentBlock::Text { text } if text == "final"
         ));
+    }
+
+    #[test]
+    fn rejects_malformed_openai_compatible_event_shapes() {
+        for line in [
+            "data: []",
+            r#"data: {"choices":[null]}"#,
+            r#"data: {"choices":[{"delta":null}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[null]}}]}"#,
+        ] {
+            let mut parser = ChatSseParser::default();
+            assert!(parser.process_line(line, None).is_err(), "accepted {line}");
+        }
     }
 
     #[test]
@@ -2109,6 +2911,7 @@ mod tests {
                 None,
             )
             .unwrap();
+        parser.process_line("data:[DONE]", None).unwrap();
         let error = parser.finish().unwrap_err();
         assert!(
             error
@@ -2132,6 +2935,7 @@ mod tests {
                 None,
             )
             .unwrap();
+        parser.process_line("data:[DONE]", None).unwrap();
 
         let response = parser.finish().unwrap();
 
@@ -2227,6 +3031,7 @@ mod tests {
         let sse = concat!(
             "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"Checked context.\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
         let message = extract_sse_responses_message(sse).unwrap();
@@ -2240,6 +3045,7 @@ mod tests {
             "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Switching to fixed directory usage** \"}\n\n",
             "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"**Switching to fixed directory usage** <!-- -->\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
         let message = extract_sse_responses_message(sse).unwrap();
@@ -2263,12 +3069,15 @@ mod tests {
             "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Planning response verification approach**\\n\\n<!-- -->\"}\n\n",
             "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Planning response verification approach**\\n\\n<!-- -->**Checking Ferrum version post-restart**\\n\\n<!-- -->\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
         let mut events = Vec::new();
         let mut parser = ResponsesSseParser::default();
         for line in sse.lines() {
-            parser.process_line(line, Some(&mut |event| events.push(event)));
+            parser
+                .process_line(line, Some(&mut |event| events.push(event)))
+                .unwrap();
         }
         let message = parser.finish().unwrap().message;
         let thinking = message.thinking_text();
@@ -2315,12 +3124,15 @@ mod tests {
             "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"- -->**Planning response verification approach** **Planning targeted tool tests** <!\"}\n\n",
             "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"-- -->**Planning targeted tool tests**\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
         let mut events = Vec::new();
         let mut parser = ResponsesSseParser::default();
         for line in sse.lines() {
-            parser.process_line(line, Some(&mut |event| events.push(event)));
+            parser
+                .process_line(line, Some(&mut |event| events.push(event)))
+                .unwrap();
         }
         let message = parser.finish().unwrap().message;
         let thinking = message.thinking_text();
@@ -2358,12 +3170,15 @@ mod tests {
             "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"**Planning response verification approach**\\n\\n<!-- -->\"}\n\n",
             "data: {\"type\":\"response.reasoning_summary_text.done\",\"text\":\"**Planning response verification approach**\"}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
         let mut events = Vec::new();
         let mut parser = ResponsesSseParser::default();
         for line in sse.lines() {
-            parser.process_line(line, Some(&mut |event| events.push(event)));
+            parser
+                .process_line(line, Some(&mut |event| events.push(event)))
+                .unwrap();
         }
         let message = parser.finish().unwrap().message;
 
@@ -2390,6 +3205,7 @@ mod tests {
         let sse = concat!(
             "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"text\":\"Plan first.\"}]}}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
         let message = extract_sse_responses_message(sse).unwrap();
@@ -2414,6 +3230,7 @@ mod tests {
     fn extracts_output_from_output_text_done_event() {
         let sse = concat!(
             "data: {\"type\":\"response.output_text.done\",\"text\":\"hello\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
             "data: [DONE]\n\n",
         );
         let message = extract_sse_responses_message(sse).unwrap();
@@ -2429,7 +3246,7 @@ mod tests {
         let response = {
             let mut parser = ResponsesSseParser::default();
             for line in sse.lines() {
-                parser.process_line(line, None);
+                parser.process_line(line, None).unwrap();
             }
             parser.finish().unwrap()
         };

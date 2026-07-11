@@ -125,6 +125,9 @@ Fields:
 - `default_model`: model selected when `/provider <name>` switches to this provider, and used at startup when top-level `model` is omitted
 - `streaming`: optional OpenAI-compatible streaming toggle; defaults to `true`
 - `stream_usage`: optional `stream_options.include_usage` toggle for OpenAI-compatible streaming; defaults to `true`
+- `allow_insecure_http`: explicit opt-in for sending credentials to a non-loopback `http://` base URL; defaults to `false`
+
+Authenticated provider URLs must use HTTPS unless the host is loopback or `allow_insecure_http = true` is set explicitly. Authless OpenAI-compatible endpoints may use remote HTTP, although HTTPS is still preferred.
 
 Set `stream_usage = false` for OpenAI-compatible providers known to reject usage-in-streaming options. Otherwise Ferrum retries once without `stream_options.include_usage` when a provider rejects it, then records estimated usage if provider usage is absent.
 

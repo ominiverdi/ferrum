@@ -280,6 +280,10 @@ struct Message {
 
 ## Providers
 
+Provider HTTP status bodies and non-streaming responses use bounded collectors with idle and total deadlines. Streaming uses incremental bounded SSE decoding, a 60-second initial-response deadline, a 90-second chunk-idle deadline, and no total duration cap while data remains active. UTF-8 is preserved across network chunks; malformed framing, parser failures, missing terminal events, and exceeded field/response budgets fail the turn. Context-overflow recovery is triggered only by typed provider status/event signals.
+
+Authenticated non-loopback `http://` base URLs are rejected unless the provider explicitly sets `allow_insecure_http = true`. Loopback and authless HTTP providers remain supported.
+
 ### OpenAI Codex / ChatGPT
 
 - Auth: `ferrum login openai` OAuth.
@@ -287,6 +291,7 @@ struct Message {
 - Model listing: live `GET /codex/models?client_version=<version>`.
 - Supports reasoning effort mapping and tool calls.
 - Supports image input for compatible models.
+- Retries explicit 408, 429, and 5xx rejections and connection failures up to three times, honoring bounded `Retry-After`; ambiguous initial timeouts and failures after streaming starts are not replayed.
 
 ### OpenAI-compatible
 
