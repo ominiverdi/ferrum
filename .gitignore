@@ -6,3 +6,4 @@
 .env.*
 !.env.example
 bench/runs/
+/AGENTS.md
