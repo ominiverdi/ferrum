@@ -226,9 +226,9 @@ sha256sum -c ferrum-v0.6.7-x86_64-unknown-linux-gnu.tar.gz.sha256
 
 ## CI
 
-Codeberg Forgejo Actions validates pushes with `.forgejo/workflows/ci.yml` on the hosted `codeberg-medium` runner. The workflow checks formatting, runs `cargo clippy --all-targets -- -D warnings`, and runs `cargo test --release` in `rust:1.90`.
+GitHub Actions provides mirror CI through `.github/workflows/ci.yml`. Codeberg Forgejo Actions is intentionally not configured because hosted runner availability is too inconsistent for the project workflow. Local validation remains required before every push and release.
 
-GitHub Actions may remain configured for mirror CI and optional backup release asset builds. Codeberg releases created locally with `tea` are the primary release path.
+Codeberg remains the primary release host; create releases locally with `tea`. GitHub Actions may also build backup release assets from pushed tags.
 
 ## License
 
