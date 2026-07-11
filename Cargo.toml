@@ -13,6 +13,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
+agent-client-protocol-schema = { version = "1.4", default-features = false }
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
@@ -34,7 +35,7 @@ regex = "1"
 similar = "2"
 time = { version = "0.3", features = ["formatting"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "fs", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "time", "fs", "sync"] }
 toml = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
 tree-sitter = "0.26.10"

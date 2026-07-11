@@ -31,6 +31,8 @@ ferrum - small Rust-native coding agent for Linux
 .PP
 \f[B]ferrum\f[R] \f[B]\[en]session\f[R] REF OPTIONS
 .PP
+\f[B]ferrum\f[R] \f[B]acp\f[R]
+.PP
 \f[B]ferrum\f[R] \f[B]login\f[R] PROVIDER
 .SH DESCRIPTION
 .PP
@@ -55,6 +57,13 @@ session.
 \f[B]Print mode\f[R]
 Use \f[B]-p\f[R], \f[B]\[en]print\f[R] to run one prompt and print the
 answer.
+.TP
+\f[B]ACP stdio mode\f[R]
+Use \f[B]ferrum acp\f[R] to run the bounded official ACP v1
+newline-delimited JSON-RPC stdio baseline.
+stdout remains protocol-only.
+See \f[B]docs/acp.md\f[R] for supported methods and current
+interoperability limits.
 .TP
 \f[B]Resume mode\f[R]
 Use \f[B]\[en]resume\f[R] to resume the latest session for the current
@@ -138,20 +147,22 @@ Ferrum\[cq]s default native tool set includes:
 .PP
 The \f[V]bash\f[R] and \f[V]wait\f[R] tools parse complete Bash syntax
 and apply a tiered execution policy.
-At \f[B]medium\f[R] and \f[B]high\f[R], native
-\f[V]write\f[R]/\f[V]edit\f[R] and recognized shell mutations are
-limited to \f[V][tools].writable_roots\f[R], which defaults to the
-working directory; \f[B]low\f[R] permits directory changes with
-\f[V]cd\f[R] and bypasses writable roots for host-authority mutation.
-Native replacements remain identity-checked and atomic.
+\f[B]Low\f[R] grants broad current-user shell authority and bypasses
+writable roots.
+The default \f[B]medium\f[R] tier supports direct trusted-checkout
+development, rejects dynamic/indirect authority and shell/interpreter
+payloads, and limits native and recognized shell mutations to
+\f[V][tools].writable_roots\f[R].
+\f[B]High\f[R] is inspection-only and rejects native/shell mutation,
+networking, interpreters, builds, and unknown executables.
+Tier-independent resource, cancellation, catastrophic-operation,
+privilege, protected-credential, target-identity, and atomic-replacement
+checks remain.
 Native \f[V]read\f[R], \f[V]grep\f[R], \f[V]find\f[R], and \f[V]ls\f[R]
 enforce bounded line/result/traversal behavior, with cancellation and
 deadlines for searches.
 Use \f[B]\[en]safety low|medium|high\f[R] at startup or \f[B]/safety
 low|medium|high\f[R] interactively.
-The default \f[B]medium\f[R] tier supports trusted-checkout development
-while rejecting command substitution, dynamic executables, hidden
-wrapper authority, and direct interpreter payloads.
 This policy is not a sandbox.
 .PP
 MCP tool names are namespaced and sanitized as **mcp__SERVER__TOOL\f[B].

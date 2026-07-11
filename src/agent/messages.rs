@@ -136,6 +136,58 @@ impl Message {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ThinkingSanitizer {
+    pending: String,
+    in_comment: bool,
+}
+
+impl ThinkingSanitizer {
+    pub fn push(&mut self, input: &str) -> String {
+        self.pending.push_str(input);
+        let mut output = String::new();
+        loop {
+            if self.in_comment {
+                if let Some(end) = self.pending.find("-->") {
+                    self.pending.drain(..end + "-->".len());
+                    self.in_comment = false;
+                    continue;
+                }
+                retain_possible_marker_prefix(&mut self.pending, "-->");
+                break;
+            }
+            if let Some(start) = self.pending.find("<!--") {
+                output.push_str(&self.pending[..start]);
+                self.pending.drain(..start + "<!--".len());
+                self.in_comment = true;
+                continue;
+            }
+            let retained = possible_marker_prefix_len(&self.pending, "<!--");
+            let emit_len = self.pending.len().saturating_sub(retained);
+            output.push_str(&self.pending[..emit_len]);
+            self.pending.drain(..emit_len);
+            break;
+        }
+        output
+    }
+}
+
+fn retain_possible_marker_prefix(buffer: &mut String, marker: &str) {
+    let retained = possible_marker_prefix_len(buffer, marker);
+    if retained == 0 {
+        buffer.clear();
+    } else {
+        buffer.drain(..buffer.len() - retained);
+    }
+}
+
+fn possible_marker_prefix_len(buffer: &str, marker: &str) -> usize {
+    (1..marker.len())
+        .rev()
+        .find(|length| buffer.ends_with(&marker[..*length]))
+        .unwrap_or(0)
+}
+
 pub fn sanitize_thinking_text(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
@@ -320,8 +372,8 @@ pub fn strip_think_blocks(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_IMAGE_BASE64_BYTES, MAX_IMAGE_DIMENSION, image_from_data_uri, image_from_path,
-        sanitize_thinking_text, strip_think_blocks,
+        MAX_IMAGE_BASE64_BYTES, MAX_IMAGE_DIMENSION, ThinkingSanitizer, image_from_data_uri,
+        image_from_path, sanitize_thinking_text, strip_think_blocks,
     };
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use std::io::Cursor;
@@ -435,6 +487,14 @@ mod tests {
             sanitize_thinking_text("**Switching** <!-- separator -->"),
             "**Switching** "
         );
+    }
+
+    #[test]
+    fn sanitizes_provider_thinking_comments_split_across_chunks() {
+        let mut sanitizer = ThinkingSanitizer::default();
+        assert_eq!(sanitizer.push("visible<!"), "visible");
+        assert_eq!(sanitizer.push("-- hidden --"), "");
+        assert_eq!(sanitizer.push(">after"), "after");
     }
 
     #[test]

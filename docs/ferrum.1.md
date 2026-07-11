@@ -18,6 +18,8 @@ ferrum - small Rust-native coding agent for Linux
 
 **ferrum** **--session** REF [OPTIONS]
 
+**ferrum** **acp**
+
 **ferrum** **login** PROVIDER
 
 # DESCRIPTION
@@ -43,6 +45,12 @@ and the agent loop.
 **Print mode**
 
 : Use **-p**, **--print** to run one prompt and print the answer.
+
+**ACP stdio mode**
+
+: Use **ferrum acp** to run the bounded official ACP v1 newline-delimited
+JSON-RPC stdio baseline. stdout remains protocol-only. See **docs/acp.md** for
+supported methods and current interoperability limits.
 
 **Resume mode**
 

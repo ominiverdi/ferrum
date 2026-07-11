@@ -2147,6 +2147,7 @@ impl AgentSession {
             let started = Instant::now();
             let mut event_error = None;
             let event_cancel = Arc::clone(&turn_cancel);
+            let mut thinking_sanitizer = messages::ThinkingSanitizer::default();
             let response_result = {
                 let mut on_event = |event| {
                     if event_error.is_some() {
@@ -2154,7 +2155,7 @@ impl AgentSession {
                     }
                     let event = match event {
                         providers::StreamEvent::ThinkingDelta(delta) => {
-                            AgentEvent::ThinkingDelta(delta)
+                            AgentEvent::ThinkingDelta(thinking_sanitizer.push(&delta))
                         }
                         providers::StreamEvent::TextDelta(delta) => AgentEvent::TextDelta(delta),
                     };
@@ -2400,6 +2401,7 @@ impl AgentSession {
             );
             let mut event_error = None;
             let event_cancel = Arc::clone(&turn_cancel);
+            let mut thinking_sanitizer = messages::ThinkingSanitizer::default();
             let response_result = {
                 let mut on_event = |event| {
                     if event_error.is_some() {
@@ -2407,7 +2409,7 @@ impl AgentSession {
                     }
                     let event = match event {
                         providers::StreamEvent::ThinkingDelta(delta) => {
-                            AgentEvent::ThinkingDelta(delta)
+                            AgentEvent::ThinkingDelta(thinking_sanitizer.push(&delta))
                         }
                         providers::StreamEvent::TextDelta(delta) => AgentEvent::TextDelta(delta),
                     };
@@ -2576,6 +2578,18 @@ impl AgentSession {
         preview_attached_image(&image);
         self.pending_images.push(image);
         eprintln!("[image] attached clipboard image");
+        Ok(())
+    }
+
+    pub(crate) fn attach_data_images(&mut self, images: Vec<(String, String)>) -> Result<()> {
+        let mut loaded = Vec::with_capacity(images.len());
+        for (mime_type, data) in images {
+            loaded.push(messages::image_from_data_uri(&format!(
+                "data:{mime_type};base64,{data}"
+            ))?);
+        }
+        validate_image_attachment_budget(&self.messages, &self.pending_images, &loaded)?;
+        self.pending_images.extend(loaded);
         Ok(())
     }
 

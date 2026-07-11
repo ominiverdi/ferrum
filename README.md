@@ -117,6 +117,14 @@ Start an interactive session:
 ferrum
 ```
 
+Start the bounded official ACP v1 stdio baseline:
+
+```bash
+ferrum acp
+```
+
+See [`docs/acp.md`](docs/acp.md) for supported methods and current interoperability limits.
+
 Resume the latest interactive session:
 
 ```bash

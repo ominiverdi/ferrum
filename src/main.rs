@@ -1,3 +1,4 @@
+mod acp;
 pub mod agent;
 mod atomic_file;
 mod auth;
@@ -58,6 +59,10 @@ async fn run() -> Result<()> {
 
     if let Some(command) = &args.command {
         match command {
+            cli::Command::Acp => {
+                acp::run(config).await?;
+                return Ok(());
+            }
             cli::Command::Login { provider }
                 if provider == "openai" || provider == "openai-codex" =>
             {

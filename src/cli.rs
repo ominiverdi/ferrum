@@ -66,6 +66,8 @@ pub struct Args {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Run the official ACP v1 stdio agent
+    Acp,
     /// Authenticate with a provider
     Login { provider: String },
 }
@@ -100,6 +102,12 @@ fn atty_stdin() -> bool {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn parses_acp_subcommand() {
+        let args = Args::try_parse_from(["ferrum", "acp"]).unwrap();
+        assert!(matches!(args.command, Some(Command::Acp)));
+    }
 
     #[test]
     fn parses_mcp_flags() {

@@ -89,6 +89,23 @@ impl Provider for FakeProvider {
         cancelled: Option<Arc<AtomicBool>>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
+            if std::env::var("FERRUM_FAKE_SCRIPT").as_deref() == Ok("wait_cancel")
+                && messages
+                    .iter()
+                    .rev()
+                    .find(|message| matches!(message.role, Role::User))
+                    .is_some_and(|message| message.text_content() == "wait")
+            {
+                loop {
+                    if cancelled
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                    {
+                        anyhow::bail!("aborted");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            }
             if cancelled
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Relaxed))
@@ -136,6 +153,21 @@ impl Provider for FakeProvider {
 fn scripted_response(script: &str, messages: &[Message]) -> Message {
     match script {
         "repeat_read" => repeat_read_response(messages),
+        "single_read" => single_read_response(messages),
+        "cancel_bash" => cancel_bash_response(messages),
+        "thought" => Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Thinking {
+                    text: "visible thought summary<!-- hidden -->".to_string(),
+                    signature: None,
+                },
+                ContentBlock::Text {
+                    text: "thought complete\n".to_string(),
+                },
+            ],
+            usage: None,
+        },
         "missing_read" => missing_read_response(messages),
         "mixed_write_read" => mixed_write_read_response(messages),
         "edit_preview" => edit_preview_response(messages),
@@ -292,7 +324,26 @@ fn missing_read_response(messages: &[Message]) -> Message {
     }
 }
 
-#[cfg(test)]
+fn cancel_bash_response(messages: &[Message]) -> Message {
+    if messages.iter().any(|message| {
+        message
+            .content
+            .iter()
+            .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+    }) {
+        return Message::text(Role::Assistant, "cancelled bash complete\n");
+    }
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "fake-cancel-bash".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "sleep 30", "timeout_seconds": 60}),
+        }],
+        usage: None,
+    }
+}
+
 fn single_read_response(messages: &[Message]) -> Message {
     let tool_result = messages
         .iter()
