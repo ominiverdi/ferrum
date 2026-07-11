@@ -22,7 +22,7 @@ Interactive:
 /mcp list
 ```
 
-`/mcp status` and `/mcp list` show configured servers after any `--mcp <server...>` narrowing. Tool counts distinguish available definitions from the tools actually exposed after `--tools`, `--no-tools`, and `[tools]` policy; `total_tools_exposed` and `tool_schema_bytes` match that resolved model-facing set.
+`/mcp status` and `/mcp list` show configured servers after any `--mcp <server...>` narrowing. Tool counts distinguish available definitions from the tools actually exposed after `--tools`, `--no-tools`, and `[tools]` policy; `total_tools_exposed` and `tool_schema_bytes` match that resolved model-facing set. Before configured MCP servers are first discovered, exposure and schema fields are reported as `undiscovered` instead of validating policy against an incomplete definition set.
 
 ## Supported
 

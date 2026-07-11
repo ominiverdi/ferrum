@@ -1316,12 +1316,21 @@ struct ToolExposureSummary {
     schema_bytes: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ToolExposureStatus {
+    Resolved(ToolExposureSummary),
+    McpUndiscovered { native_available: usize },
+}
+
 fn tool_exposure_summary(
     native_tools: Vec<tools::ToolDefinition>,
-    mcp_tools: &[tools::ToolDefinition],
+    mcp_tools: Option<&[tools::ToolDefinition]>,
     config: &Config,
-) -> Result<ToolExposureSummary> {
+) -> Result<ToolExposureStatus> {
     let native_available = native_tools.len();
+    let Some(mcp_tools) = mcp_tools else {
+        return Ok(ToolExposureStatus::McpUndiscovered { native_available });
+    };
     let mcp_available = mcp_tools.len();
     let native_names = native_tools
         .iter()
@@ -1336,14 +1345,14 @@ fn tool_exposure_summary(
         .count();
     let mcp_exposed = exposed.len().saturating_sub(native_exposed);
 
-    Ok(ToolExposureSummary {
+    Ok(ToolExposureStatus::Resolved(ToolExposureSummary {
         native_available,
         native_exposed,
         mcp_available,
         mcp_exposed,
         total_exposed: exposed.len(),
         schema_bytes: tool_schema_bytes(&exposed),
-    })
+    }))
 }
 
 fn history_tool_definitions() -> Vec<tools::ToolDefinition> {
@@ -2387,16 +2396,16 @@ impl AgentState {
     fn print_mcp_status(&self, config: &Config) -> Result<()> {
         let mut native_tools = builtin_tools::definitions();
         native_tools.extend(history_tool_definitions());
+        let configured_servers = active_mcp_servers(config);
         let mcp_tools = if self.mcp_enabled {
             self.mcp
                 .as_ref()
                 .map(|mcp| mcp.definitions())
-                .unwrap_or(&[])
+                .or_else(|| configured_servers.is_empty().then_some(&[][..]))
         } else {
-            &[]
+            Some(&[][..])
         };
         let exposure = tool_exposure_summary(native_tools, mcp_tools, config)?;
-        let configured_servers = active_mcp_servers(config);
         let configured = configured_servers.len();
         let configured_enabled = configured_servers
             .iter()
@@ -2412,12 +2421,24 @@ impl AgentState {
             );
         }
         println!("connected: {}", self.mcp.is_some());
-        println!("native_tools_available: {}", exposure.native_available);
-        println!("native_tools_exposed: {}", exposure.native_exposed);
-        println!("mcp_tools_available: {}", exposure.mcp_available);
-        println!("mcp_tools_exposed: {}", exposure.mcp_exposed);
-        println!("total_tools_exposed: {}", exposure.total_exposed);
-        println!("tool_schema_bytes: {}", exposure.schema_bytes);
+        match exposure {
+            ToolExposureStatus::Resolved(exposure) => {
+                println!("native_tools_available: {}", exposure.native_available);
+                println!("native_tools_exposed: {}", exposure.native_exposed);
+                println!("mcp_tools_available: {}", exposure.mcp_available);
+                println!("mcp_tools_exposed: {}", exposure.mcp_exposed);
+                println!("total_tools_exposed: {}", exposure.total_exposed);
+                println!("tool_schema_bytes: {}", exposure.schema_bytes);
+            }
+            ToolExposureStatus::McpUndiscovered { native_available } => {
+                println!("native_tools_available: {native_available}");
+                println!("native_tools_exposed: undiscovered");
+                println!("mcp_tools_available: undiscovered");
+                println!("mcp_tools_exposed: undiscovered");
+                println!("total_tools_exposed: undiscovered");
+                println!("tool_schema_bytes: undiscovered");
+            }
+        }
         if !configured_servers.is_empty() {
             println!("servers:");
             for server in &configured_servers {
@@ -5026,7 +5047,11 @@ mod context_pressure_tests {
         let native_available = native_tools.len();
         let available_schema_bytes = tool_schema_bytes(&native_tools);
 
-        let summary = tool_exposure_summary(native_tools, &[], &config).unwrap();
+        let ToolExposureStatus::Resolved(summary) =
+            tool_exposure_summary(native_tools, Some(&[]), &config).unwrap()
+        else {
+            panic!("native-only tool exposure should be resolved");
+        };
 
         assert_eq!(summary.native_available, native_available);
         assert_eq!(summary.native_exposed, 2);
@@ -5035,6 +5060,41 @@ mod context_pressure_tests {
         assert_eq!(summary.total_exposed, 2);
         assert!(summary.schema_bytes > 0);
         assert!(summary.schema_bytes < available_schema_bytes);
+    }
+
+    #[test]
+    fn tool_exposure_defers_mcp_policy_validation_until_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.tools_allow = Some(vec!["mcp__demo__hello".to_string()]);
+        let mut native_tools = builtin_tools::definitions();
+        native_tools.extend(history_tool_definitions());
+        let native_available = native_tools.len();
+
+        let status = tool_exposure_summary(native_tools, None, &config).unwrap();
+
+        assert_eq!(
+            status,
+            ToolExposureStatus::McpUndiscovered { native_available }
+        );
+    }
+
+    #[test]
+    fn mcp_status_accepts_mcp_only_allowlist_before_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.tools_allow = Some(vec!["mcp__demo__hello".to_string()]);
+        config.mcp_servers = vec![crate::config::McpServerConfig {
+            name: "demo".to_string(),
+            command: "true".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            enabled: true,
+        }];
+        let state = AgentState::new(&config).unwrap();
+
+        assert!(state.mcp.is_none());
+        state.print_mcp_status(&config).unwrap();
     }
 
     #[test]
