@@ -1,10 +1,22 @@
+use crate::terminal_text;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
-    fs,
+    collections::{HashMap, HashSet},
+    fs::{self, File, OpenOptions},
+    io::Read,
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
+
+const MAX_SKILLS: usize = 256;
+const MAX_SKILL_DIRECTORIES: usize = 1_024;
+const MAX_SKILL_DIRECTORY_ENTRIES: usize = 4_096;
+const MAX_SKILL_DEPTH: usize = 16;
+const MAX_SKILL_FRONTMATTER_BYTES: usize = 16 * 1024;
+const MAX_SKILL_FILE_BYTES: usize = 256 * 1024;
+const MAX_SKILL_DESCRIPTION_BYTES: usize = 1_024;
+const MAX_GITDIR_FILE_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -12,22 +24,163 @@ pub struct Skill {
     pub description: String,
     pub path: PathBuf,
     pub dir: PathBuf,
+    pub(crate) approved_root: PathBuf,
+    pub(crate) external_allowed: bool,
 }
 
-pub fn discover(config_dir: &Path, cwd: &Path) -> Result<Vec<Skill>> {
-    let mut skills = Vec::new();
+pub fn discover(
+    config_dir: &Path,
+    cwd: &Path,
+    allow_external_global_symlinks: bool,
+) -> Result<Vec<Skill>> {
+    discover_with_home(
+        config_dir,
+        &home_dir()?,
+        cwd,
+        allow_external_global_symlinks,
+    )
+}
 
-    add_skills_from_dir(&mut skills, &config_dir.join("skills"), true)?;
-    add_skills_from_dir(&mut skills, &home_dir()?.join(".agents/skills"), false)?;
+fn discover_with_home(
+    config_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    allow_external_global_symlinks: bool,
+) -> Result<Vec<Skill>> {
+    let mut discovery = Discovery::default();
+
+    discovery.add_root(
+        &config_dir.join("skills"),
+        true,
+        allow_external_global_symlinks,
+    )?;
+    discovery.add_root(
+        &home.join(".agents/skills"),
+        false,
+        allow_external_global_symlinks,
+    )?;
 
     let mut ancestors = project_ancestors(cwd);
     ancestors.reverse();
     for dir in ancestors {
-        add_skills_from_dir(&mut skills, &dir.join(".ferrum/skills"), true)?;
-        add_skills_from_dir(&mut skills, &dir.join(".agents/skills"), false)?;
+        // Repository-controlled skill links never escape their declared project root.
+        discovery.add_root(&dir.join(".ferrum/skills"), true, false)?;
+        discovery.add_root(&dir.join(".agents/skills"), false, false)?;
     }
 
-    Ok(dedup_project_overrides(skills))
+    Ok(dedup_project_overrides(discovery.skills))
+}
+
+#[derive(Default)]
+struct Discovery {
+    skills: Vec<Skill>,
+    visited_dirs: HashSet<PathBuf>,
+    directory_count: usize,
+}
+
+impl Discovery {
+    fn add_root(&mut self, dir: &Path, direct_md: bool, allow_external: bool) -> Result<()> {
+        let Ok(root_metadata) = fs::symlink_metadata(dir) else {
+            return Ok(());
+        };
+        if !root_metadata.file_type().is_dir() && !root_metadata.file_type().is_symlink() {
+            return Ok(());
+        }
+        if root_metadata.file_type().is_symlink() && !allow_external {
+            anyhow::bail!(
+                "skill root symlink requires skills.allow_external_global_symlinks=true: {}",
+                dir.display()
+            );
+        }
+        let approved_root = fs::canonicalize(dir)
+            .with_context(|| format!("failed to resolve skill root {}", dir.display()))?;
+        if !approved_root.is_dir() {
+            return Ok(());
+        }
+
+        let start = self.skills.len();
+        self.visit_dir(&approved_root, &approved_root, direct_md, allow_external, 0)?;
+        reject_duplicate_skills_same_scope(&self.skills[start..], dir)
+    }
+
+    fn visit_dir(
+        &mut self,
+        dir: &Path,
+        approved_root: &Path,
+        direct_md: bool,
+        allow_external: bool,
+        depth: usize,
+    ) -> Result<()> {
+        if depth > MAX_SKILL_DEPTH {
+            anyhow::bail!(
+                "skill discovery depth exceeds {MAX_SKILL_DEPTH} below {}",
+                approved_root.display()
+            );
+        }
+        let canonical = fs::canonicalize(dir)
+            .with_context(|| format!("failed to resolve skill directory {}", dir.display()))?;
+        ensure_skill_containment(&canonical, approved_root, allow_external)?;
+        if !self.visited_dirs.insert(canonical.clone()) {
+            anyhow::bail!(
+                "skill directory cycle or repeated canonical directory: {}",
+                canonical.display()
+            );
+        }
+        self.directory_count += 1;
+        if self.directory_count > MAX_SKILL_DIRECTORIES {
+            anyhow::bail!("skill discovery exceeds {MAX_SKILL_DIRECTORIES} directories");
+        }
+
+        let entries = sorted_dir_entries(&canonical)?;
+        if direct_md {
+            for path in &entries {
+                if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                    continue;
+                }
+                let Some(canonical_file) = canonical_regular_file(path)? else {
+                    continue;
+                };
+                ensure_skill_containment(&canonical_file, approved_root, allow_external)?;
+                self.add_skill_file(&canonical_file, approved_root, allow_external)?;
+            }
+        }
+
+        for path in entries {
+            let Some(canonical_dir) = canonical_directory(&path)? else {
+                continue;
+            };
+            ensure_skill_containment(&canonical_dir, approved_root, allow_external)?;
+            let skill_path = canonical_dir.join("SKILL.md");
+            if let Some(canonical_skill) = canonical_regular_file(&skill_path)? {
+                ensure_skill_containment(&canonical_skill, approved_root, allow_external)?;
+                self.add_skill_file(&canonical_skill, approved_root, allow_external)?;
+            } else {
+                self.visit_dir(
+                    &canonical_dir,
+                    approved_root,
+                    false,
+                    allow_external,
+                    depth + 1,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn add_skill_file(
+        &mut self,
+        path: &Path,
+        approved_root: &Path,
+        allow_external: bool,
+    ) -> Result<()> {
+        if self.skills.len() >= MAX_SKILLS {
+            anyhow::bail!("skill discovery exceeds {MAX_SKILLS} skills");
+        }
+        if let Some(skill) = parse_skill_file(path, approved_root, allow_external)? {
+            self.skills.push(skill);
+        }
+        Ok(())
+    }
 }
 
 pub fn render_available_skills(skills: &[Skill]) -> Option<String> {
@@ -59,14 +212,18 @@ pub fn render_available_skills(skills: &[Skill]) -> Option<String> {
 }
 
 pub fn expand_skill_prompt(skill: &Skill, args: Option<&str>) -> Result<String> {
-    let content = fs::read_to_string(&skill.path)
-        .with_context(|| format!("failed to read skill {}", skill.path.display()))?;
+    let mut file = open_verified_skill(skill)?;
+    let content = read_utf8_bounded(
+        &mut file,
+        MAX_SKILL_FILE_BYTES,
+        &format!("skill {}", skill.path.display()),
+    )?;
     let body = strip_frontmatter(&content).trim();
     let skill_block = format!(
         "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
         escape_xml(&skill.name),
         escape_xml(&skill.path.display().to_string()),
-        skill.dir.display(),
+        escape_xml(&skill.dir.display().to_string()),
         body
     );
     if let Some(args) = args.filter(|args| !args.trim().is_empty()) {
@@ -76,49 +233,75 @@ pub fn expand_skill_prompt(skill: &Skill, args: Option<&str>) -> Result<String> 
     }
 }
 
-fn add_skills_from_dir(skills: &mut Vec<Skill>, dir: &Path, direct_md: bool) -> Result<()> {
-    if !dir.is_dir() {
-        return Ok(());
+fn open_verified_skill(skill: &Skill) -> Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&skill.path)
+        .with_context(|| format!("failed to open skill {}", skill.path.display()))?;
+    let opened = file
+        .metadata()
+        .with_context(|| format!("failed to inspect skill {}", skill.path.display()))?;
+    if !opened.is_file() {
+        anyhow::bail!("skill is not a regular file: {}", skill.path.display());
     }
-
-    let start = skills.len();
-    if direct_md {
-        for path in sorted_dir_entries(dir)? {
-            if path.is_file()
-                && path.extension().and_then(|ext| ext.to_str()) == Some("md")
-                && let Some(skill) = parse_skill_file(&path)?
-            {
-                skills.push(skill);
-            }
-        }
+    let canonical = fs::canonicalize(&skill.path)
+        .with_context(|| format!("failed to resolve skill {}", skill.path.display()))?;
+    ensure_skill_containment(&canonical, &skill.approved_root, skill.external_allowed)?;
+    let current = fs::metadata(&canonical)
+        .with_context(|| format!("failed to inspect skill {}", canonical.display()))?;
+    if opened.dev() != current.dev() || opened.ino() != current.ino() {
+        anyhow::bail!("skill changed while opening: {}", skill.path.display());
     }
-
-    visit_skill_dirs(dir, skills)?;
-    reject_duplicate_skills_same_scope(&skills[start..], dir)
+    Ok(file)
 }
 
-fn visit_skill_dirs(dir: &Path, skills: &mut Vec<Skill>) -> Result<()> {
-    for path in sorted_dir_entries(dir)? {
-        if !path.is_dir() {
-            continue;
-        }
-        let skill_path = path.join("SKILL.md");
-        if skill_path.is_file() {
-            if let Some(skill) = parse_skill_file(&skill_path)? {
-                skills.push(skill);
-            }
-        } else {
-            visit_skill_dirs(&path, skills)?;
-        }
+fn canonical_regular_file(path: &Path) -> Result<Option<PathBuf>> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(None);
+    };
+    if !metadata.file_type().is_file() && !metadata.file_type().is_symlink() {
+        return Ok(None);
     }
-    Ok(())
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("failed to resolve skill candidate {}", path.display()))?;
+    Ok(canonical.is_file().then_some(canonical))
+}
+
+fn canonical_directory(path: &Path) -> Result<Option<PathBuf>> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(None);
+    };
+    if !metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("failed to resolve skill directory {}", path.display()))?;
+    Ok(canonical.is_dir().then_some(canonical))
+}
+
+fn ensure_skill_containment(path: &Path, approved_root: &Path, allow_external: bool) -> Result<()> {
+    if allow_external || path.starts_with(approved_root) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "skill path escapes approved root {}: {}",
+        approved_root.display(),
+        path.display()
+    )
 }
 
 fn sorted_dir_entries(dir: &Path) -> Result<Vec<PathBuf>> {
-    let mut entries = fs::read_dir(dir)
-        .with_context(|| format!("failed to read {}", dir.display()))?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        entries.push(entry?.path());
+        if entries.len() > MAX_SKILL_DIRECTORY_ENTRIES {
+            anyhow::bail!(
+                "skill directory {} exceeds {MAX_SKILL_DIRECTORY_ENTRIES} entries",
+                dir.display()
+            );
+        }
+    }
     entries.sort();
     Ok(entries)
 }
@@ -139,48 +322,110 @@ fn reject_duplicate_skills_same_scope(skills: &[Skill], scope: &Path) -> Result<
     Ok(())
 }
 
-fn parse_skill_file(path: &Path) -> Result<Option<Skill>> {
-    let text =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let Some(frontmatter) = extract_frontmatter(&text) else {
-        eprintln!("[skills] skipping {}: missing frontmatter", path.display());
+fn parse_skill_file(
+    path: &Path,
+    approved_root: &Path,
+    allow_external: bool,
+) -> Result<Option<Skill>> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let prefix = read_utf8_prefix(
+        &mut file,
+        MAX_SKILL_FRONTMATTER_BYTES,
+        &format!("skill frontmatter in {}", path.display()),
+    )?;
+    let Some(frontmatter) = extract_frontmatter(&prefix) else {
+        if file
+            .metadata()
+            .is_ok_and(|metadata| metadata.len() > MAX_SKILL_FRONTMATTER_BYTES as u64)
+        {
+            anyhow::bail!(
+                "skill frontmatter in {} exceeds {MAX_SKILL_FRONTMATTER_BYTES} bytes",
+                path.display()
+            );
+        }
+        eprintln!(
+            "[skills] skipping {}: missing bounded frontmatter",
+            terminal_text::sanitize(&path.display().to_string())
+        );
         return Ok(None);
     };
     let fields = match parse_frontmatter_fields(&frontmatter) {
         Ok(fields) => fields,
         Err(error) => {
             eprintln!(
-                "[skills] skipping {}: invalid frontmatter: {error}",
-                path.display()
+                "[skills] skipping {}: invalid frontmatter: {}",
+                terminal_text::sanitize(&path.display().to_string()),
+                terminal_text::sanitize(&error.to_string())
             );
             return Ok(None);
         }
     };
     let Some(name) = fields.get("name").cloned() else {
-        eprintln!("[skills] skipping {}: missing name", path.display());
+        eprintln!(
+            "[skills] skipping {}: missing name",
+            terminal_text::sanitize(&path.display().to_string())
+        );
         return Ok(None);
     };
     let Some(description) = fields.get("description").cloned() else {
-        eprintln!("[skills] skipping {}: missing description", path.display());
+        eprintln!(
+            "[skills] skipping {}: missing description",
+            terminal_text::sanitize(&path.display().to_string())
+        );
         return Ok(None);
     };
     if !valid_skill_name(&name) {
         eprintln!(
             "[skills] skipping {}: invalid name `{}`",
-            path.display(),
-            name
+            terminal_text::sanitize(&path.display().to_string()),
+            terminal_text::sanitize(&name)
         );
         return Ok(None);
     }
+    if description.trim().is_empty() || description.len() > MAX_SKILL_DESCRIPTION_BYTES {
+        eprintln!(
+            "[skills] skipping {}: description must be 1-{MAX_SKILL_DESCRIPTION_BYTES} bytes",
+            terminal_text::sanitize(&path.display().to_string())
+        );
+        return Ok(None);
+    }
+    let path = fs::canonicalize(path)
+        .with_context(|| format!("failed to resolve skill {}", path.display()))?;
+    ensure_skill_containment(&path, approved_root, allow_external)?;
     Ok(Some(Skill {
         name,
         description,
-        path: path.to_path_buf(),
         dir: path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf(),
+        path,
+        approved_root: approved_root.to_path_buf(),
+        external_allowed: allow_external,
     }))
+}
+
+fn read_utf8_prefix(file: &mut File, limit: usize, label: &str) -> Result<String> {
+    let mut bytes = Vec::with_capacity(limit.min(16 * 1024));
+    file.take(limit as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {label}"))?;
+    String::from_utf8(bytes).with_context(|| format!("{label} is not UTF-8"))
+}
+
+fn read_utf8_bounded(file: &mut File, limit: usize, label: &str) -> Result<String> {
+    let mut bytes = Vec::with_capacity(limit.min(16 * 1024).saturating_add(1));
+    file.take(limit.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {label}"))?;
+    if bytes.len() > limit {
+        anyhow::bail!("{label} exceeds {limit} bytes");
+    }
+    String::from_utf8(bytes).with_context(|| format!("{label} is not UTF-8"))
 }
 
 fn extract_frontmatter(text: &str) -> Option<String> {
@@ -285,10 +530,42 @@ fn project_ancestors_with_boundary(cwd: &Path, boundary: Option<&Path>) -> Vec<P
 }
 
 fn is_project_marker(dir: &Path) -> bool {
-    dir.join(".git").exists()
-        || dir.join(".ferrum").exists()
-        || dir.join("AGENTS.md").exists()
-        || dir.join("agents.md").exists()
+    valid_git_marker(dir)
+        || dir.join(".ferrum").is_dir()
+        || dir.join("AGENTS.md").is_file()
+        || dir.join("agents.md").is_file()
+}
+
+fn valid_git_marker(dir: &Path) -> bool {
+    let marker = dir.join(".git");
+    let Ok(metadata) = fs::symlink_metadata(&marker) else {
+        return false;
+    };
+    if metadata.file_type().is_dir() {
+        return marker.join("HEAD").is_file();
+    }
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    let Ok(mut file) = File::open(&marker) else {
+        return false;
+    };
+    let Ok(text) = read_utf8_bounded(&mut file, MAX_GITDIR_FILE_BYTES, ".git file") else {
+        return false;
+    };
+    let Some(target) = text.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let target = target.trim();
+    if target.is_empty() {
+        return false;
+    }
+    let git_dir = if Path::new(target).is_absolute() {
+        PathBuf::from(target)
+    } else {
+        dir.join(target)
+    };
+    git_dir.join("HEAD").is_file()
 }
 
 fn home_dir() -> Result<PathBuf> {
@@ -302,11 +579,30 @@ fn escape_xml(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{io::Write, os::unix::fs::symlink};
+
+    fn write_skill(path: &Path, name: &str, description: &str, body: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut file = File::create(path).unwrap();
+        writeln!(
+            file,
+            "---\nname: {name}\ndescription: {description}\n---\n{body}"
+        )
+        .unwrap();
+    }
+
+    fn parse_local_skill(path: &Path) -> Skill {
+        let root = fs::canonicalize(path.parent().unwrap()).unwrap();
+        let path = fs::canonicalize(path).unwrap();
+        parse_skill_file(&path, &root, false).unwrap().unwrap()
+    }
 
     #[test]
     fn validates_skill_names() {
@@ -325,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn outside_git_repo_does_not_load_parent_tmp_agents_skills() {
+    fn outside_project_does_not_load_parent_skills() {
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path();
         let cwd = parent.join("child");
@@ -337,7 +633,35 @@ mod tests {
     }
 
     #[test]
-    fn project_ancestors_stop_at_marker() {
+    fn empty_git_path_is_not_a_project_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path();
+        let cwd = parent.join("child");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir(parent.join(".git")).unwrap();
+
+        let ancestors = project_ancestors_with_boundary(&cwd, Some(parent));
+
+        assert_eq!(ancestors, vec![cwd]);
+    }
+
+    #[test]
+    fn real_git_directory_is_a_project_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let nested = repo.join("a/b");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        assert_eq!(
+            project_ancestors(&nested),
+            vec![nested, repo.join("a"), repo]
+        );
+    }
+
+    #[test]
+    fn project_ancestors_stop_at_instruction_marker() {
         let temp = tempfile::tempdir().unwrap();
         let repo = temp.path().join("repo");
         let nested = repo.join("a/b");
@@ -353,21 +677,11 @@ mod tests {
     fn duplicate_skill_name_same_dir_errors_deterministically() {
         let temp = tempfile::tempdir().unwrap();
         let skills_dir = temp.path().join("skills");
-        fs::create_dir_all(skills_dir.join("a")).unwrap();
-        fs::create_dir_all(skills_dir.join("b")).unwrap();
-        fs::write(
-            skills_dir.join("a/SKILL.md"),
-            "---\nname: dup\ndescription: first\n---\nbody\n",
-        )
-        .unwrap();
-        fs::write(
-            skills_dir.join("b/SKILL.md"),
-            "---\nname: dup\ndescription: second\n---\nbody\n",
-        )
-        .unwrap();
-        let mut skills = Vec::new();
+        write_skill(&skills_dir.join("a/SKILL.md"), "dup", "first", "body");
+        write_skill(&skills_dir.join("b/SKILL.md"), "dup", "second", "body");
+        let mut discovery = Discovery::default();
 
-        let error = add_skills_from_dir(&mut skills, &skills_dir, true).unwrap_err();
+        let error = discovery.add_root(&skills_dir, true, false).unwrap_err();
 
         assert!(error.to_string().contains("duplicate skill `dup`"));
         assert!(error.to_string().contains("a/SKILL.md"));
@@ -384,7 +698,7 @@ mod tests {
         )
         .unwrap();
 
-        let skill = parse_skill_file(&path).unwrap().unwrap();
+        let skill = parse_local_skill(&path);
 
         assert_eq!(skill.name, "bom-skill");
         assert_eq!(
@@ -403,7 +717,7 @@ mod tests {
         )
         .unwrap();
 
-        let skill = parse_skill_file(&path).unwrap().unwrap();
+        let skill = parse_local_skill(&path);
 
         assert_eq!(skill.name, "crlf-skill");
     }
@@ -413,5 +727,165 @@ mod tests {
         let fm = "name: yaml-skill\ndescription: \"does: parse: colons\"\n";
         let fields = parse_frontmatter_fields(fm).unwrap();
         assert_eq!(fields.get("description").unwrap(), "does: parse: colons");
+    }
+
+    #[test]
+    fn rejects_self_symlink_cycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let skills = temp.path().join("skills");
+        fs::create_dir_all(&skills).unwrap();
+        symlink(&skills, skills.join("self")).unwrap();
+        let mut discovery = Discovery::default();
+
+        let error = discovery.add_root(&skills, true, false).unwrap_err();
+
+        assert!(error.to_string().contains("cycle or repeated canonical"));
+    }
+
+    #[test]
+    fn rejects_parent_symlink_cycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let skills = temp.path().join("skills");
+        fs::create_dir_all(skills.join("nested")).unwrap();
+        symlink(&skills, skills.join("nested/back")).unwrap();
+        let mut discovery = Discovery::default();
+
+        let error = discovery.add_root(&skills, true, false).unwrap_err();
+
+        assert!(error.to_string().contains("cycle or repeated canonical"));
+    }
+
+    #[test]
+    fn project_skill_symlink_cannot_escape_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repo");
+        let project_skills = repo.join(".ferrum/skills");
+        let external = temp.path().join("external/escaped");
+        write_skill(&external.join("SKILL.md"), "escaped", "outside", "body");
+        fs::create_dir_all(&project_skills).unwrap();
+        symlink(&external, project_skills.join("linked")).unwrap();
+
+        let error = discover_with_home(&config, &home, &repo, true).unwrap_err();
+
+        assert!(error.to_string().contains("escapes approved root"));
+    }
+
+    #[test]
+    fn global_cross_root_skill_symlink_requires_opt_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("work");
+        let ferrum_global = config.join("skills");
+        let agents_global = home.join(".agents/skills/cross-root");
+        write_skill(
+            &agents_global.join("SKILL.md"),
+            "cross-root",
+            "other global root",
+            "body",
+        );
+        fs::create_dir_all(&ferrum_global).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        symlink(&agents_global, ferrum_global.join("cross-root")).unwrap();
+
+        let error = discover_with_home(&config, &home, &cwd, false).unwrap_err();
+
+        assert!(error.to_string().contains("escapes approved root"));
+    }
+
+    #[test]
+    fn global_external_skill_symlink_requires_opt_in() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("work");
+        let global = config.join("skills");
+        let external = temp.path().join("external/linked");
+        write_skill(&external.join("SKILL.md"), "linked", "outside", "body");
+        fs::create_dir_all(&global).unwrap();
+        fs::create_dir_all(&cwd).unwrap();
+        symlink(&external, global.join("linked")).unwrap();
+
+        let denied = discover_with_home(&config, &home, &cwd, false).unwrap_err();
+        let allowed = discover_with_home(&config, &home, &cwd, true).unwrap();
+
+        assert!(denied.to_string().contains("escapes approved root"));
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].name, "linked");
+    }
+
+    #[test]
+    fn frontmatter_read_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("SKILL.md");
+        fs::write(
+            &path,
+            format!(
+                "---\nname: huge\ndescription: {}",
+                "x".repeat(MAX_SKILL_FRONTMATTER_BYTES)
+            ),
+        )
+        .unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        let path = fs::canonicalize(path).unwrap();
+
+        let error = parse_skill_file(&path, &root, false).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn body_is_loaded_only_on_invocation_and_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        write_skill(
+            &skills_dir.join("large/SKILL.md"),
+            "large",
+            "bounded body",
+            &"x".repeat(MAX_SKILL_FILE_BYTES),
+        );
+        let mut discovery = Discovery::default();
+        discovery.add_root(&skills_dir, true, false).unwrap();
+
+        let error = expand_skill_prompt(&discovery.skills[0], None).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn discovery_depth_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        let mut deepest = skills_dir.clone();
+        for index in 0..=MAX_SKILL_DEPTH {
+            deepest = deepest.join(format!("d{index}"));
+        }
+        fs::create_dir_all(&deepest).unwrap();
+        let mut discovery = Discovery::default();
+
+        let error = discovery.add_root(&skills_dir, true, false).unwrap_err();
+
+        assert!(error.to_string().contains("depth exceeds"));
+    }
+
+    #[test]
+    fn discovery_skill_count_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let skills_dir = temp.path().join("skills");
+        for index in 0..=MAX_SKILLS {
+            write_skill(
+                &skills_dir.join(format!("skill-{index}/SKILL.md")),
+                &format!("skill-{index}"),
+                "counted",
+                "body",
+            );
+        }
+        let mut discovery = Discovery::default();
+
+        let error = discovery.add_root(&skills_dir, true, false).unwrap_err();
+
+        assert!(error.to_string().contains("exceeds 256 skills"));
     }
 }

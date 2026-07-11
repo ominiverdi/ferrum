@@ -76,6 +76,8 @@ Slash-command invocation expands the full skill body into a Pi-style `<skill>` b
 
 The model can also inspect skill files with tools when appropriate.
 
+Discovery order is deterministic. Global roots are considered first, followed by project roots from the validated repository boundary toward the current directory; the last valid skill name wins, so nearer project definitions override broader and global definitions. A `.git` marker is accepted as a repository boundary only when it is a directory or a valid gitfile pointing at an existing git directory.
+
 ## Commands
 
 List skills:
@@ -97,3 +99,12 @@ Running a skill sends the expanded skill prompt as the next user turn and persis
 ## Security
 
 Skills are instructions, not trusted code. Ferrum does not automatically run setup scripts from skills. Any scripts are executed only if the model calls tools and the current tool policy permits it.
+
+Skill discovery canonicalizes every candidate and enforces trust-root containment at every safety tier. Repository-controlled skill links may not resolve outside their project skill root. Global skill links may leave their global root only with an explicit opt-in:
+
+```toml
+[skills]
+allow_external_global_symlinks = true
+```
+
+The default is `false`. This option applies only to global roots; it never permits project skill links to escape. External global targets remain untrusted instructions and gain no additional tool authority. Discovery also bounds traversal depth, candidate count, frontmatter size, and skill-body reads; skips symlink cycles; and resolves duplicate names deterministically by documented root precedence.

@@ -484,8 +484,12 @@ pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
             SessionEntry::Compaction { summary, .. } => {
                 messages.clear();
                 messages.push(Message::text(
-                    Role::System,
-                    format!("Conversation summary from previous compaction:\n{summary}"),
+                    Role::User,
+                    format!(
+                        "{}\n\n<summary>\n{}\n</summary>",
+                        crate::agent::messages::COMPACTION_SUMMARY_PREFIX,
+                        summary.trim()
+                    ),
                 ));
             }
             SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => {}
@@ -1391,7 +1395,12 @@ mod tests {
         let messages = load_messages(session.path()).unwrap();
 
         assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[0].role, Role::User);
+        assert!(
+            messages[0]
+                .text_content()
+                .starts_with(crate::agent::messages::COMPACTION_SUMMARY_PREFIX)
+        );
         assert!(messages[0].text_content().contains("summary checkpoint"));
         assert_eq!(messages[1].text_content(), "new context");
         assert!(

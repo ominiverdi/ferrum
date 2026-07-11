@@ -233,13 +233,14 @@ Provider adapters serialize and parse provider-specific payloads only. They do n
 
 Ferrum compaction is Pi-inspired but simpler:
 
-1. Preserve system messages.
+1. Regenerate immutable runtime, repository-instruction, and skill-index system messages from current process state.
 2. Keep recent non-system conversation, up to a recent-context token budget.
 3. Avoid retaining orphan tool results whose corresponding tool calls were summarized away.
 4. Summarize older non-system messages with the current provider model using a structured summary prompt.
-5. Store the summary as a `compaction` session entry and insert it as system context.
-6. For manual `/compact`, skip if there is nothing old enough to summarize or if the resulting context is not smaller.
-7. For automatic over-budget compaction, fall back to a local heuristic summary if model-generated compaction fails.
+5. Store the summary as a `compaction` session entry and insert it as untrusted user-role context.
+6. Retain only the newest generated summary and discard transient generated system messages.
+7. For manual `/compact`, skip if there is nothing old enough to summarize or if the resulting context is not smaller.
+8. For automatic over-budget compaction, fall back to a local heuristic summary if model-generated compaction fails.
 
 Automatic compaction runs as a preflight before every provider request, including each tool-loop continuation and forced final synthesis. The projection uses the larger of provider-informed current usage and the local message estimate, includes pending messages and active tool schemas, and reserves 16,384 tokens on larger context windows (95% on smaller windows). If compaction cannot bring the projected request below that safe threshold, Ferrum fails with an explicit context-budget error instead of knowingly sending an over-budget request.
 

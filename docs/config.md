@@ -443,6 +443,17 @@ Ferrum stores thinking level in session metadata. Resuming or switching sessions
 
 For supported streaming providers, displayable provider-supplied thinking is shown live in interactive mode. Ferrum does not invent thinking text; no thinking block is shown when the provider sends none.
 
+## Skills
+
+By default, symlinked skills in global roots must remain inside their declared root. To explicitly permit global skill links to resolve elsewhere:
+
+```toml
+[skills]
+allow_external_global_symlinks = true
+```
+
+The default is `false`. Project-controlled skill links can never escape their project skill root, regardless of this setting or the selected safety tier. See [skills.md](skills.md).
+
 ## MCP servers
 
 Ferrum supports MCP stdio servers configured in TOML:

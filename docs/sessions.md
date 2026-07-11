@@ -159,7 +159,9 @@ Ferrum warns as context usage rises: 75-84% every 5%, 85-91% every 3%, and 92-94
 
 ## Compaction
 
-`/compact` summarizes older conversation with the current provider model, keeps recent context, and stores a `compaction` entry. Retained recent messages are re-appended after that entry so resuming reconstructs the same active context. If mid-turn compaction summarizes earlier tool rounds, Ferrum retains the current user request explicitly. The summary is loaded back as system context when the session is resumed.
+`/compact` summarizes older conversation with the current provider model, keeps recent context, and stores a `compaction` entry. Retained recent messages are re-appended after that entry so resuming reconstructs the same active context. If mid-turn compaction summarizes earlier tool rounds, Ferrum retains the current user request explicitly.
+
+Generated summaries are untrusted conversation data and are loaded with the user role, never as runtime authority. After every compaction and resume, Ferrum regenerates immutable runtime, repository-instruction, and skill-index system messages from current trusted process state. Only the newest generated summary remains active; older generated summaries and transient generated system messages are discarded.
 
 Manual compaction is skipped when there is nothing old enough to summarize or when the resulting context would not be smaller. Automatic compaction can force a fallback local summary if model-generated compaction fails while the session is over budget. Ferrum avoids retaining orphan tool results whose matching tool calls were summarized away.
 

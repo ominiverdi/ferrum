@@ -27,6 +27,7 @@ pub struct Config {
     pub tools_allow: Option<Vec<String>>,
     pub tools_deny: Vec<String>,
     pub writable_roots: Vec<PathBuf>,
+    pub allow_external_global_skill_symlinks: bool,
     pub tool_selection: Option<ToolSelection>,
     pub mcp_servers: Vec<McpServerConfig>,
 }
@@ -242,12 +243,19 @@ struct FileConfig {
     color: Option<String>,
     diff_mode: Option<String>,
     safety: Option<String>,
+    skills: Option<FileSkillsConfig>,
     tools: Option<FileToolsConfig>,
     mcp: Option<FileMcpConfig>,
     #[serde(default)]
     providers: BTreeMap<String, ProviderDefinition>,
     #[serde(default)]
     models: BTreeMap<String, ModelDefinition>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FileSkillsConfig {
+    #[serde(default)]
+    allow_external_global_symlinks: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -336,6 +344,7 @@ impl Config {
             .and_then(|definition| definition.max_context_tokens)
             .or(file_config.max_context_tokens)
             .unwrap_or(256_000);
+        let skills_config = file_config.skills.unwrap_or_default();
         let tools_config = file_config.tools.unwrap_or_default();
         let tools_allow = tools_config
             .allow
@@ -400,6 +409,7 @@ impl Config {
             tools_allow,
             tools_deny,
             writable_roots,
+            allow_external_global_skill_symlinks: skills_config.allow_external_global_symlinks,
             tool_selection: None,
             mcp_servers: file_config.mcp.map(|mcp| mcp.servers).unwrap_or_default(),
         })
@@ -744,6 +754,21 @@ mod tests {
             .apply_cli_overrides(None, None, None, None, Some(false), None, None)
             .unwrap();
         assert!(!config.mcp_enabled);
+    }
+
+    #[test]
+    fn external_global_skill_symlinks_require_config_opt_in() {
+        let dir = TempDir::new().unwrap();
+        let default_config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!default_config.allow_external_global_skill_symlinks);
+
+        fs::write(
+            dir.path().join("config.toml"),
+            "[skills]\nallow_external_global_symlinks = true\n",
+        )
+        .unwrap();
+        let opted_in = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(opted_in.allow_external_global_skill_symlinks);
     }
 
     #[test]
