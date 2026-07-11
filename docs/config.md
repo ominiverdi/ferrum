@@ -504,7 +504,7 @@ FERRUM_METRICS
 
 `FERRUM_FAKE_SCRIPT` is only used with the fake provider for deterministic local harness tests. Current scripts: `repeat_read`, `missing_read`, `mixed_write_read`, `edit_preview`, and `history_search_read`.
 
-`FERRUM_METRICS=1` prints per-request model/tool metrics to stderr, including message bytes, tool schema bytes, estimated payload tokens, model latency, tool latency, and result bytes.
+`FERRUM_METRICS=1` prints per-request model/tool metrics to stderr, including message bytes, tool schema bytes, estimated payload tokens, model latency, tool latency, and result bytes. Model-end lines report both `response_tool_calls` for that individual provider response and cumulative `turn_tool_calls`, so a final text-only response does not hide tool calls made by earlier requests in the same turn.
 
 OpenAI-compatible providers read API keys from the environment variable named by `api_key_env`.
 

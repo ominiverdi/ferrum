@@ -931,17 +931,38 @@ fn emit_model_metrics_start(
     );
 }
 
-fn emit_model_metrics_end(request: usize, duration: Duration, response: &messages::Message) {
-    let output_chars = response.text_content().chars().count();
-    let tool_calls = response
+fn model_tool_call_count(response: &messages::Message) -> usize {
+    response
         .content
         .iter()
         .filter(|block| matches!(block, messages::ContentBlock::ToolUse { .. }))
-        .count();
-    eprintln!(
-        "[metrics:model end] request={request} latency_ms={} output_chars={output_chars} output_estimated_tokens={} tool_calls={tool_calls}",
+        .count()
+}
+
+fn format_model_metrics_end(
+    request: usize,
+    duration: Duration,
+    response: &messages::Message,
+    turn_tool_calls: usize,
+) -> String {
+    let output_chars = response.text_content().chars().count();
+    let response_tool_calls = model_tool_call_count(response);
+    format!(
+        "[metrics:model end] request={request} latency_ms={} output_chars={output_chars} output_estimated_tokens={} response_tool_calls={response_tool_calls} turn_tool_calls={turn_tool_calls}",
         duration.as_millis(),
         output_chars.div_ceil(4)
+    )
+}
+
+fn emit_model_metrics_end(
+    request: usize,
+    duration: Duration,
+    response: &messages::Message,
+    turn_tool_calls: usize,
+) {
+    eprintln!(
+        "{}",
+        format_model_metrics_end(request, duration, response, turn_tool_calls)
     );
 }
 
@@ -1283,6 +1304,46 @@ fn tool_schema_bytes(tools: &[tools::ToolDefinition]) -> usize {
     serde_json::to_vec(tools)
         .map(|bytes| bytes.len())
         .unwrap_or(0)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ToolExposureSummary {
+    native_available: usize,
+    native_exposed: usize,
+    mcp_available: usize,
+    mcp_exposed: usize,
+    total_exposed: usize,
+    schema_bytes: usize,
+}
+
+fn tool_exposure_summary(
+    native_tools: Vec<tools::ToolDefinition>,
+    mcp_tools: &[tools::ToolDefinition],
+    config: &Config,
+) -> Result<ToolExposureSummary> {
+    let native_available = native_tools.len();
+    let mcp_available = mcp_tools.len();
+    let native_names = native_tools
+        .iter()
+        .map(|tool| tool.name.clone())
+        .collect::<HashSet<_>>();
+    let mut available = native_tools;
+    available.extend_from_slice(mcp_tools);
+    let exposed = resolve_available_tools(available, config)?;
+    let native_exposed = exposed
+        .iter()
+        .filter(|tool| native_names.contains(&tool.name))
+        .count();
+    let mcp_exposed = exposed.len().saturating_sub(native_exposed);
+
+    Ok(ToolExposureSummary {
+        native_available,
+        native_exposed,
+        mcp_available,
+        mcp_exposed,
+        total_exposed: exposed.len(),
+        schema_bytes: tool_schema_bytes(&exposed),
+    })
 }
 
 fn history_tool_definitions() -> Vec<tools::ToolDefinition> {
@@ -1886,6 +1947,7 @@ impl AgentState {
 
         let metrics_enabled = metrics_enabled();
         let mut model_request_index = 0usize;
+        let mut turn_tool_calls = 0usize;
         let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
         let mut overflow_recovery_attempted = false;
         let force_final_reason = loop {
@@ -1997,8 +2059,14 @@ impl AgentState {
                     source: token_usage.source.clone(),
                 },
             );
+            turn_tool_calls = turn_tool_calls.saturating_add(model_tool_call_count(&response));
             if metrics_enabled {
-                emit_model_metrics_end(model_request_index, started.elapsed(), &response);
+                emit_model_metrics_end(
+                    model_request_index,
+                    started.elapsed(),
+                    &response,
+                    turn_tool_calls,
+                );
             }
             if interactive {
                 live_render.finish()?;
@@ -2142,10 +2210,13 @@ impl AgentState {
             match response_result {
                 Ok(response) => {
                     if metrics_enabled {
+                        let final_turn_tool_calls = turn_tool_calls
+                            .saturating_add(model_tool_call_count(&response.message));
                         emit_model_metrics_end(
                             model_request_index,
                             started.elapsed(),
                             &response.message,
+                            final_turn_tool_calls,
                         );
                     }
                     if interactive {
@@ -2313,7 +2384,7 @@ impl AgentState {
         Ok(())
     }
 
-    fn print_mcp_status(&self, config: &Config) {
+    fn print_mcp_status(&self, config: &Config) -> Result<()> {
         let mut native_tools = builtin_tools::definitions();
         native_tools.extend(history_tool_definitions());
         let mcp_tools = if self.mcp_enabled {
@@ -2324,8 +2395,7 @@ impl AgentState {
         } else {
             &[]
         };
-        let mut exposed = native_tools.clone();
-        exposed.extend_from_slice(mcp_tools);
+        let exposure = tool_exposure_summary(native_tools, mcp_tools, config)?;
         let configured_servers = active_mcp_servers(config);
         let configured = configured_servers.len();
         let configured_enabled = configured_servers
@@ -2342,10 +2412,12 @@ impl AgentState {
             );
         }
         println!("connected: {}", self.mcp.is_some());
-        println!("native_tools: {}", native_tools.len());
-        println!("mcp_tools_exposed: {}", mcp_tools.len());
-        println!("total_tools_exposed: {}", exposed.len());
-        println!("tool_schema_bytes: {}", tool_schema_bytes(&exposed));
+        println!("native_tools_available: {}", exposure.native_available);
+        println!("native_tools_exposed: {}", exposure.native_exposed);
+        println!("mcp_tools_available: {}", exposure.mcp_available);
+        println!("mcp_tools_exposed: {}", exposure.mcp_exposed);
+        println!("total_tools_exposed: {}", exposure.total_exposed);
+        println!("tool_schema_bytes: {}", exposure.schema_bytes);
         if !configured_servers.is_empty() {
             println!("servers:");
             for server in &configured_servers {
@@ -2356,6 +2428,7 @@ impl AgentState {
                 );
             }
         }
+        Ok(())
     }
 
     async fn execute_tool_batch(
@@ -4941,6 +5014,47 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn tool_exposure_summary_applies_cli_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.tool_selection = Some(ToolSelection::List(vec![
+            "read".to_string(),
+            "ls".to_string(),
+        ]));
+        let mut native_tools = builtin_tools::definitions();
+        native_tools.extend(history_tool_definitions());
+        let native_available = native_tools.len();
+        let available_schema_bytes = tool_schema_bytes(&native_tools);
+
+        let summary = tool_exposure_summary(native_tools, &[], &config).unwrap();
+
+        assert_eq!(summary.native_available, native_available);
+        assert_eq!(summary.native_exposed, 2);
+        assert_eq!(summary.mcp_available, 0);
+        assert_eq!(summary.mcp_exposed, 0);
+        assert_eq!(summary.total_exposed, 2);
+        assert!(summary.schema_bytes > 0);
+        assert!(summary.schema_bytes < available_schema_bytes);
+    }
+
+    #[test]
+    fn model_metrics_distinguish_response_and_turn_tool_calls() {
+        let response = messages::Message {
+            role: messages::Role::Assistant,
+            content: vec![messages::ContentBlock::Text {
+                text: "done".to_string(),
+            }],
+            usage: None,
+        };
+
+        let rendered = format_model_metrics_end(2, Duration::from_millis(15), &response, 1);
+
+        assert!(rendered.contains("request=2"));
+        assert!(rendered.contains("response_tool_calls=0"));
+        assert!(rendered.contains("turn_tool_calls=1"));
+    }
+
+    #[test]
     fn restore_session_preferences_respects_provider_model_overrides() {
         let temp = tempfile::tempdir().unwrap();
         let session = session::JsonlSession::create(
@@ -7035,7 +7149,7 @@ fn handle_command(
         }
         "/mcp" => {
             match parts.next() {
-                None | Some("status") | Some("list") => state.print_mcp_status(config),
+                None | Some("status") | Some("list") => state.print_mcp_status(config)?,
                 Some("on") => {
                     config.mcp_enabled = true;
                     state.set_mcp_enabled(true)?;
@@ -7114,6 +7228,9 @@ fn handle_command(
                     "execution policy: inspection-only. Allows a conservative read-oriented command set and rejects native and shell mutation, network clients, interpreters, builds, and unknown executables."
                 ),
             }
+            println!(
+                "tool exposure: unchanged; /safety controls execution authority only. Use /mcp status to inspect exposed tools, and --tools, --no-tools, or [tools] config to change them."
+            );
             Ok(CommandAction::Continue)
         }
         "/diff" => {

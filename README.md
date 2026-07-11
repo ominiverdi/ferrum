@@ -293,7 +293,7 @@ Shell shortcuts:
 - Tools run with your local user permissions.
 - `bash`, `write`, and `edit` can mutate files. `low` grants broad current-user shell authority and bypasses writable roots; `medium` limits native and recognized shell mutations to configured writable roots; `high` rejects mutation.
 - Ferrum has no model-grantable confirmation prompt. At `medium`, a denied path requires a user config change or an action outside Ferrum.
-- Use `/safety low|medium|high` to choose structural shell execution policy for `bash`, `wait`, and shell shortcuts. This is not a sandbox. See [`docs/security.md`](docs/security.md), [`docs/tool-authority.md`](docs/tool-authority.md), and [`docs/tools.md`](docs/tools.md#bash).
+- Use `/safety low|medium|high` to choose structural shell execution policy for `bash`, `wait`, and shell shortcuts. It does not enable tools, and it is not a sandbox. See [`docs/security.md`](docs/security.md), [`docs/tool-authority.md`](docs/tool-authority.md), and [`docs/tools.md`](docs/tools.md#bash).
 - Provider, MCP, tool, repository, session, image, and filename text is treated as untrusted terminal data and sanitized before rendering. Native inspection and image paths have bounded input/output, count, cancellation, or deadline contracts documented in [`docs/resource-boundaries.md`](docs/resource-boundaries.md).
 - Use `--tools` and `[tools] allow`/`deny` to control which tools are exposed to the model.
 - See [`docs/security.md`](docs/security.md) for security research notes and Ferrum's current posture.
