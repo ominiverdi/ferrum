@@ -2,12 +2,15 @@ use super::messages::{Message, TokenUsage};
 use anyhow::Result;
 use serde_json::Value;
 use std::{
+    future::Future,
     path::PathBuf,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
@@ -65,6 +68,28 @@ pub trait AgentEventSink: Send {
     fn emit(&mut self, event: AgentEvent) -> Result<()>;
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolPermissionRequest {
+    pub id: String,
+    pub name: String,
+    pub input: Value,
+    pub cancellation: TurnCancellation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPermissionDecision {
+    Allow,
+    Reject,
+    Cancelled,
+}
+
+pub trait ToolPermissionHandler: Send + Sync {
+    fn request(
+        &self,
+        request: ToolPermissionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<ToolPermissionDecision>> + Send + '_>>;
+}
+
 #[derive(Debug, Default)]
 pub struct IgnoreAgentEvents;
 
@@ -74,9 +99,24 @@ impl AgentEventSink for IgnoreAgentEvents {
     }
 }
 
+#[derive(Debug)]
+struct TurnCancellationInner {
+    cancelled: Arc<AtomicBool>,
+    notify: Notify,
+}
+
+impl Default for TurnCancellationInner {
+    fn default() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            notify: Notify::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TurnCancellation {
-    cancelled: Arc<AtomicBool>,
+    inner: Arc<TurnCancellationInner>,
 }
 
 impl TurnCancellation {
@@ -85,23 +125,36 @@ impl TurnCancellation {
     }
 
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.inner.cancelled.store(true, Ordering::Release);
+        self.inner.notify.notify_one();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.inner.cancelled.load(Ordering::Acquire)
+    }
+
+    pub async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let notified = self.inner.notify.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
     }
 
     pub(crate) fn flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.cancelled)
+        Arc::clone(&self.inner.cancelled)
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TurnOptions {
     pub stream_responses: bool,
     pub monitor_terminal_cancel: bool,
     pub cancellation: TurnCancellation,
+    pub permission_handler: Option<Arc<dyn ToolPermissionHandler>>,
 }
 
 impl TurnOptions {
@@ -110,7 +163,13 @@ impl TurnOptions {
             stream_responses: true,
             monitor_terminal_cancel: false,
             cancellation,
+            permission_handler: None,
         }
+    }
+
+    pub fn with_permission_handler(mut self, handler: Arc<dyn ToolPermissionHandler>) -> Self {
+        self.permission_handler = Some(handler);
+        self
     }
 
     pub(crate) fn terminal(interactive: bool) -> Self {
@@ -118,6 +177,7 @@ impl TurnOptions {
             stream_responses: interactive,
             monitor_terminal_cancel: interactive,
             cancellation: TurnCancellation::new(),
+            permission_handler: None,
         }
     }
 }

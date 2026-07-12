@@ -173,7 +173,51 @@ fn scripted_response(script: &str, messages: &[Message]) -> Message {
         "edit_preview" => edit_preview_response(messages),
         "history_search_read" => history_search_read_response(messages),
         "mcp_echo" => mcp_echo_response(messages),
+        "permission_write" => permission_write_response(messages, "permission.txt"),
+        "permission_outside" => permission_write_response(messages, "../outside.txt"),
+        "permission_protected" => permission_write_response(messages, "/etc/passwd"),
+        "permission_bash_denied" => permission_bash_response(messages, "sh -c 'echo denied'"),
         _ => Message::text(Role::Assistant, format!("unknown fake script: {script}\n")),
+    }
+}
+
+fn permission_bash_response(messages: &[Message], command: &str) -> Message {
+    let completed = messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "fake-permission-bash")
+        })
+    });
+    if completed {
+        return Message::text(Role::Assistant, "permission bash complete\n");
+    }
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "fake-permission-bash".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": command}),
+        }],
+        usage: None,
+    }
+}
+
+fn permission_write_response(messages: &[Message], path: &str) -> Message {
+    let completed = messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "fake-permission-write")
+        })
+    });
+    if completed {
+        return Message::text(Role::Assistant, "permission write complete\n");
+    }
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "fake-permission-write".to_string(),
+            name: "write".to_string(),
+            input: serde_json::json!({"path": path, "content": "approved\n"}),
+        }],
+        usage: None,
     }
 }
 

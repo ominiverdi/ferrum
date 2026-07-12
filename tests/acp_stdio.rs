@@ -19,11 +19,37 @@ impl AcpProcess {
     fn spawn(cwd: &Path, fake_script: Option<&str>) -> Self {
         let root = tempfile::tempdir().unwrap();
         let storage = root.path().to_path_buf();
-        Self::spawn_with_storage(cwd, fake_script, &storage, Some(root))
+        Self::spawn_with_storage(cwd, fake_script, &storage, Some(root), false, None, false)
+    }
+
+    fn spawn_asking(cwd: &Path, fake_script: Option<&str>) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().to_path_buf();
+        Self::spawn_with_storage(cwd, fake_script, &storage, Some(root), true, None, false)
+    }
+
+    fn spawn_asking_no_tools(cwd: &Path, fake_script: Option<&str>) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().to_path_buf();
+        Self::spawn_with_storage(cwd, fake_script, &storage, Some(root), true, None, true)
+    }
+
+    fn spawn_asking_with_safety(cwd: &Path, fake_script: Option<&str>, safety: &str) -> Self {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().to_path_buf();
+        Self::spawn_with_storage(
+            cwd,
+            fake_script,
+            &storage,
+            Some(root),
+            true,
+            Some(safety),
+            false,
+        )
     }
 
     fn spawn_in(cwd: &Path, fake_script: Option<&str>, storage: &Path) -> Self {
-        Self::spawn_with_storage(cwd, fake_script, storage, None)
+        Self::spawn_with_storage(cwd, fake_script, storage, None, false, None, false)
     }
 
     fn spawn_with_storage(
@@ -31,14 +57,26 @@ impl AcpProcess {
         fake_script: Option<&str>,
         storage: &Path,
         root: Option<TempDir>,
+        ask_permissions: bool,
+        safety: Option<&str>,
+        no_tools: bool,
     ) -> Self {
         let config = storage.join("config");
         let data = storage.join("data");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::create_dir_all(&data).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_ferrum"));
+        if let Some(safety) = safety {
+            command.args(["--safety", safety]);
+        }
+        if no_tools {
+            command.arg("--no-tools");
+        }
+        command.arg("acp");
+        if ask_permissions {
+            command.args(["--permissions", "ask"]);
+        }
         command
-            .arg("acp")
             .current_dir(cwd)
             .env("FERRUM_CONFIG_DIR", config)
             .env("FERRUM_DATA_DIR", data)
@@ -124,10 +162,39 @@ impl AcpProcess {
             "params": {"cwd": cwd, "mcpServers": []}
         }));
         let response = self.recv();
-        response["result"]["sessionId"]
+        let session_id = response["result"]["sessionId"]
             .as_str()
             .unwrap()
-            .to_string()
+            .to_string();
+        self.assert_available_commands_update(&session_id);
+        session_id
+    }
+
+    fn assert_available_commands_update(&mut self, session_id: &str) {
+        let update = self.recv();
+        assert_eq!(update["method"], "session/update", "{update}");
+        assert_eq!(update["params"]["sessionId"], session_id, "{update}");
+        assert_eq!(
+            update["params"]["update"],
+            json!({
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [
+                    {
+                        "name": "compact",
+                        "description": "Compact the current session context",
+                        "input": {"hint": "optional compaction instructions"}
+                    },
+                    {
+                        "name": "session",
+                        "description": "Show current session information"
+                    },
+                    {
+                        "name": "version",
+                        "description": "Show the Ferrum version"
+                    }
+                ]
+            })
+        );
     }
 
     fn close_stdout(&mut self) {
@@ -285,6 +352,7 @@ fn acp_stdio_runs_client_stdio_mcp_with_isolated_environment_and_cleanup() {
     let created = acp.recv();
     assert_eq!(created["id"], 2, "session setup failed: {created}");
     let session_id = created["result"]["sessionId"].as_str().unwrap().to_string();
+    acp.assert_available_commands_update(&session_id);
     let pid = std::fs::read_to_string(&pid_file)
         .unwrap()
         .parse::<u32>()
@@ -314,6 +382,7 @@ fn acp_stdio_runs_client_stdio_mcp_with_isolated_environment_and_cleanup() {
         }
     }));
     assert_eq!(acp.recv()["result"], json!({}));
+    acp.assert_available_commands_update(&session_id);
     let resumed_pid = std::fs::read_to_string(&pid_file)
         .unwrap()
         .parse::<u32>()
@@ -346,6 +415,7 @@ fn acp_stdio_runs_client_stdio_mcp_with_isolated_environment_and_cleanup() {
         }
         assert_eq!(message["method"], "session/update");
     }
+    acp.assert_available_commands_update(&session_id);
     let loaded_pid = std::fs::read_to_string(&pid_file)
         .unwrap()
         .parse::<u32>()
@@ -442,6 +512,302 @@ fn acp_stdio_rejects_invalid_or_failed_client_mcp_setup_without_secret_echo() {
         }]}
     }));
     assert_eq!(acp.recv()["error"]["code"], -32602);
+    acp.finish();
+}
+
+#[test]
+fn acp_stdio_executes_only_advertised_headless_commands() {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn(cwd.path(), None);
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 30, "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "/version"}]
+        }
+    }));
+    let mut output = String::new();
+    loop {
+        let message = acp.recv();
+        if message["id"] == 30 {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+        assert_eq!(message["method"], "session/update");
+        assert_eq!(
+            message["params"]["update"]["sessionUpdate"],
+            "agent_message_chunk"
+        );
+        output.push_str(
+            message["params"]["update"]["content"]["text"]
+                .as_str()
+                .unwrap(),
+        );
+    }
+    assert_eq!(output, format!("ferrum {}", env!("CARGO_PKG_VERSION")));
+
+    for (id, command, expected) in [
+        (33, "/session", "path: "),
+        (34, "/compact", "compaction skipped:"),
+    ] {
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": id, "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": command}]
+            }
+        }));
+        let mut command_output = String::new();
+        loop {
+            let message = acp.recv();
+            if message["id"] == id {
+                assert_eq!(message["result"]["stopReason"], "end_turn");
+                break;
+            }
+            assert_eq!(
+                message["params"]["update"]["sessionUpdate"],
+                "agent_message_chunk"
+            );
+            command_output.push_str(
+                message["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap(),
+            );
+        }
+        assert!(command_output.contains(expected), "{command_output}");
+    }
+
+    for (id, command) in [(31, "/quit"), (32, "/session unexpected")] {
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": id, "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": command}]
+            }
+        }));
+        let response = acp.recv();
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"]["code"], -32602);
+    }
+    acp.finish();
+}
+
+#[test]
+fn acp_stdio_permission_approval_and_rejection_only_restrict_execution() {
+    for (allow, request_id) in [(true, 40), (false, 41)] {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut acp = AcpProcess::spawn_asking(cwd.path(), Some("permission_write"));
+        acp.initialize();
+        let session_id = acp.new_session(cwd.path());
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": request_id, "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": "write"}]
+            }
+        }));
+
+        let permission_id = loop {
+            let message = acp.recv();
+            if message["method"] == "session/request_permission" {
+                assert_eq!(message["params"]["sessionId"], session_id);
+                assert_eq!(
+                    message["params"]["options"],
+                    json!([
+                        {"optionId": "allow_once", "name": "Allow once", "kind": "allow_once"},
+                        {"optionId": "reject_once", "name": "Reject", "kind": "reject_once"}
+                    ])
+                );
+                break message["id"].clone();
+            }
+            assert_eq!(message["method"], "session/update");
+        };
+        acp.send(json!({
+            "jsonrpc": "2.0",
+            "id": permission_id,
+            "result": {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": if allow {"allow_once"} else {"reject_once"}
+                }
+            }
+        }));
+        loop {
+            let message = acp.recv();
+            if message["id"] == request_id {
+                assert_eq!(message["result"]["stopReason"], "end_turn");
+                break;
+            }
+            assert_eq!(message["method"], "session/update");
+        }
+        assert_eq!(cwd.path().join("permission.txt").exists(), allow);
+        acp.finish();
+    }
+}
+
+#[test]
+fn acp_stdio_permission_request_cancels_with_prompt() {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn_asking(cwd.path(), Some("permission_write"));
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 42, "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "cancel permission"}]
+        }
+    }));
+    let permission_id = loop {
+        let message = acp.recv();
+        if message["method"] == "session/request_permission" {
+            break message["id"].clone();
+        }
+    };
+    acp.send(json!({
+        "jsonrpc": "2.0", "method": "session/cancel",
+        "params": {"sessionId": session_id}
+    }));
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": permission_id,
+        "result": {"outcome": {"outcome": "cancelled"}}
+    }));
+    loop {
+        let message = acp.recv();
+        if message["id"] == 42 {
+            assert_eq!(message["result"]["stopReason"], "cancelled");
+            break;
+        }
+        assert_eq!(message["method"], "session/update");
+    }
+    assert!(!cwd.path().join("permission.txt").exists());
+    acp.finish();
+}
+
+#[test]
+fn acp_stdio_handles_concurrent_session_permission_requests() {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn_asking(cwd.path(), Some("permission_write"));
+    acp.initialize();
+    let first_session = acp.new_session(cwd.path());
+    let second_session = acp.new_session(cwd.path());
+    for (id, session_id) in [(60, &first_session), (61, &second_session)] {
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": id, "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": "concurrent permission"}]
+            }
+        }));
+    }
+    let mut permission_ids = Vec::new();
+    let mut completed = Vec::new();
+    while completed.len() < 2 {
+        let message = acp.recv();
+        if message["method"] == "session/request_permission" {
+            permission_ids.push(message["id"].clone());
+            acp.send(json!({
+                "jsonrpc": "2.0", "id": message["id"],
+                "result": {
+                    "outcome": {"outcome": "selected", "optionId": "reject_once"}
+                }
+            }));
+        } else if let Some(id) = message["id"].as_i64()
+            && matches!(id, 60 | 61)
+        {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            completed.push(id);
+        } else {
+            assert_eq!(message["method"], "session/update");
+        }
+    }
+    permission_ids.sort_by_key(Value::to_string);
+    permission_ids.dedup();
+    completed.sort_unstable();
+    assert_eq!(permission_ids.len(), 2);
+    assert_eq!(completed, vec![60, 61]);
+    assert!(!cwd.path().join("permission.txt").exists());
+    acp.finish();
+}
+
+#[test]
+fn acp_stdio_permission_disconnect_cancels_pending_request() {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn_asking(cwd.path(), Some("permission_write"));
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 62, "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "disconnect permission"}]
+        }
+    }));
+    loop {
+        if acp.recv()["method"] == "session/request_permission" {
+            break;
+        }
+    }
+    acp.close_stdout();
+    let _ = acp.finish_after_disconnect();
+    assert!(!cwd.path().join("permission.txt").exists());
+}
+
+#[test]
+fn acp_stdio_permission_policy_denials_never_become_client_choices() {
+    for (script, safety, request_id) in [
+        ("permission_outside", "medium", 50),
+        ("permission_protected", "low", 51),
+        ("permission_write", "high", 52),
+        ("permission_bash_denied", "medium", 53),
+    ] {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut acp = AcpProcess::spawn_asking_with_safety(cwd.path(), Some(script), safety);
+        acp.initialize();
+        let session_id = acp.new_session(cwd.path());
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": request_id, "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": "denied"}]
+            }
+        }));
+        loop {
+            let message = acp.recv();
+            assert_ne!(message["method"], "session/request_permission", "{message}");
+            if message["id"] == request_id {
+                assert_eq!(message["result"]["stopReason"], "end_turn");
+                break;
+            }
+            assert_eq!(message["method"], "session/update");
+        }
+        assert!(!cwd.path().join("permission.txt").exists());
+        acp.finish();
+    }
+
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn_asking_no_tools(cwd.path(), Some("permission_write"));
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 54, "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "disabled tool"}]
+        }
+    }));
+    loop {
+        let message = acp.recv();
+        assert_ne!(message["method"], "session/request_permission", "{message}");
+        if message["id"] == 54 {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+    assert!(!cwd.path().join("permission.txt").exists());
     acp.finish();
 }
 
@@ -618,6 +984,7 @@ fn acp_stdio_persists_lists_loads_resumes_closes_and_deletes_sessions() {
     }
     assert_eq!(replayed_user, "persisted");
     assert_eq!(replayed_agent, "fake provider response: persisted\n");
+    acp.assert_available_commands_update(&session_id);
 
     acp.send(json!({
         "jsonrpc": "2.0", "id": 12, "method": "session/delete",
@@ -640,6 +1007,7 @@ fn acp_stdio_persists_lists_loads_resumes_closes_and_deletes_sessions() {
         "params": {"sessionId": session_id, "cwd": cwd.path(), "mcpServers": []}
     }));
     assert_eq!(acp.recv()["result"], json!({}));
+    acp.assert_available_commands_update(&session_id);
     acp.send(json!({
         "jsonrpc": "2.0", "id": 16, "method": "session/close",
         "params": {"sessionId": session_id}
@@ -702,6 +1070,7 @@ fn acp_stdio_can_resume_a_print_mode_session() {
         "params": {"sessionId": session_id, "cwd": cwd.path(), "mcpServers": []}
     }));
     assert_eq!(acp.recv()["result"], json!({}));
+    acp.assert_available_commands_update(session_id);
     acp.finish();
 }
 

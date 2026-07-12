@@ -59,15 +59,18 @@ async fn run() -> Result<()> {
 
     if let Some(command) = &args.command {
         match command {
-            cli::Command::Acp => {
+            cli::Command::Acp { permissions } => {
                 acp::run(
                     config,
-                    acp::SessionRestorePolicy {
-                        thinking: args.thinking.is_none(),
-                        safety: args.safety.is_none(),
-                        tools: !tools_overridden,
-                        provider: args.provider.is_none(),
-                        model: args.model.is_none(),
+                    acp::AcpPolicy {
+                        restore: acp::SessionRestorePolicy {
+                            thinking: args.thinking.is_none(),
+                            safety: args.safety.is_none(),
+                            tools: !tools_overridden,
+                            provider: args.provider.is_none(),
+                            model: args.model.is_none(),
+                        },
+                        permissions: *permissions,
                     },
                 )
                 .await?;

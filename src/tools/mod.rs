@@ -183,6 +183,87 @@ pub async fn execute_with_cancel(
     .await
 }
 
+pub fn validate_before_permission(
+    name: &str,
+    input: &serde_json::Value,
+    cwd: &Path,
+    safety: SafetyLevel,
+    writable_roots: &[std::path::PathBuf],
+) -> Result<bool> {
+    match name {
+        "bash" => {
+            let command = required_str(input, "command")?;
+            shell_guard::validate_with_policy(command, cwd, writable_roots, safety)?;
+            let timeout = input
+                .get("timeout_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_BASH_TIMEOUT_SECONDS);
+            if timeout > MAX_BASH_TIMEOUT_SECONDS {
+                anyhow::bail!(
+                    "bash timeout_seconds must be <= {MAX_BASH_TIMEOUT_SECONDS}, got {timeout}"
+                );
+            }
+            Ok(true)
+        }
+        "wait" => {
+            let seconds = input
+                .get("seconds")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("missing required integer field: seconds"))?;
+            if seconds == 0 || seconds > MAX_WAIT_SECONDS {
+                anyhow::bail!(
+                    "wait seconds must be between 1 and {MAX_WAIT_SECONDS}, got {seconds}"
+                );
+            }
+            let command = required_str(input, "command")?;
+            shell_guard::validate_with_policy(command, cwd, writable_roots, safety)?;
+            let timeout = input
+                .get("timeout_seconds")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(DEFAULT_BASH_TIMEOUT_SECONDS);
+            if timeout > MAX_BASH_TIMEOUT_SECONDS {
+                anyhow::bail!(
+                    "wait timeout_seconds must be <= {MAX_BASH_TIMEOUT_SECONDS}, got {timeout}"
+                );
+            }
+            Ok(true)
+        }
+        "write" => {
+            if matches!(safety, SafetyLevel::High) {
+                anyhow::bail!("write tool is not authorized at high safety");
+            }
+            let path = required_str(input, "path")?;
+            required_str(input, "content")?;
+            let resolved = path::resolve_to_cwd(path, cwd)?;
+            if matches!(safety, SafetyLevel::Low) {
+                write_policy::validate_mutation_target(&resolved, cwd)?;
+            } else {
+                write_policy::validate_mutation_path(&resolved, cwd, writable_roots)?;
+            }
+            Ok(true)
+        }
+        "edit" => {
+            if matches!(safety, SafetyLevel::High) {
+                anyhow::bail!("edit tool is not authorized at high safety");
+            }
+            let path = required_str(input, "path")?;
+            let edits = input
+                .get("edits")
+                .ok_or_else(|| anyhow::anyhow!("missing required field: edits"))?;
+            let _: Vec<edit::EditSpec> = serde_json::from_value(edits.clone())?;
+            let resolved = path::resolve_to_cwd(path, cwd)?;
+            if matches!(safety, SafetyLevel::Low) {
+                write_policy::validate_mutation_target(&resolved, cwd)?;
+            } else {
+                write_policy::validate_mutation_path(&resolved, cwd, writable_roots)?;
+            }
+            Ok(true)
+        }
+        "read" | "ls" | "grep" | "find" => Ok(false),
+        other => anyhow::bail!("unknown tool: {other}"),
+    }
+}
+
 pub async fn execute_with_cancel_and_safety(
     name: &str,
     input: &serde_json::Value,

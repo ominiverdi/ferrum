@@ -1,10 +1,15 @@
 use crate::{
     agent::{
-        AgentSession,
-        events::{AgentEvent, AgentEventSink, TurnCancellation, TurnOptions, TurnOutcome},
+        AgentSession, HeadlessCommandInvocation, HeadlessCommandOutcome,
+        events::{
+            AgentEvent, AgentEventSink, ToolPermissionDecision, ToolPermissionHandler,
+            ToolPermissionRequest, TurnCancellation, TurnOptions, TurnOutcome,
+        },
+        headless_commands,
         messages::{ContentBlock as FerrumContentBlock, Role as FerrumRole},
-        restore_session_preferences,
+        parse_headless_command, restore_session_preferences,
     },
+    cli::AcpPermissionPolicy,
     config::Config,
     mcp, session, terminal_text,
     text_truncate::truncate_to_max_bytes,
@@ -12,18 +17,20 @@ use crate::{
 use agent_client_protocol_schema::{
     ProtocolVersion,
     v1::{
-        AGENT_METHOD_NAMES, AgentCapabilities, CLIENT_METHOD_NAMES, CancelNotification,
-        CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
-        DeleteSessionRequest, DeleteSessionResponse, Error as AcpError, Implementation,
-        InitializeRequest, InitializeResponse, JsonRpcMessage, ListSessionsRequest,
-        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer,
-        NewSessionRequest, NewSessionResponse, Notification, PromptCapabilities, PromptRequest,
-        PromptResponse, RequestId, Response, ResumeSessionRequest, ResumeSessionResponse,
-        SessionCapabilities, SessionCloseCapabilities, SessionDeleteCapabilities,
-        SessionInfo as AcpSessionInfo, SessionListCapabilities, SessionNotification,
-        SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, ToolCall,
-        ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
-        UsageUpdate,
+        AGENT_METHOD_NAMES, AgentCapabilities, AvailableCommand, AvailableCommandInput,
+        AvailableCommandsUpdate, CLIENT_METHOD_NAMES, CancelNotification, CloseSessionRequest,
+        CloseSessionResponse, ContentBlock, ContentChunk, DeleteSessionRequest,
+        DeleteSessionResponse, Error as AcpError, Implementation, InitializeRequest,
+        InitializeResponse, JsonRpcMessage, ListSessionsRequest, ListSessionsResponse,
+        LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer, NewSessionRequest,
+        NewSessionResponse, Notification, PermissionOption, PermissionOptionKind,
+        PromptCapabilities, PromptRequest, PromptResponse, RequestId, RequestPermissionOutcome,
+        RequestPermissionRequest, RequestPermissionResponse, Response, ResumeSessionRequest,
+        ResumeSessionResponse, SessionCapabilities, SessionCloseCapabilities,
+        SessionDeleteCapabilities, SessionInfo as AcpSessionInfo, SessionListCapabilities,
+        SessionNotification, SessionResumeCapabilities, SessionUpdate, StopReason, TextContent,
+        ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        UnstructuredCommandInput, UsageUpdate,
     },
 };
 use anyhow::{Context, Result};
@@ -33,11 +40,15 @@ use std::{
     collections::{HashMap, HashSet},
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
 };
 use tokio::{
     io::{self, AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
-    sync::{Mutex as AsyncMutex, Semaphore, mpsc},
+    sync::{Mutex as AsyncMutex, Semaphore, mpsc, oneshot},
     task::JoinSet,
 };
 use url::Url;
@@ -79,12 +90,18 @@ const MAX_CLIENT_MCP_ENV: usize = 128;
 const MAX_CLIENT_MCP_ENV_NAME_BYTES: usize = 256;
 const MAX_CLIENT_MCP_ENV_VALUE_BYTES: usize = 64 * 1024;
 const MAX_CLIENT_MCP_ENV_TOTAL_BYTES: usize = 256 * 1024;
+const PERMISSION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
+const PERMISSION_ALLOW_ONCE_ID: &str = "allow_once";
+const PERMISSION_REJECT_ONCE_ID: &str = "reject_once";
+
+static NEXT_PERMISSION_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 struct ServerState {
     initialized: bool,
     sessions: HashMap<String, Arc<SessionEntry>>,
     opening_session_ids: HashSet<String>,
     active_request_ids: HashSet<RequestId>,
+    pending_client_responses: HashMap<RequestId, oneshot::Sender<Value>>,
 }
 
 impl ServerState {
@@ -94,6 +111,7 @@ impl ServerState {
             sessions: HashMap::new(),
             opening_session_ids: HashSet::new(),
             active_request_ids: HashSet::new(),
+            pending_client_responses: HashMap::new(),
         }
     }
 }
@@ -102,6 +120,12 @@ struct SessionEntry {
     agent: AsyncMutex<AgentSession>,
     config: Config,
     active: Mutex<Option<ActivePrompt>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AcpPolicy {
+    pub restore: SessionRestorePolicy,
+    pub permissions: AcpPermissionPolicy,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -142,6 +166,116 @@ impl Output {
     }
 }
 
+struct AcpPermissionHandler {
+    session_id: String,
+    output: Output,
+    state: Arc<AsyncMutex<ServerState>>,
+}
+
+impl ToolPermissionHandler for AcpPermissionHandler {
+    fn request(
+        &self,
+        request: ToolPermissionRequest,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<ToolPermissionDecision>> + Send + '_>,
+    > {
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Ok(ToolPermissionDecision::Cancelled);
+            }
+            let sequence = NEXT_PERMISSION_REQUEST_ID.fetch_add(1, Ordering::Relaxed);
+            let request_id: RequestId =
+                serde_json::from_value(Value::String(format!("ferrum-permission-{sequence}")))?;
+            let mut fields = ToolCallUpdateFields::new()
+                .title(terminal_text::sanitize_title(&request.name))
+                .kind(tool_kind(&request.name))
+                .status(ToolCallStatus::Pending);
+            if let Some(input) = bounded_sanitized_json(request.input, MAX_TOOL_INPUT_BYTES) {
+                fields = fields.raw_input(input);
+            }
+            let params = RequestPermissionRequest::new(
+                self.session_id.clone(),
+                ToolCallUpdate::new(
+                    truncate_to_max_bytes(&terminal_text::sanitize(&request.id), MAX_TOOL_ID_BYTES),
+                    fields,
+                ),
+                vec![
+                    PermissionOption::new(
+                        PERMISSION_ALLOW_ONCE_ID,
+                        "Allow once",
+                        PermissionOptionKind::AllowOnce,
+                    ),
+                    PermissionOption::new(
+                        PERMISSION_REJECT_ONCE_ID,
+                        "Reject",
+                        PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            );
+            let (sender, receiver) = oneshot::channel();
+            {
+                let mut state = self.state.lock().await;
+                state
+                    .pending_client_responses
+                    .insert(request_id.clone(), sender);
+            }
+            let message = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": CLIENT_METHOD_NAMES.session_request_permission,
+                "params": params,
+            });
+            if let Err(error) = self.output.send(message).await {
+                self.state
+                    .lock()
+                    .await
+                    .pending_client_responses
+                    .remove(&request_id);
+                return Err(error);
+            }
+            let response = tokio::select! {
+                biased;
+                _ = request.cancellation.cancelled() => {
+                    self.state.lock().await.pending_client_responses.remove(&request_id);
+                    return Ok(ToolPermissionDecision::Cancelled);
+                }
+                response = tokio::time::timeout(PERMISSION_RESPONSE_TIMEOUT, receiver) => response,
+            };
+            let value = match response {
+                Ok(Ok(value)) => value,
+                Ok(Err(_)) => return Ok(ToolPermissionDecision::Cancelled),
+                Err(_) => {
+                    self.state
+                        .lock()
+                        .await
+                        .pending_client_responses
+                        .remove(&request_id);
+                    return Ok(ToolPermissionDecision::Reject);
+                }
+            };
+            if value.get("error").is_some() {
+                return Ok(ToolPermissionDecision::Reject);
+            }
+            let Some(result) = value.get("result") else {
+                return Ok(ToolPermissionDecision::Reject);
+            };
+            let response: RequestPermissionResponse = match serde_json::from_value(result.clone()) {
+                Ok(response) => response,
+                Err(_) => return Ok(ToolPermissionDecision::Reject),
+            };
+            Ok(match response.outcome {
+                RequestPermissionOutcome::Cancelled => ToolPermissionDecision::Cancelled,
+                RequestPermissionOutcome::Selected(selected)
+                    if selected.option_id.to_string() == PERMISSION_ALLOW_ONCE_ID =>
+                {
+                    ToolPermissionDecision::Allow
+                }
+                _ => ToolPermissionDecision::Reject,
+            })
+        })
+    }
+}
+
 async fn send_session_update(
     output: &Output,
     session_id: &str,
@@ -154,6 +288,28 @@ async fn send_session_update(
     output
         .send(serde_json::to_value(JsonRpcMessage::wrap(notification))?)
         .await
+}
+
+async fn send_available_commands(output: &Output, session_id: &str) -> Result<()> {
+    let commands = headless_commands()
+        .iter()
+        .map(|spec| {
+            let command = AvailableCommand::new(spec.name, spec.description);
+            if let Some(hint) = spec.input_hint {
+                command.input(AvailableCommandInput::Unstructured(
+                    UnstructuredCommandInput::new(hint),
+                ))
+            } else {
+                command
+            }
+        })
+        .collect();
+    send_session_update(
+        output,
+        session_id,
+        SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(commands)),
+    )
+    .await
 }
 
 fn load_session_history(
@@ -408,6 +564,7 @@ impl AgentEventSink for AcpEventSink {
 struct PreparedPrompt {
     text: String,
     images: Vec<(String, String)>,
+    command: Option<HeadlessCommandInvocation>,
 }
 
 enum BoundedLine {
@@ -416,7 +573,7 @@ enum BoundedLine {
     Eof,
 }
 
-pub async fn run(config: Config, restore_policy: SessionRestorePolicy) -> Result<()> {
+pub async fn run(config: Config, policy: AcpPolicy) -> Result<()> {
     let config = Arc::new(config);
     let state = Arc::new(AsyncMutex::new(ServerState::new()));
     let turns = Arc::new(Semaphore::new(MAX_CONCURRENT_TURNS));
@@ -457,7 +614,7 @@ pub async fn run(config: Config, restore_policy: SessionRestorePolicy) -> Result
                     Arc::clone(&state),
                     Arc::clone(&turns),
                     output.clone(),
-                    restore_policy,
+                    policy,
                     &mut tasks,
                 )
                 .await
@@ -484,7 +641,7 @@ async fn handle_line(
     state: Arc<AsyncMutex<ServerState>>,
     turns: Arc<Semaphore>,
     output: Output,
-    restore_policy: SessionRestorePolicy,
+    policy: AcpPolicy,
     tasks: &mut JoinSet<()>,
 ) -> Result<()> {
     let value: Value = match serde_json::from_slice(line) {
@@ -529,6 +686,13 @@ async fn handle_line(
                 AcpError::invalid_request(),
             )?)
             .await?;
+        return Ok(());
+    }
+    if object.get("method").is_none()
+        && object.get("id").is_some()
+        && (object.get("result").is_some() || object.get("error").is_some())
+    {
+        handle_client_response(object, &state).await;
         return Ok(());
     }
     let Some(method) = object.get("method").and_then(Value::as_str) else {
@@ -717,8 +881,12 @@ async fn handle_line(
             state.sessions.insert(session_id.clone(), entry);
             drop(state);
             output
-                .send(success_response(id, NewSessionResponse::new(session_id))?)
+                .send(success_response(
+                    id,
+                    NewSessionResponse::new(session_id.clone()),
+                )?)
                 .await?;
+            send_available_commands(&output, &session_id).await?;
         }
         method if method == AGENT_METHOD_NAMES.session_list => {
             let request = match parse_params::<ListSessionsRequest>(params) {
@@ -827,7 +995,7 @@ async fn handle_line(
                 &config,
                 &info,
                 cwd,
-                restore_policy,
+                policy.restore,
                 client_mcp_servers,
             )
             .await
@@ -854,6 +1022,7 @@ async fn handle_line(
             output
                 .send(success_response(id, LoadSessionResponse::new())?)
                 .await?;
+            send_available_commands(&output, session_id).await?;
         }
         method if method == AGENT_METHOD_NAMES.session_resume => {
             let request = match parse_params::<ResumeSessionRequest>(params) {
@@ -906,7 +1075,7 @@ async fn handle_line(
                 &config,
                 &info,
                 cwd,
-                restore_policy,
+                policy.restore,
                 client_mcp_servers,
             )
             .await
@@ -917,6 +1086,7 @@ async fn handle_line(
             output
                 .send(success_response(id, ResumeSessionResponse::new())?)
                 .await?;
+            send_available_commands(&output, session_id).await?;
         }
         method if method == AGENT_METHOD_NAMES.session_close => {
             let request = match parse_params::<CloseSessionRequest>(params) {
@@ -1117,6 +1287,8 @@ async fn handle_line(
                     prepared,
                     cancellation,
                     task_output.clone(),
+                    Arc::clone(&task_state),
+                    policy.permissions,
                 )
                 .await;
                 let response = match result {
@@ -1150,8 +1322,36 @@ async fn run_prompt(
     prompt: PreparedPrompt,
     cancellation: TurnCancellation,
     output: Output,
+    state: Arc<AsyncMutex<ServerState>>,
+    permission_policy: AcpPermissionPolicy,
 ) -> std::result::Result<TurnOutcome, AcpError> {
     let mut agent = entry.agent.lock().await;
+    if let Some(command) = prompt.command {
+        if !prompt.images.is_empty() {
+            return Err(AcpError::invalid_params().data("commands do not accept image content"));
+        }
+        let outcome = agent
+            .execute_headless_command(command, &entry.config, &cancellation)
+            .await
+            .map_err(|_| AcpError::internal_error().data("command execution failed"))?;
+        return match outcome {
+            HeadlessCommandOutcome::Completed(text) => {
+                for chunk in utf8_chunks(&text, MAX_UPDATE_TEXT_BYTES) {
+                    send_session_update(
+                        &output,
+                        session_id,
+                        SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
+                            TextContent::new(chunk),
+                        ))),
+                    )
+                    .await
+                    .map_err(|_| AcpError::internal_error())?;
+                }
+                Ok(TurnOutcome::Completed)
+            }
+            HeadlessCommandOutcome::Cancelled => Ok(TurnOutcome::Cancelled),
+        };
+    }
     if !prompt.images.is_empty() {
         agent
             .attach_data_images(prompt.images)
@@ -1159,18 +1359,38 @@ async fn run_prompt(
     }
     let mut sink = AcpEventSink::new(
         session_id.to_string(),
-        output,
+        output.clone(),
         entry.config.max_context_tokens,
     );
+    let mut options = TurnOptions::headless(cancellation.clone());
+    if matches!(permission_policy, AcpPermissionPolicy::Ask) {
+        options = options.with_permission_handler(Arc::new(AcpPermissionHandler {
+            session_id: session_id.to_string(),
+            output: output.clone(),
+            state,
+        }));
+    }
     agent
-        .run_turn_with_events(
-            prompt.text,
-            &entry.config,
-            TurnOptions::headless(cancellation),
-            &mut sink,
-        )
+        .run_turn_with_events(prompt.text, &entry.config, options, &mut sink)
         .await
         .map_err(|_| AcpError::internal_error())
+}
+
+async fn handle_client_response(
+    object: &serde_json::Map<String, Value>,
+    state: &Arc<AsyncMutex<ServerState>>,
+) {
+    let Some(id) = object
+        .get("id")
+        .cloned()
+        .and_then(|id| serde_json::from_value::<RequestId>(id).ok())
+    else {
+        return;
+    };
+    let sender = state.lock().await.pending_client_responses.remove(&id);
+    if let Some(sender) = sender {
+        let _ = sender.send(Value::Object(object.clone()));
+    }
 }
 
 async fn handle_notification(
@@ -1362,7 +1582,14 @@ fn prepare_prompt(blocks: Vec<ContentBlock>) -> std::result::Result<PreparedProm
     if text.is_empty() {
         text.push_str("User attached image content.");
     }
-    Ok(PreparedPrompt { text, images })
+    let command = parse_headless_command(&text).map_err(|error| {
+        AcpError::invalid_params().data(terminal_text::sanitize(&error.to_string()))
+    })?;
+    Ok(PreparedPrompt {
+        text,
+        images,
+        command,
+    })
 }
 
 fn append_prompt_text(text: &mut String, addition: &str) -> std::result::Result<(), AcpError> {

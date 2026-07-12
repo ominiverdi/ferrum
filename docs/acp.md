@@ -27,6 +27,7 @@ Supported:
   - `agent_thought_chunk`
   - `tool_call`
   - `tool_call_update`
+  - `available_commands_update`
   - `usage_update`
 
 Prompt responses use the official `stopReason` values. Text, resource-link, and validated image prompt blocks are accepted. Audio and embedded-resource prompt blocks are not advertised or accepted.
@@ -34,6 +35,28 @@ Prompt responses use the official `stopReason` values. Text, resource-link, and 
 Session IDs are Ferrum's durable JSONL session IDs. Listing is newest-first, supports absolute `cwd` filtering and opaque cursor pagination, and returns bounded pages. Loading replays persisted user, agent, thought, and tool updates before returning; resuming activates the same history without replay. The request `cwd` must match the persisted canonical directory. Session provider, model, thinking, safety, and tool metadata follows the normal Ferrum restoration rules; explicit ACP-process CLI overrides remain authoritative. Active sessions must be idle before close and must be closed before deletion.
 
 Each active ACP session owns an independent Ferrum agent session and canonical absolute working directory. Ferrum's configured safety tier, tool selection, writable roots, credential protection, shell guards, containment, and other tier-independent checks remain in force.
+
+## Session commands
+
+After `session/new`, `session/load`, and `session/resume`, Ferrum emits the official `available_commands_update` notification. The current registry contains:
+
+- `/compact [instructions]`: compact the active in-memory context without sending the command to the model.
+- `/session`: report bounded session, context, provider, tool, and policy state.
+- `/version`: report the Ferrum version.
+
+Clients invoke these through ordinary `session/prompt` text. Discovery, parsing, and execution share one registry. Unknown commands, extra input for commands that do not accept it, terminal-only commands such as `/quit`, and command prompts containing images return structured `invalid params` errors instead of becoming model prompts.
+
+## Optional client permission UX
+
+Permission prompting is disabled by default so existing bridges retain their current behavior. A trusted client that implements `session/request_permission` can opt in at process startup:
+
+```bash
+ferrum acp --permissions ask
+```
+
+In this mode, Ferrum asks only for sensitive operations that its own policy has already authorized. Tool availability, input bounds, high-safety restrictions, shell guards, protected targets, and writable-root checks run first; any Ferrum denial is final and is returned as a tool error without a client permission request. A client approval therefore cannot add authority. Client rejection can only restrict execution.
+
+Requests offer non-persistent `allow_once` and `reject_once` choices. They are bounded, have a five-minute timeout, support concurrent sessions, and are tied to prompt cancellation and connection lifetime. Cancellation returns the prompt's normal `cancelled` stop reason. Malformed responses, unknown choices, JSON-RPC errors, and timeouts reject execution. Ferrum intentionally does not offer or remember `allow_always` decisions.
 
 ## Client-supplied MCP servers
 

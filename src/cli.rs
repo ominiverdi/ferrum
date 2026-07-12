@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::io::{self, Read};
 
 #[derive(Debug, Parser)]
@@ -64,10 +64,20 @@ pub struct Args {
     pub command: Option<Command>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AcpPermissionPolicy {
+    Off,
+    Ask,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the official ACP v1 stdio agent
-    Acp,
+    Acp {
+        /// Client permission strategy for Ferrum-authorized sensitive tool calls
+        #[arg(long = "permissions", value_enum, default_value_t = AcpPermissionPolicy::Off)]
+        permissions: AcpPermissionPolicy,
+    },
     /// Authenticate with a provider
     Login { provider: String },
 }
@@ -106,7 +116,20 @@ mod tests {
     #[test]
     fn parses_acp_subcommand() {
         let args = Args::try_parse_from(["ferrum", "acp"]).unwrap();
-        assert!(matches!(args.command, Some(Command::Acp)));
+        assert!(matches!(
+            args.command,
+            Some(Command::Acp {
+                permissions: AcpPermissionPolicy::Off
+            })
+        ));
+
+        let args = Args::try_parse_from(["ferrum", "acp", "--permissions", "ask"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Some(Command::Acp {
+                permissions: AcpPermissionPolicy::Ask
+            })
+        ));
     }
 
     #[test]

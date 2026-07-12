@@ -1843,6 +1843,69 @@ fn message_is_runtime_context(message: &messages::Message) -> bool {
         })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeadlessCommandSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub input_hint: Option<&'static str>,
+}
+
+const HEADLESS_COMMANDS: &[HeadlessCommandSpec] = &[
+    HeadlessCommandSpec {
+        name: "compact",
+        description: "Compact the current session context",
+        input_hint: Some("optional compaction instructions"),
+    },
+    HeadlessCommandSpec {
+        name: "session",
+        description: "Show current session information",
+        input_hint: None,
+    },
+    HeadlessCommandSpec {
+        name: "version",
+        description: "Show the Ferrum version",
+        input_hint: None,
+    },
+];
+
+pub(crate) fn headless_commands() -> &'static [HeadlessCommandSpec] {
+    HEADLESS_COMMANDS
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeadlessCommandInvocation {
+    command: &'static str,
+    input: Option<String>,
+}
+
+pub(crate) fn parse_headless_command(input: &str) -> Result<Option<HeadlessCommandInvocation>> {
+    let trimmed = input.trim();
+    let Some(command_line) = trimmed.strip_prefix('/') else {
+        return Ok(None);
+    };
+    let (name, arguments) = command_line
+        .split_once(char::is_whitespace)
+        .map_or((command_line, ""), |(name, arguments)| {
+            (name, arguments.trim())
+        });
+    let Some(spec) = HEADLESS_COMMANDS.iter().find(|spec| spec.name == name) else {
+        anyhow::bail!("unsupported ACP session command: /{name}");
+    };
+    if spec.input_hint.is_none() && !arguments.is_empty() {
+        anyhow::bail!("/{name} does not accept input");
+    }
+    Ok(Some(HeadlessCommandInvocation {
+        command: spec.name,
+        input: (!arguments.is_empty()).then(|| arguments.to_string()),
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HeadlessCommandOutcome {
+    Completed(String),
+    Cancelled,
+}
+
 pub(crate) struct AgentSession {
     session: session::JsonlSession,
     messages: Vec<messages::Message>,
@@ -2338,6 +2401,8 @@ impl AgentSession {
                     tool_uses,
                     options.monitor_terminal_cancel,
                     Arc::clone(&turn_cancel),
+                    options.permission_handler.as_ref(),
+                    &options.cancellation,
                     sink,
                 )
                 .await?;
@@ -2764,6 +2829,8 @@ impl AgentSession {
         tool_uses: Vec<(String, String, serde_json::Value)>,
         interactive: bool,
         cancel: Arc<AtomicBool>,
+        permission_handler: Option<&Arc<dyn events::ToolPermissionHandler>>,
+        cancellation: &events::TurnCancellation,
         sink: &mut dyn AgentEventSink,
     ) -> Result<ExecutedToolBatch> {
         let can_parallelize = tool_uses
@@ -2801,8 +2868,15 @@ impl AgentSession {
                 cancelled,
             });
         }
-        self.execute_sequential_tools_with_cancel_and_events(tool_uses, interactive, cancel, sink)
-            .await
+        self.execute_sequential_tools_with_cancel_and_events(
+            tool_uses,
+            interactive,
+            cancel,
+            permission_handler,
+            cancellation,
+            sink,
+        )
+        .await
     }
 
     fn is_parallel_safe_builtin_tool(&self, name: &str) -> bool {
@@ -2893,7 +2967,9 @@ impl AgentSession {
         self.execute_sequential_tools_with_cancel_and_events(
             tool_uses,
             interactive,
-            cancel,
+            cancel.clone(),
+            None,
+            &events::TurnCancellation::new(),
             &mut sink,
         )
         .await
@@ -2905,6 +2981,8 @@ impl AgentSession {
         tool_uses: Vec<(String, String, serde_json::Value)>,
         interactive: bool,
         cancel: Arc<AtomicBool>,
+        permission_handler: Option<&Arc<dyn events::ToolPermissionHandler>>,
+        cancellation: &events::TurnCancellation,
         sink: &mut dyn AgentEventSink,
     ) -> Result<ExecutedToolBatch> {
         let mut results = Vec::new();
@@ -2918,6 +2996,40 @@ impl AgentSession {
             let started = Instant::now();
             let (content, is_error, aborted) = if batch_cancelled {
                 ("aborted before execution".to_string(), true, true)
+            } else if let Some(handler) = permission_handler {
+                match self
+                    .request_tool_permission(handler.as_ref(), &id, &name, &input, cancellation)
+                    .await
+                {
+                    Ok(events::ToolPermissionDecision::Allow) => {
+                        let mut abort =
+                            ActiveTurnAbort::start_with_token(interactive, Arc::clone(&cancel));
+                        let result = self
+                            .execute_tool(&name, &input, interactive, Some(Arc::clone(&cancel)))
+                            .await;
+                        abort.stop();
+                        match result {
+                            Ok(output) => {
+                                let is_error = bash_preview_indicates_failure(&name, &output);
+                                (output, is_error, false)
+                            }
+                            Err(error) if error.to_string() == "aborted" => {
+                                ("aborted".to_string(), true, true)
+                            }
+                            Err(error) => (error.to_string(), true, false),
+                        }
+                    }
+                    Ok(events::ToolPermissionDecision::Reject) => (
+                        "tool execution rejected by client permission policy".to_string(),
+                        true,
+                        false,
+                    ),
+                    Ok(events::ToolPermissionDecision::Cancelled) => {
+                        cancel.store(true, Ordering::Release);
+                        ("aborted".to_string(), true, true)
+                    }
+                    Err(error) => (error.to_string(), true, false),
+                }
             } else {
                 let mut abort = ActiveTurnAbort::start_with_token(interactive, Arc::clone(&cancel));
                 let result = self
@@ -2961,6 +3073,51 @@ impl AgentSession {
             tools: results,
             cancelled: batch_cancelled,
         })
+    }
+
+    async fn request_tool_permission(
+        &self,
+        handler: &dyn events::ToolPermissionHandler,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        cancellation: &events::TurnCancellation,
+    ) -> Result<events::ToolPermissionDecision> {
+        if cancellation.is_cancelled() {
+            return Ok(events::ToolPermissionDecision::Cancelled);
+        }
+        if !self.active_tool_names.contains(name) {
+            let message = if self.active_tool_names.is_empty() {
+                format!("Tool '{name}' is not available because tools are disabled (--no-tools)")
+            } else {
+                format!("Tool '{name}' is not in the active tool set")
+            };
+            anyhow::bail!(message);
+        }
+        let requires_permission = if matches!(name, "history_search" | "history_read") {
+            false
+        } else if self.mcp_enabled && self.mcp.as_ref().is_some_and(|mcp| mcp.has_tool(name)) {
+            true
+        } else {
+            builtin_tools::validate_before_permission(
+                name,
+                input,
+                &self.cwd,
+                self.safety,
+                &self.writable_roots,
+            )?
+        };
+        if !requires_permission {
+            return Ok(events::ToolPermissionDecision::Allow);
+        }
+        handler
+            .request(events::ToolPermissionRequest {
+                id: id.to_string(),
+                name: name.to_string(),
+                input: input.clone(),
+                cancellation: cancellation.clone(),
+            })
+            .await
     }
 
     async fn execute_tool(
@@ -3047,6 +3204,101 @@ impl AgentSession {
 
     pub(crate) fn session_path(&self) -> &Path {
         self.session.path()
+    }
+
+    pub(crate) async fn execute_headless_command(
+        &mut self,
+        invocation: HeadlessCommandInvocation,
+        config: &Config,
+        cancellation: &events::TurnCancellation,
+    ) -> Result<HeadlessCommandOutcome> {
+        if cancellation.is_cancelled() {
+            return Ok(HeadlessCommandOutcome::Cancelled);
+        }
+        let output = match invocation.command {
+            "compact" => {
+                let outcome = self
+                    .compact(
+                        config,
+                        invocation.input.as_deref(),
+                        false,
+                        Some(cancellation.flag()),
+                    )
+                    .await;
+                match outcome {
+                    Ok(CompactionOutcome::Compacted {
+                        before_tokens,
+                        after_tokens,
+                    }) => format!(
+                        "conversation compacted: {before_tokens} -> {after_tokens} estimated tokens"
+                    ),
+                    Ok(CompactionOutcome::Skipped {
+                        before_tokens,
+                        after_tokens,
+                        reason,
+                    }) => format!(
+                        "compaction skipped: {reason} ({before_tokens} -> {after_tokens} estimated tokens)"
+                    ),
+                    Err(error) if error.to_string() == "aborted" || cancellation.is_cancelled() => {
+                        return Ok(HeadlessCommandOutcome::Cancelled);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            "session" => {
+                let stats = self.stats();
+                let info = session::jsonl::session_info(self.session.path())?
+                    .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
+                let last_compaction = info
+                    .last_compaction_timestamp_ms
+                    .map(format_timestamp_ms)
+                    .unwrap_or_else(|| "none".to_string());
+                let mut lines = vec![
+                    format!(
+                        "path: {}",
+                        terminal_text::sanitize(&self.session.path().display().to_string())
+                    ),
+                    format!("messages: {}", stats.messages),
+                    format!("archived_messages: {}", info.archived_message_count),
+                    format!("compactions: {}", info.compaction_count),
+                    format!("last_compaction: {last_compaction}"),
+                    format!("chars: {}", stats.chars),
+                    format!("context_tokens: {}", stats.estimated_tokens),
+                    format!("context_source: {}", stats.context_source.as_str()),
+                    format!("max_context_tokens: {}", config.max_context_tokens),
+                    format!(
+                        "context_usage_percent: {}",
+                        context_usage_percent(stats.estimated_tokens, config.max_context_tokens)
+                    ),
+                    format!("max_tool_rounds: {}", config.max_tool_rounds),
+                    format!("file_bytes: {}", stats.file_bytes),
+                    format!("pending_images: {}", self.pending_images.len()),
+                    format!("skills: {}", self.skills.len()),
+                    format!("mcp_enabled: {}", self.mcp_enabled),
+                    format!("mcp_connected: {}", self.mcp.is_some()),
+                    format!("diff_mode: {}", self.diff_mode.as_str()),
+                    format!("safety: {}", self.safety.as_str()),
+                    format!("model: {}", terminal_text::sanitize(&config.model)),
+                ];
+                if config.provider_model != config.model {
+                    lines.push(format!(
+                        "provider_model: {}",
+                        terminal_text::sanitize(&config.provider_model)
+                    ));
+                }
+                lines.extend([
+                    format!("thinking: {}", config.thinking.as_str()),
+                    format!(
+                        "provider: {}",
+                        terminal_text::sanitize(&config.provider_name)
+                    ),
+                ]);
+                lines.join("\n")
+            }
+            "version" => format!("ferrum {}", env!("CARGO_PKG_VERSION")),
+            _ => unreachable!("headless command registry and execution drifted"),
+        };
+        Ok(HeadlessCommandOutcome::Completed(output))
     }
 
     fn message_count(&self) -> usize {
@@ -6009,6 +6261,8 @@ mod context_pressure_tests {
                 ],
                 false,
                 cancel,
+                None,
+                &events::TurnCancellation::new(),
                 &mut sink,
             )
             .await
