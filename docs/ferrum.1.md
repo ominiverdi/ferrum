@@ -154,6 +154,8 @@ characters from A-Z, a-z, 0-9, '.', '_', or '-', and must not start with '.'.
 
 Ferrum interactive mode supports slash commands and shell shortcuts.
 
+Input beginning with `/` in column zero is reserved for Ferrum. Unknown slash commands are rejected locally and are not sent to the model. Prefix slash-leading text with a space to send it as a model prompt; Ferrum removes the escape whitespace.
+
 Common slash commands:
 
 **/help**

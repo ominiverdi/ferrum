@@ -273,6 +273,8 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 
 Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths. After `/models` succeeds, its provider model ids are available to `/model <Tab>` completion until the active provider changes.
 
+Input beginning with `/` in column zero is always handled by Ferrum. Unknown slash commands are rejected locally instead of being sent to the model. Prefix slash-leading text with a space to send it as a model prompt; Ferrum removes that escape whitespace before sending it.
+
 Shell shortcuts:
 
 ```text

@@ -109,6 +109,8 @@ Color mode is stored in session metadata too. `/colors <auto|on|off>` appends an
 
 Interactive input supports completion and hints for slash commands, selected command arguments, `/skill:`, and `/image` paths.
 
+Ferrum reserves `/` in column zero for its interactive command layer. An unknown slash command produces a local diagnostic and never becomes a model prompt. To send literal slash-leading text to the model, prefix it with whitespace; Ferrum removes the escape whitespace and does not offer slash-command hints or completion for that input.
+
 The resolved tool list is stored in session metadata for visibility and audit. Resuming or switching sessions uses the current process/config tool policy, so newly added default tools appear automatically unless `--tools`, `--no-tools`, `[tools] allow`, or `[tools] deny` limits them.
 
 Model-facing history tools, `history_search` and `history_read`, stream bounded current-session JSONL records by line number, including tool calls/results and entries archived before compaction. They stop when their result limit is met rather than loading the complete session into memory. They are tools only; there is no slash command for them. See [`tools.md`](tools.md).

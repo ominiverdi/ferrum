@@ -200,6 +200,12 @@ Print version.
 .PP
 Ferrum interactive mode supports slash commands and shell shortcuts.
 .PP
+Input beginning with \f[V]/\f[R] in column zero is reserved for Ferrum.
+Unknown slash commands are rejected locally and are not sent to the
+model.
+Prefix slash-leading text with a space to send it as a model prompt;
+Ferrum removes the escape whitespace.
+.PP
 Common slash commands:
 .TP
 \f[B]/help\f[R]

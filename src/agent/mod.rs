@@ -98,6 +98,9 @@ impl Hinter for FerrumLineHelper {
             return None;
         }
         let command = line.trim_start();
+        if command.len() != line.len() && command.starts_with('/') {
+            return None;
+        }
         if command == "/palette" {
             return Some(" <name>  (/palettes to list)".to_string());
         }
@@ -137,6 +140,9 @@ impl Completer for FerrumLineHelper {
         let before = &line[..pos];
         let leading_spaces = before.len() - before.trim_start().len();
         let command_before = &before[leading_spaces..];
+        if leading_spaces > 0 && command_before.starts_with('/') {
+            return Ok((pos, Vec::new()));
+        }
         if let Some(prefix) = command_before.strip_prefix("/image ") {
             let start = pos - prefix.len();
             return Ok((start, complete_path_candidates(prefix)));
@@ -666,16 +672,15 @@ pub async fn run_interactive(
         };
         match readline {
             Ok(line) => {
-                let input = line.trim();
-                if input.is_empty() {
+                let Some((input, slash_escaped)) = normalize_interactive_input(&line) else {
                     continue;
-                }
+                };
                 let input_with_clipboard_paths = replace_paste_image_triggers(input);
                 let input = input_with_clipboard_paths.trim();
                 if input.is_empty() {
                     continue;
                 }
-                let history_input = sanitize_history_input(input);
+                let history_input = sanitize_interactive_history_input(input, slash_escaped);
                 let _ = rl.add_history_entry(history_input.as_str());
                 if input.starts_with('!') {
                     match handle_bang_command(input, config, &mut state).await {
@@ -691,7 +696,7 @@ pub async fn run_interactive(
                         }
                     }
                 }
-                if let Some((name, args)) = parse_skill_invocation(input) {
+                if !slash_escaped && let Some((name, args)) = parse_skill_invocation(input) {
                     match state.expand_skill_prompt(name, args.as_deref()) {
                         Ok(prompt) => match state.run_turn(prompt, config, true).await {
                             Ok(()) => render_prompt_separator(state.color_mode, &state.colors),
@@ -701,7 +706,7 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
-                if input == "/models" {
+                if !slash_escaped && input == "/models" {
                     let mut abort = ActiveTurnAbort::start(true);
                     let token = abort.token();
                     let model_list =
@@ -730,7 +735,7 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
-                if input == "/login" || input.starts_with("/login ") {
+                if !slash_escaped && (input == "/login" || input.starts_with("/login ")) {
                     match parse_login_provider(input) {
                         Ok(_) => {
                             let mut abort = ActiveTurnAbort::start(true);
@@ -759,7 +764,7 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
-                if input == "/compact" || input.starts_with("/compact ") {
+                if !slash_escaped && (input == "/compact" || input.starts_with("/compact ")) {
                     let instructions = input.strip_prefix("/compact ").map(str::trim);
                     let mut abort = ActiveTurnAbort::start(true);
                     let result = state
@@ -785,7 +790,7 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
-                if should_handle_as_command(input, &state.cwd) {
+                if should_handle_as_command(input, slash_escaped) {
                     let previous_provider = config.provider_name.clone();
                     let previous_model = config.model.clone();
                     match handle_command(input, config, &mut state) {
@@ -5097,18 +5102,24 @@ mod context_pressure_tests {
     }
 
     #[test]
-    fn completes_sessions_subcommands() {
+    fn completes_sessions_subcommands_only_in_command_position() {
         let temp = tempfile::tempdir().unwrap();
         let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
         let history = DefaultHistory::default();
         let ctx = rustyline::Context::new(&history);
 
-        let line = " /sessions p";
-        let (start, candidates) = helper.complete(line, line.len(), &ctx).unwrap();
+        let command = "/sessions p";
+        let (start, candidates) = helper.complete(command, command.len(), &ctx).unwrap();
 
-        assert_eq!(start, line.len() - 1);
+        assert_eq!(start, command.len() - 1);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].replacement, "pick");
+
+        let escaped = " /sessions p";
+        let (start, candidates) = helper.complete(escaped, escaped.len(), &ctx).unwrap();
+        assert_eq!(start, escaped.len());
+        assert!(candidates.is_empty());
+        assert_eq!(helper.hint(" /sessions", " /sessions".len(), &ctx), None);
     }
 
     #[test]
@@ -6563,22 +6574,37 @@ mod context_pressure_tests {
     }
 
     #[test]
-    fn absolute_path_leading_prompt_is_not_slash_command() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(!should_handle_as_command(
+    fn column_zero_slash_input_stays_in_the_shell() {
+        assert!(should_handle_as_command(
             "/tmp/foo failed, explain why",
-            temp.path()
+            false
         ));
+        assert!(should_handle_as_command(
+            "/not-a-command do something",
+            false
+        ));
+        assert!(should_handle_as_command("/help", false));
     }
 
     #[test]
-    fn unknown_slash_word_is_user_message() {
-        let temp = tempfile::tempdir().unwrap();
-        assert!(!should_handle_as_command(
-            "/not-a-command do something",
-            temp.path()
-        ));
-        assert!(should_handle_as_command("/help", temp.path()));
+    fn leading_whitespace_escapes_slash_input_for_the_model() {
+        let (input, escaped) = normalize_interactive_input("  /not-a-command do something  ")
+            .expect("input should be non-empty");
+
+        assert_eq!(input, "/not-a-command do something");
+        assert!(escaped);
+        assert!(!should_handle_as_command(input, escaped));
+    }
+
+    #[test]
+    fn escaped_slash_history_preserves_escape_marker() {
+        let (input, escaped) =
+            normalize_interactive_input(" /literal-history").expect("input should be non-empty");
+
+        assert_eq!(
+            sanitize_interactive_history_input(input, escaped),
+            " /literal-history"
+        );
     }
 
     #[test]
@@ -7427,6 +7453,15 @@ fn save_history_private(rl: &mut Editor<FerrumLineHelper, DefaultHistory>, path:
     let _ = prepare_history_file(path);
 }
 
+fn sanitize_interactive_history_input(input: &str, slash_escaped: bool) -> String {
+    let sanitized = sanitize_history_input(input);
+    if slash_escaped {
+        format!(" {sanitized}")
+    } else {
+        sanitized
+    }
+}
+
 fn sanitize_history_input(input: &str) -> String {
     input
         .split_whitespace()
@@ -7640,51 +7675,18 @@ fn split_name_args(input: &str) -> (&str, Option<String>) {
     (name, args)
 }
 
-fn should_handle_as_command(input: &str, cwd: &Path) -> bool {
-    let first = input.split_whitespace().next().unwrap_or("");
-    if first.is_empty() || !first.starts_with('/') {
-        return false;
+fn normalize_interactive_input(line: &str) -> Option<(&str, bool)> {
+    let line = line.trim_end();
+    let input = line.trim_start();
+    if input.is_empty() {
+        return None;
     }
-    if looks_like_image_path(first)
-        && builtin_tools::path::resolve_to_cwd(first, cwd).is_ok_and(|path| path.is_file())
-    {
-        return false;
-    }
-    is_known_slash_command(first)
+    let slash_escaped = input.starts_with('/') && input.len() != line.len();
+    Some((input, slash_escaped))
 }
 
-fn is_known_slash_command(command: &str) -> bool {
-    command.starts_with("/skill:")
-        || matches!(
-            command,
-            "/help"
-                | "/version"
-                | "/session"
-                | "/new"
-                | "/title"
-                | "/sessions"
-                | "/skills"
-                | "/skill"
-                | "/model"
-                | "/models"
-                | "/login"
-                | "/provider"
-                | "/providers"
-                | "/thinking"
-                | "/safety"
-                | "/mcp"
-                | "/colors"
-                | "/palette"
-                | "/palettes"
-                | "/diff"
-                | "/image"
-                | "/image-paste"
-                | "/paste-image"
-                | "/usage"
-                | "/compact"
-                | "/quit"
-                | "/exit"
-        )
+fn should_handle_as_command(input: &str, slash_escaped: bool) -> bool {
+    !slash_escaped && input.starts_with('/')
 }
 
 fn extract_pasted_images(input: &str, cwd: &Path) -> (String, Vec<String>) {
@@ -8358,6 +8360,7 @@ fn handle_command(
             println!("  !<cmd>                run shell command and send output to model");
             println!("  !!<cmd>               run shell command and print output only");
             println!("  /compact              compact current in-memory conversation");
+            println!("  [space]/<text>        send slash-leading text to the model");
             Ok(CommandAction::Continue)
         }
         "/version" => {
