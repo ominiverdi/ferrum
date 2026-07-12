@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -276,16 +276,18 @@ impl JsonlSession {
     }
 
     pub fn open(path: PathBuf) -> Result<Self> {
-        validate_session_file(&path)?;
-        tighten_file_permissions(&path);
         let mut file = OpenOptions::new()
             .read(true)
             .append(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)
             .with_context(|| format!("failed to open {}", path.display()))?;
+        validate_opened_session_file(&file, &path)?;
         {
             let _lock = lock_exclusive(&file)?;
+            validate_opened_session_header(&file, &path)?;
+            tighten_open_file_permissions(&file);
             if repair_incomplete_tail(&mut file)? {
                 file.sync_data()
                     .context("failed to sync repaired session")?;
@@ -456,15 +458,28 @@ fn for_each_session_entry(
     path: &Path,
     visit: impl FnMut(usize, SessionEntry) -> Result<bool>,
 ) -> Result<()> {
-    for_each_session_entry_with_diagnostics(path, true, visit)
+    for_each_session_entry_with_diagnostics(path, true, false, visit)
+}
+
+fn for_each_session_entry_strict(
+    path: &Path,
+    visit: impl FnMut(usize, SessionEntry) -> Result<bool>,
+) -> Result<()> {
+    for_each_session_entry_with_diagnostics(path, false, true, visit)
 }
 
 fn for_each_session_entry_with_diagnostics(
     path: &Path,
     diagnose: bool,
+    strict: bool,
     mut visit: impl FnMut(usize, SessionEntry) -> Result<bool>,
 ) -> Result<()> {
-    let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    validate_opened_session_file(&file, path)?;
     let _lock = lock_shared(&file)?;
     let mut reader = BufReader::new(file);
     let mut bytes = Vec::new();
@@ -477,6 +492,9 @@ fn for_each_session_entry_with_diagnostics(
         }
         line_number += 1;
         let BoundedLine::Line { terminated } = line else {
+            if strict {
+                anyhow::bail!("oversized JSONL record at line {line_number}");
+            }
             if diagnose && diagnostics < 10 {
                 eprintln!(
                     "[session] skipped oversized JSONL record at line {} in {}",
@@ -488,6 +506,9 @@ fn for_each_session_entry_with_diagnostics(
             continue;
         };
         if !terminated {
+            if strict {
+                anyhow::bail!("incomplete JSONL record at line {line_number}");
+            }
             if diagnose && diagnostics < 10 {
                 eprintln!(
                     "[session] skipped incomplete trailing JSONL record at line {} in {}",
@@ -504,6 +525,9 @@ fn for_each_session_entry_with_diagnostics(
         let entry: SessionEntry = match serde_json::from_slice(&bytes) {
             Ok(entry) => entry,
             Err(error) => {
+                if strict {
+                    anyhow::bail!("malformed JSONL record at line {line_number}: {error}");
+                }
                 if diagnose && diagnostics < 10 {
                     eprintln!(
                         "[session] skipped malformed JSONL line {} in {}: {error}",
@@ -527,6 +551,57 @@ fn for_each_session_entry_with_diagnostics(
         );
     }
     Ok(())
+}
+
+pub fn load_visible_history_messages_bounded(
+    path: &Path,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<Vec<Message>> {
+    let mut messages = Vec::new();
+    let mut entries = 0usize;
+    let mut bytes = 0usize;
+    for_each_session_entry_strict(path, |_, entry| {
+        entries = entries
+            .checked_add(1)
+            .context("session history entry count overflow")?;
+        let entry_bytes = serde_json::to_vec(&entry)?.len();
+        bytes = bytes
+            .checked_add(entry_bytes)
+            .context("session history size overflow")?;
+        if entries > max_entries || bytes > max_bytes {
+            anyhow::bail!("session history exceeds ACP load limits");
+        }
+        match entry {
+            SessionEntry::Message { message, .. } => messages.push(message),
+            SessionEntry::Compaction { .. } => messages.clear(),
+            SessionEntry::Header { .. } | SessionEntry::Metadata { .. } => {}
+        }
+        Ok(true)
+    })?;
+    Ok(messages)
+}
+
+pub fn validate_session_history_bounded(
+    path: &Path,
+    max_entries: usize,
+    max_bytes: usize,
+) -> Result<()> {
+    let mut entries = 0usize;
+    let mut bytes = 0usize;
+    for_each_session_entry_strict(path, |_, entry| {
+        entries = entries
+            .checked_add(1)
+            .context("session history entry count overflow")?;
+        let entry_bytes = serde_json::to_vec(&entry)?.len();
+        bytes = bytes
+            .checked_add(entry_bytes)
+            .context("session history size overflow")?;
+        if entries > max_entries || bytes > max_bytes {
+            anyhow::bail!("session history exceeds ACP load limits");
+        }
+        Ok(true)
+    })
 }
 
 pub fn load_messages(path: &Path) -> Result<Vec<Message>> {
@@ -596,12 +671,34 @@ pub fn list_sessions_for_cwd(dir: &Path, cwd: &Path) -> Result<Vec<SessionInfo>>
 }
 
 pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
+    list_sessions_with_limits(dir, None)
+}
+
+pub fn list_sessions_bounded(
+    dir: &Path,
+    max_directory_entries: usize,
+    max_sessions: usize,
+) -> Result<Vec<SessionInfo>> {
+    list_sessions_with_limits(dir, Some((max_directory_entries, max_sessions)))
+}
+
+fn list_sessions_with_limits(
+    dir: &Path,
+    limits: Option<(usize, usize)>,
+) -> Result<Vec<SessionInfo>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
     let mut sessions = Vec::new();
+    let mut directory_entries = 0usize;
     let mut diagnostics = 0usize;
     for entry in fs::read_dir(dir)? {
+        directory_entries = directory_entries
+            .checked_add(1)
+            .context("session directory entry count overflow")?;
+        if limits.is_some_and(|(max_entries, _)| directory_entries > max_entries) {
+            anyhow::bail!("session directory exceeds discovery limit");
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -613,11 +710,49 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
             }
         };
         let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                if diagnostics < 10 {
+                    eprintln!(
+                        "[session] skipped unreadable session type {}: {error}",
+                        path.display()
+                    );
+                }
+                diagnostics += 1;
+                continue;
+            }
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                if diagnostics < 10 {
+                    eprintln!(
+                        "[session] skipped unreadable session metadata {}: {error}",
+                        path.display()
+                    );
+                }
+                diagnostics += 1;
+                continue;
+            }
+        };
+        if metadata.nlink() != 1 {
+            continue;
+        }
         if path.extension().is_none_or(|ext| ext != "jsonl") {
             continue;
         }
         match session_info_with_diagnostics(&path, false) {
-            Ok(Some(info)) => sessions.push(info),
+            Ok(Some(info)) => {
+                sessions.push(info);
+                if limits.is_some_and(|(_, max_sessions)| sessions.len() > max_sessions) {
+                    anyhow::bail!("session count exceeds discovery limit");
+                }
+            }
+
             Ok(None) => {
                 if diagnostics < 10 {
                     eprintln!("[session] skipped invalid session {}", path.display());
@@ -643,6 +778,18 @@ pub fn list_sessions(dir: &Path) -> Result<Vec<SessionInfo>> {
     }
     sort_sessions_newest_first(&mut sessions);
     Ok(sessions)
+}
+
+pub fn delete_session(path: &Path) -> Result<()> {
+    validate_session_file(path)?;
+    fs::remove_file(path).with_context(|| format!("failed to delete {}", path.display()))?;
+    if let Some(dir) = path.parent() {
+        File::open(dir)
+            .with_context(|| format!("failed to open {}", dir.display()))?
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", dir.display()))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -967,7 +1114,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
     let mut compaction_count = 0usize;
     let mut last_compaction_timestamp_ms = None;
 
-    for_each_session_entry_with_diagnostics(path, diagnose, |_, entry| {
+    for_each_session_entry_with_diagnostics(path, diagnose, false, |_, entry| {
         match entry {
             SessionEntry::Header {
                 id: header_id,
@@ -1109,6 +1256,44 @@ fn canonical_display_str(path: &str) -> String {
     canonical_display_path(Path::new(path))
 }
 
+fn validate_opened_session_header(file: &File, path: &Path) -> Result<()> {
+    let mut reader = BufReader::new(file.try_clone()?);
+    let mut bytes = Vec::new();
+    loop {
+        match read_bounded_line(&mut reader, &mut bytes, MAX_JSONL_RECORD_BYTES)? {
+            BoundedLine::Eof => {
+                anyhow::bail!(
+                    "{} is not a Ferrum session: empty or corrupt file",
+                    path.display()
+                )
+            }
+            BoundedLine::TooLong => {
+                anyhow::bail!("{} is not a Ferrum session: invalid header", path.display())
+            }
+            BoundedLine::Line { terminated } => {
+                if !terminated || bytes.iter().all(u8::is_ascii_whitespace) {
+                    if terminated {
+                        continue;
+                    }
+                    anyhow::bail!("{} is not a Ferrum session: invalid header", path.display());
+                }
+                let entry: SessionEntry = serde_json::from_slice(&bytes).map_err(|error| {
+                    anyhow::anyhow!(
+                        "{} is not a Ferrum session: invalid header: {error}",
+                        path.display()
+                    )
+                })?;
+                return match entry {
+                    SessionEntry::Header { .. } => Ok(()),
+                    _ => {
+                        anyhow::bail!("{} is not a Ferrum session: missing header", path.display())
+                    }
+                };
+            }
+        }
+    }
+}
+
 fn validate_session_file(path: &Path) -> Result<()> {
     let mut first = None;
     for_each_session_entry(path, |_, entry| {
@@ -1178,12 +1363,22 @@ fn tighten_dir_permissions(path: &Path) {
     }
 }
 
-fn tighten_file_permissions(path: &Path) {
-    if let Ok(metadata) = fs::metadata(path) {
+fn validate_opened_session_file(file: &File, path: &Path) -> Result<()> {
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("failed to inspect {}", path.display()))?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        anyhow::bail!("unsafe session file identity: {}", path.display());
+    }
+    Ok(())
+}
+
+fn tighten_open_file_permissions(file: &File) {
+    if let Ok(metadata) = file.metadata() {
         let mut permissions = metadata.permissions();
         if permissions.mode() & 0o177 != 0 {
             permissions.set_mode(0o600);
-            let _ = fs::set_permissions(path, permissions);
+            let _ = file.set_permissions(permissions);
         }
     }
 }
@@ -1425,6 +1620,53 @@ mod tests {
     }
 
     #[test]
+    fn bounded_session_discovery_enforces_entry_and_session_limits() {
+        let temp = tempfile::tempdir().unwrap();
+        for _ in 0..2 {
+            JsonlSession::create(
+                temp.path().to_path_buf(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        assert!(list_sessions_bounded(temp.path(), 1, 10).is_err());
+        assert!(list_sessions_bounded(temp.path(), 10, 1).is_err());
+        assert_eq!(list_sessions_bounded(temp.path(), 10, 2).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn session_discovery_and_open_reject_alias_files() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let original = session.path().clone();
+        drop(session);
+        let symlink_path = temp.path().join("symlink.jsonl");
+        symlink(&original, &symlink_path).unwrap();
+        assert!(JsonlSession::open(symlink_path).is_err());
+
+        let hardlink_path = temp.path().join("hardlink.jsonl");
+        std::fs::hard_link(&original, &hardlink_path).unwrap();
+        assert!(JsonlSession::open(hardlink_path).is_err());
+        assert!(list_sessions(temp.path()).unwrap().is_empty());
+    }
+
+    #[test]
     fn compaction_replaces_prior_messages_when_loading() {
         let temp = tempfile::tempdir().unwrap();
         let mut session = JsonlSession::create(
@@ -1461,6 +1703,52 @@ mod tests {
                 .iter()
                 .any(|message| message.text_content() == "old context")
         );
+    }
+
+    #[test]
+    fn bounded_history_load_replays_visible_messages_and_enforces_limits() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        session
+            .append_message(&Message::text(Role::User, "old context"))
+            .unwrap();
+        session.append_compaction("summary checkpoint").unwrap();
+        session
+            .append_message(&Message::text(Role::Assistant, "new context"))
+            .unwrap();
+
+        let messages = load_visible_history_messages_bounded(session.path(), 4, 64 * 1024).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text_content(), "new context");
+        assert!(load_visible_history_messages_bounded(session.path(), 3, 64 * 1024).is_err());
+        assert!(load_visible_history_messages_bounded(session.path(), 4, 1).is_err());
+
+        use std::io::Write;
+        writeln!(session.file, "{{not json").unwrap();
+        assert!(load_visible_history_messages_bounded(session.path(), 5, 64 * 1024).is_err());
+
+        let mut incomplete = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        incomplete.file.write_all(b"{").unwrap();
+        incomplete.file.flush().unwrap();
+        assert!(validate_session_history_bounded(incomplete.path(), 2, 64 * 1024).is_err());
     }
 
     #[test]

@@ -2,20 +2,27 @@ use crate::{
     agent::{
         AgentSession,
         events::{AgentEvent, AgentEventSink, TurnCancellation, TurnOptions, TurnOutcome},
+        messages::{ContentBlock as FerrumContentBlock, Role as FerrumRole},
+        restore_session_preferences,
     },
     config::Config,
-    terminal_text,
+    session, terminal_text,
     text_truncate::truncate_to_max_bytes,
 };
 use agent_client_protocol_schema::{
     ProtocolVersion,
     v1::{
         AGENT_METHOD_NAMES, AgentCapabilities, CLIENT_METHOD_NAMES, CancelNotification,
-        ContentBlock, ContentChunk, Error as AcpError, Implementation, InitializeRequest,
-        InitializeResponse, JsonRpcMessage, NewSessionRequest, NewSessionResponse, Notification,
-        PromptCapabilities, PromptRequest, PromptResponse, RequestId, Response,
-        SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
-        ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind, UsageUpdate,
+        CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
+        DeleteSessionRequest, DeleteSessionResponse, Error as AcpError, Implementation,
+        InitializeRequest, InitializeResponse, JsonRpcMessage, ListSessionsRequest,
+        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
+        NewSessionResponse, Notification, PromptCapabilities, PromptRequest, PromptResponse,
+        RequestId, Response, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+        SessionCloseCapabilities, SessionDeleteCapabilities, SessionInfo as AcpSessionInfo,
+        SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
+        StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
+        ToolCallUpdateFields, ToolKind, UsageUpdate,
     },
 };
 use anyhow::{Context, Result};
@@ -32,7 +39,6 @@ use tokio::{
     task::JoinSet,
 };
 use url::Url;
-use uuid::Uuid;
 
 const MAX_INPUT_LINE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_DECODED_REQUEST_BYTES: usize = 30 * 1024 * 1024;
@@ -41,6 +47,16 @@ const MAX_DECODED_REQUEST_DEPTH: usize = 64;
 const MAX_OUTPUT_LINE_BYTES: usize = 256 * 1024;
 const MAX_OUTPUT_QUEUE: usize = 128;
 const MAX_SESSIONS: usize = 16;
+const MAX_LIST_PAGE: usize = 100;
+const MAX_SESSION_DIRECTORY_ENTRIES: usize = 20_000;
+const MAX_PERSISTED_SESSIONS: usize = 10_000;
+const MAX_LIST_PAYLOAD_BYTES: usize = 128 * 1024;
+const MAX_SESSION_CWD_BYTES: usize = 16 * 1024;
+const MAX_SESSION_TITLE_BYTES: usize = 1024;
+const MAX_LOAD_ENTRIES: usize = 10_000;
+const MAX_LOAD_HISTORY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_REPLAY_IMAGE_BASE64_BYTES: usize = 128 * 1024;
+const MAX_REPLAY_IMAGE_MIME_BYTES: usize = 256;
 const MAX_CONCURRENT_TURNS: usize = 4;
 const MAX_PROMPT_TEXT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_RESOURCE_LINKS: usize = 128;
@@ -70,7 +86,17 @@ impl ServerState {
 
 struct SessionEntry {
     agent: AsyncMutex<AgentSession>,
+    config: Config,
     active: Mutex<Option<ActivePrompt>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SessionRestorePolicy {
+    pub thinking: bool,
+    pub safety: bool,
+    pub tools: bool,
+    pub provider: bool,
+    pub model: bool,
 }
 
 #[derive(Clone)]
@@ -100,6 +126,154 @@ impl Output {
             mpsc::error::TrySendError::Closed(_) => anyhow::anyhow!("ACP output closed"),
         })
     }
+}
+
+async fn send_session_update(
+    output: &Output,
+    session_id: &str,
+    update: SessionUpdate,
+) -> Result<()> {
+    let notification = Notification {
+        method: CLIENT_METHOD_NAMES.session_update.into(),
+        params: Some(SessionNotification::new(session_id.to_string(), update)),
+    };
+    output
+        .send(serde_json::to_value(JsonRpcMessage::wrap(notification))?)
+        .await
+}
+
+fn load_session_history(
+    path: &Path,
+) -> std::result::Result<Vec<crate::agent::messages::Message>, AcpError> {
+    session::jsonl::load_visible_history_messages_bounded(
+        path,
+        MAX_LOAD_ENTRIES,
+        MAX_LOAD_HISTORY_BYTES,
+    )
+    .map_err(|_| {
+        AcpError::internal_error().data("session history exceeds load limits or is unreadable")
+    })
+}
+
+fn validate_session_history(path: &Path) -> std::result::Result<(), AcpError> {
+    session::jsonl::validate_session_history_bounded(path, MAX_LOAD_ENTRIES, MAX_LOAD_HISTORY_BYTES)
+        .map_err(|_| {
+            AcpError::internal_error().data("session history exceeds load limits or is unreadable")
+        })
+}
+
+async fn replay_session_history(
+    output: &Output,
+    session_id: &str,
+    messages: Vec<crate::agent::messages::Message>,
+) -> std::result::Result<(), AcpError> {
+    for message in messages {
+        let role = message.role;
+        for block in message.content {
+            let update = match block {
+                FerrumContentBlock::Text { text } => {
+                    let update = match &role {
+                        FerrumRole::User => SessionUpdate::UserMessageChunk,
+                        FerrumRole::Assistant => SessionUpdate::AgentMessageChunk,
+                        FerrumRole::System | FerrumRole::Tool => continue,
+                    };
+                    for chunk in utf8_chunks(&terminal_text::sanitize(&text), MAX_UPDATE_TEXT_BYTES)
+                    {
+                        send_session_update(
+                            output,
+                            session_id,
+                            update(ContentChunk::new(ContentBlock::Text(TextContent::new(
+                                chunk,
+                            )))),
+                        )
+                        .await
+                        .map_err(|_| AcpError::internal_error())?;
+                    }
+                    continue;
+                }
+                FerrumContentBlock::Thinking { text, .. } => {
+                    for chunk in utf8_chunks(&terminal_text::sanitize(&text), MAX_UPDATE_TEXT_BYTES)
+                    {
+                        send_session_update(
+                            output,
+                            session_id,
+                            SessionUpdate::AgentThoughtChunk(ContentChunk::new(
+                                ContentBlock::Text(TextContent::new(chunk)),
+                            )),
+                        )
+                        .await
+                        .map_err(|_| AcpError::internal_error())?;
+                    }
+                    continue;
+                }
+                FerrumContentBlock::ToolUse { id, name, input } => {
+                    let id =
+                        truncate_to_max_bytes(&terminal_text::sanitize(&id), MAX_TOOL_ID_BYTES);
+                    let title = terminal_text::sanitize_title(&name);
+                    let mut call = ToolCall::new(id, title)
+                        .kind(tool_kind(&name))
+                        .status(ToolCallStatus::InProgress);
+                    if let Some(input) = bounded_sanitized_json(input, MAX_TOOL_INPUT_BYTES) {
+                        call = call.raw_input(input);
+                    }
+                    SessionUpdate::ToolCall(call)
+                }
+                FerrumContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
+                    let content = truncate_to_max_bytes(
+                        &terminal_text::sanitize(&content),
+                        MAX_TOOL_CONTENT_BYTES,
+                    );
+                    let fields = ToolCallUpdateFields::new()
+                        .status(if is_error {
+                            ToolCallStatus::Failed
+                        } else {
+                            ToolCallStatus::Completed
+                        })
+                        .content(vec![ToolCallContent::from(ContentBlock::Text(
+                            TextContent::new(content),
+                        ))]);
+                    SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                        truncate_to_max_bytes(
+                            &terminal_text::sanitize(&tool_use_id),
+                            MAX_TOOL_ID_BYTES,
+                        ),
+                        fields,
+                    ))
+                }
+                FerrumContentBlock::Image {
+                    mime_type,
+                    data_base64,
+                    ..
+                } => {
+                    if data_base64.len() > MAX_REPLAY_IMAGE_BASE64_BYTES
+                        || mime_type.len() > MAX_REPLAY_IMAGE_MIME_BYTES
+                    {
+                        continue;
+                    }
+                    let content = ContentBlock::Image(
+                        agent_client_protocol_schema::v1::ImageContent::new(data_base64, mime_type),
+                    );
+                    match &role {
+                        FerrumRole::User => {
+                            SessionUpdate::UserMessageChunk(ContentChunk::new(content))
+                        }
+                        FerrumRole::Assistant => {
+                            SessionUpdate::AgentMessageChunk(ContentChunk::new(content))
+                        }
+                        FerrumRole::System | FerrumRole::Tool => continue,
+                    }
+                }
+            };
+            send_session_update(output, session_id, update)
+                .await
+                .map_err(|_| AcpError::internal_error())?;
+        }
+    }
+    Ok(())
 }
 
 struct AcpEventSink {
@@ -228,7 +402,7 @@ enum BoundedLine {
     Eof,
 }
 
-pub async fn run(config: Config) -> Result<()> {
+pub async fn run(config: Config, restore_policy: SessionRestorePolicy) -> Result<()> {
     let config = Arc::new(config);
     let state = Arc::new(AsyncMutex::new(ServerState::new()));
     let turns = Arc::new(Semaphore::new(MAX_CONCURRENT_TURNS));
@@ -269,6 +443,7 @@ pub async fn run(config: Config) -> Result<()> {
                     Arc::clone(&state),
                     Arc::clone(&turns),
                     output.clone(),
+                    restore_policy,
                     &mut tasks,
                 )
                 .await
@@ -295,6 +470,7 @@ async fn handle_line(
     state: Arc<AsyncMutex<ServerState>>,
     turns: Arc<Semaphore>,
     output: Output,
+    restore_policy: SessionRestorePolicy,
     tasks: &mut JoinSet<()>,
 ) -> Result<()> {
     let value: Value = match serde_json::from_slice(line) {
@@ -402,8 +578,15 @@ async fn handle_line(
             } else {
                 ProtocolVersion::V1
             };
-            let capabilities =
-                AgentCapabilities::new().prompt_capabilities(PromptCapabilities::new().image(true));
+            let session_capabilities = SessionCapabilities::new()
+                .list(SessionListCapabilities::new())
+                .delete(SessionDeleteCapabilities::new())
+                .resume(SessionResumeCapabilities::new())
+                .close(SessionCloseCapabilities::new());
+            let capabilities = AgentCapabilities::new()
+                .load_session(true)
+                .prompt_capabilities(PromptCapabilities::new().image(true))
+                .session_capabilities(session_capabilities);
             let response = InitializeResponse::new(version)
                 .agent_capabilities(capabilities)
                 .agent_info(Implementation::new("ferrum", env!("CARGO_PKG_VERSION")));
@@ -467,9 +650,19 @@ async fn handle_line(
                     return Ok(());
                 }
             };
-            let session_id = Uuid::new_v4().to_string();
+            let session_info = match session::jsonl::session_info(agent.session_path()) {
+                Ok(Some(info)) => info,
+                _ => {
+                    output
+                        .send(error_response(id, AcpError::internal_error())?)
+                        .await?;
+                    return Ok(());
+                }
+            };
+            let session_id = session_info.id;
             let entry = Arc::new(SessionEntry {
                 agent: AsyncMutex::new(agent),
+                config: (*config).clone(),
                 active: Mutex::new(None),
             });
             let mut state = state.lock().await;
@@ -484,6 +677,271 @@ async fn handle_line(
             drop(state);
             output
                 .send(success_response(id, NewSessionResponse::new(session_id))?)
+                .await?;
+        }
+        method if method == AGENT_METHOD_NAMES.session_list => {
+            let request = match parse_params::<ListSessionsRequest>(params) {
+                Ok(request) => request,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let cwd_filter = match request.cwd.as_deref().map(validate_list_cwd).transpose() {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let mut sessions = match session::jsonl::list_sessions_bounded(
+                &config.sessions_dir(),
+                MAX_SESSION_DIRECTORY_ENTRIES,
+                MAX_PERSISTED_SESSIONS,
+            ) {
+                Ok(sessions) => sessions,
+                Err(_) => {
+                    output
+                        .send(error_response(id, AcpError::internal_error())?)
+                        .await?;
+                    return Ok(());
+                }
+            };
+            if let Some(cwd) = cwd_filter {
+                sessions.retain(|info| {
+                    info.cwd
+                        .as_deref()
+                        .is_some_and(|value| Path::new(value) == cwd)
+                });
+            }
+            let sessions = sessions
+                .iter()
+                .filter_map(acp_session_info)
+                .collect::<Vec<_>>();
+            let offset = match parse_list_cursor(request.cursor.as_deref(), sessions.len()) {
+                Ok(offset) => offset,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let (page, end) = session_list_page(&sessions, offset);
+            let mut response = ListSessionsResponse::new(page);
+            if end < sessions.len() {
+                response = response.next_cursor(end.to_string());
+            }
+            output.send(success_response(id, response)?).await?;
+        }
+        method if method == AGENT_METHOD_NAMES.session_load => {
+            let request = match parse_params::<LoadSessionRequest>(params) {
+                Ok(request) => request,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            if let Err(error) = validate_lifecycle_extensions(
+                &request.additional_directories,
+                request.mcp_servers.len(),
+            ) {
+                output.send(error_response(id, error)?).await?;
+                return Ok(());
+            }
+            let requested_session_id = request.session_id.to_string();
+            let session_id = match validate_session_id(&requested_session_id) {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let info = match find_persisted_session(&config, session_id) {
+                Ok(info) => info,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let cwd = match validate_persisted_cwd(&info, &request.cwd) {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let history = match load_session_history(&info.path) {
+                Ok(history) => history,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let entry =
+                match open_persisted_session(&state, &config, &info, cwd, restore_policy).await {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        output.send(error_response(id, error)?).await?;
+                        return Ok(());
+                    }
+                };
+            if let Err(error) = replay_session_history(&output, session_id, history).await {
+                let mut state = state.lock().await;
+                if state
+                    .sessions
+                    .get(session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &entry))
+                {
+                    state.sessions.remove(session_id);
+                }
+                drop(state);
+                output.send(error_response(id, error)?).await?;
+                return Ok(());
+            }
+            output
+                .send(success_response(id, LoadSessionResponse::new())?)
+                .await?;
+        }
+        method if method == AGENT_METHOD_NAMES.session_resume => {
+            let request = match parse_params::<ResumeSessionRequest>(params) {
+                Ok(request) => request,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            if let Err(error) = validate_lifecycle_extensions(
+                &request.additional_directories,
+                request.mcp_servers.len(),
+            ) {
+                output.send(error_response(id, error)?).await?;
+                return Ok(());
+            }
+            let requested_session_id = request.session_id.to_string();
+            let session_id = match validate_session_id(&requested_session_id) {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let info = match find_persisted_session(&config, session_id) {
+                Ok(info) => info,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let cwd = match validate_persisted_cwd(&info, &request.cwd) {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            if let Err(error) = validate_session_history(&info.path) {
+                output.send(error_response(id, error)?).await?;
+                return Ok(());
+            }
+            if let Err(error) =
+                open_persisted_session(&state, &config, &info, cwd, restore_policy).await
+            {
+                output.send(error_response(id, error)?).await?;
+                return Ok(());
+            }
+            output
+                .send(success_response(id, ResumeSessionResponse::new())?)
+                .await?;
+        }
+        method if method == AGENT_METHOD_NAMES.session_close => {
+            let request = match parse_params::<CloseSessionRequest>(params) {
+                Ok(request) => request,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let requested_session_id = request.session_id.to_string();
+            let session_id = match validate_session_id(&requested_session_id) {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let mut server = state.lock().await;
+            let Some(entry) = server.sessions.get(session_id) else {
+                drop(server);
+                output
+                    .send(error_response(id, AcpError::resource_not_found(None))?)
+                    .await?;
+                return Ok(());
+            };
+            if entry
+                .active
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_some()
+            {
+                drop(server);
+                output
+                    .send(error_response(
+                        id,
+                        invalid_state("session prompt is active"),
+                    )?)
+                    .await?;
+                return Ok(());
+            }
+            server.sessions.remove(session_id);
+            drop(server);
+            output
+                .send(success_response(id, CloseSessionResponse::new())?)
+                .await?;
+        }
+        method if method == AGENT_METHOD_NAMES.session_delete => {
+            let request = match parse_params::<DeleteSessionRequest>(params) {
+                Ok(request) => request,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let requested_session_id = request.session_id.to_string();
+            let session_id = match validate_session_id(&requested_session_id) {
+                Ok(session_id) => session_id,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            let server = state.lock().await;
+            if server.sessions.contains_key(session_id) {
+                drop(server);
+                output
+                    .send(error_response(
+                        id,
+                        invalid_state("active sessions must be closed before deletion"),
+                    )?)
+                    .await?;
+                return Ok(());
+            }
+            let info = match find_persisted_session(&config, session_id) {
+                Ok(info) => info,
+                Err(error) => {
+                    drop(server);
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
+            if session::jsonl::delete_session(&info.path).is_err() {
+                drop(server);
+                output
+                    .send(error_response(id, AcpError::internal_error())?)
+                    .await?;
+                return Ok(());
+            }
+            drop(server);
+            output
+                .send(success_response(id, DeleteSessionResponse::new())?)
                 .await?;
         }
         method if method == AGENT_METHOD_NAMES.session_prompt => {
@@ -512,6 +970,7 @@ async fn handle_line(
                     return Ok(());
                 }
             };
+            let cancellation = TurnCancellation::new();
             let entry = {
                 let mut state = state.lock().await;
                 let Some(entry) = state.sessions.get(&session_id).cloned() else {
@@ -531,35 +990,34 @@ async fn handle_line(
                         .await?;
                     return Ok(());
                 }
+                let already_active = {
+                    let mut active = entry
+                        .active
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    if active.is_some() {
+                        true
+                    } else {
+                        *active = Some(ActivePrompt {
+                            request_id: id.clone(),
+                            cancellation: cancellation.clone(),
+                        });
+                        false
+                    }
+                };
+                if already_active {
+                    drop(state);
+                    output
+                        .send(error_response(
+                            id,
+                            invalid_state("session prompt already active"),
+                        )?)
+                        .await?;
+                    return Ok(());
+                }
                 state.active_request_ids.insert(id.clone());
                 entry
             };
-            let cancellation = TurnCancellation::new();
-            let already_active = {
-                let mut active = entry
-                    .active
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                if active.is_some() {
-                    true
-                } else {
-                    *active = Some(ActivePrompt {
-                        request_id: id.clone(),
-                        cancellation: cancellation.clone(),
-                    });
-                    false
-                }
-            };
-            if already_active {
-                state.lock().await.active_request_ids.remove(&id);
-                output
-                    .send(error_response(
-                        id,
-                        invalid_state("session prompt already active"),
-                    )?)
-                    .await?;
-                return Ok(());
-            }
             let permit = match turns.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
@@ -574,7 +1032,6 @@ async fn handle_line(
                 }
             };
             let task_state = Arc::clone(&state);
-            let task_config = Arc::clone(&config);
             let task_output = output.clone();
             tasks.spawn(async move {
                 let _permit = permit;
@@ -582,7 +1039,6 @@ async fn handle_line(
                     &entry,
                     &session_id,
                     prepared,
-                    &task_config,
                     cancellation,
                     task_output.clone(),
                 )
@@ -616,7 +1072,6 @@ async fn run_prompt(
     entry: &SessionEntry,
     session_id: &str,
     prompt: PreparedPrompt,
-    config: &Config,
     cancellation: TurnCancellation,
     output: Output,
 ) -> std::result::Result<TurnOutcome, AcpError> {
@@ -626,11 +1081,15 @@ async fn run_prompt(
             .attach_data_images(prompt.images)
             .map_err(|_| AcpError::invalid_params().data("invalid image prompt content"))?;
     }
-    let mut sink = AcpEventSink::new(session_id.to_string(), output, config.max_context_tokens);
+    let mut sink = AcpEventSink::new(
+        session_id.to_string(),
+        output,
+        entry.config.max_context_tokens,
+    );
     agent
         .run_turn_with_events(
             prompt.text,
-            config,
+            &entry.config,
             TurnOptions::headless(cancellation),
             &mut sink,
         )
@@ -849,6 +1308,161 @@ fn validate_cwd(path: &Path) -> std::result::Result<PathBuf, AcpError> {
         return Err(AcpError::invalid_params().data("cwd must be a directory"));
     }
     Ok(canonical)
+}
+
+fn validate_list_cwd(path: &Path) -> std::result::Result<PathBuf, AcpError> {
+    if !path.is_absolute() {
+        return Err(AcpError::invalid_params().data("cwd must be absolute"));
+    }
+    Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+fn validate_session_id(session_id: &str) -> std::result::Result<&str, AcpError> {
+    if session_id.is_empty()
+        || session_id.len() > MAX_SESSION_ID_BYTES
+        || session_id.starts_with('.')
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(AcpError::invalid_params().data("invalid sessionId"));
+    }
+    Ok(session_id)
+}
+
+fn validate_lifecycle_extensions(
+    additional_directories: &[PathBuf],
+    mcp_server_count: usize,
+) -> std::result::Result<(), AcpError> {
+    if !additional_directories.is_empty() {
+        return Err(AcpError::invalid_params().data("additionalDirectories is not supported"));
+    }
+    if mcp_server_count != 0 {
+        return Err(
+            AcpError::invalid_params().data("client-supplied MCP servers are not supported")
+        );
+    }
+    Ok(())
+}
+
+fn find_persisted_session(
+    config: &Config,
+    session_id: &str,
+) -> std::result::Result<session::jsonl::SessionInfo, AcpError> {
+    validate_session_id(session_id)?;
+    session::jsonl::list_sessions_bounded(
+        &config.sessions_dir(),
+        MAX_SESSION_DIRECTORY_ENTRIES,
+        MAX_PERSISTED_SESSIONS,
+    )
+    .map_err(|_| AcpError::internal_error())?
+    .into_iter()
+    .find(|info| info.id == session_id)
+    .ok_or_else(|| AcpError::resource_not_found(None))
+}
+
+fn validate_persisted_cwd(
+    info: &session::jsonl::SessionInfo,
+    requested_cwd: &Path,
+) -> std::result::Result<PathBuf, AcpError> {
+    let requested_cwd = validate_cwd(requested_cwd)?;
+    let persisted_cwd = info
+        .cwd
+        .as_deref()
+        .map(Path::new)
+        .ok_or_else(|| AcpError::invalid_params().data("session has no persisted cwd"))?;
+    if !persisted_cwd.is_absolute() || persisted_cwd != requested_cwd {
+        return Err(AcpError::invalid_params().data("cwd does not match the persisted session"));
+    }
+    Ok(requested_cwd)
+}
+
+async fn open_persisted_session(
+    state: &Arc<AsyncMutex<ServerState>>,
+    config: &Config,
+    info: &session::jsonl::SessionInfo,
+    cwd: PathBuf,
+    restore_policy: SessionRestorePolicy,
+) -> std::result::Result<Arc<SessionEntry>, AcpError> {
+    let mut server = state.lock().await;
+    if server.sessions.contains_key(&info.id) {
+        return Err(invalid_state("session is already active"));
+    }
+    if server.sessions.len() >= MAX_SESSIONS {
+        return Err(invalid_state("session limit reached"));
+    }
+    let mut session_config = config.clone();
+    restore_session_preferences(
+        &mut session_config,
+        &info.path,
+        restore_policy.thinking,
+        restore_policy.safety,
+        restore_policy.tools,
+        restore_policy.provider,
+        restore_policy.model,
+    )
+    .map_err(|_| AcpError::internal_error())?;
+    let agent = AgentSession::open_session_at_cwd(&session_config, info.path.clone(), cwd)
+        .map_err(|_| AcpError::internal_error())?;
+    let entry = Arc::new(SessionEntry {
+        agent: AsyncMutex::new(agent),
+        config: session_config,
+        active: Mutex::new(None),
+    });
+    server.sessions.insert(info.id.clone(), Arc::clone(&entry));
+    Ok(entry)
+}
+
+fn parse_list_cursor(
+    cursor: Option<&str>,
+    session_count: usize,
+) -> std::result::Result<usize, AcpError> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    if cursor.is_empty() || cursor.len() > 20 || !cursor.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(AcpError::invalid_params().data("invalid session list cursor"));
+    }
+    let offset = cursor
+        .parse::<usize>()
+        .map_err(|_| AcpError::invalid_params().data("invalid session list cursor"))?;
+    if offset > session_count {
+        return Err(AcpError::invalid_params().data("session list cursor is out of range"));
+    }
+    Ok(offset)
+}
+
+fn acp_session_info(info: &session::jsonl::SessionInfo) -> Option<AcpSessionInfo> {
+    validate_session_id(&info.id).ok()?;
+    let cwd_value = info.cwd.as_deref()?;
+    if cwd_value.len() > MAX_SESSION_CWD_BYTES {
+        return None;
+    }
+    let cwd = PathBuf::from(cwd_value);
+    if !cwd.is_absolute() {
+        return None;
+    }
+    let title = truncate_to_max_bytes(
+        &terminal_text::sanitize_title(&info.title),
+        MAX_SESSION_TITLE_BYTES,
+    );
+    Some(AcpSessionInfo::new(info.id.clone(), cwd).title(title))
+}
+
+fn session_list_page(sessions: &[AcpSessionInfo], offset: usize) -> (Vec<AcpSessionInfo>, usize) {
+    let mut page = Vec::new();
+    let mut bytes = 0usize;
+    let mut end = offset;
+    for session in sessions.iter().skip(offset).take(MAX_LIST_PAGE) {
+        let session_bytes = serde_json::to_vec(session).map_or(MAX_LIST_PAYLOAD_BYTES, |v| v.len());
+        if !page.is_empty() && bytes.saturating_add(session_bytes) > MAX_LIST_PAYLOAD_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(session_bytes);
+        page.push(session.clone());
+        end += 1;
+    }
+    (page, end)
 }
 
 fn parse_params<T: DeserializeOwned>(params: Option<Value>) -> std::result::Result<T, AcpError> {
@@ -1147,6 +1761,24 @@ mod tests {
         let chunks = utf8_chunks(&text, 6);
         assert_eq!(chunks.concat(), text);
         assert!(chunks.iter().all(|chunk| chunk.len() <= 6));
+    }
+
+    #[test]
+    fn session_list_cursor_and_page_are_bounded() {
+        assert_eq!(parse_list_cursor(None, 3).unwrap(), 0);
+        assert_eq!(parse_list_cursor(Some("2"), 3).unwrap(), 2);
+        assert!(parse_list_cursor(Some("../1"), 3).is_err());
+        assert!(parse_list_cursor(Some("4"), 3).is_err());
+
+        let sessions = (0..150)
+            .map(|index| AcpSessionInfo::new(format!("session-{index}"), "/tmp"))
+            .collect::<Vec<_>>();
+        let (first, cursor) = session_list_page(&sessions, 0);
+        assert_eq!(first.len(), MAX_LIST_PAGE);
+        assert_eq!(cursor, MAX_LIST_PAGE);
+        let (second, cursor) = session_list_page(&sessions, cursor);
+        assert_eq!(second.len(), 50);
+        assert_eq!(cursor, 150);
     }
 
     #[test]

@@ -748,7 +748,7 @@ pub async fn run_interactive(
     }
 }
 
-fn restore_session_preferences(
+pub(crate) fn restore_session_preferences(
     config: &mut Config,
     path: &Path,
     restore_thinking: bool,
@@ -2000,7 +2000,15 @@ impl AgentSession {
     }
 
     fn open_session(config: &Config, path: PathBuf) -> Result<Self> {
-        Self::open_session_with_preview(config, path, false)
+        Self::open_session_at_cwd(config, path, std::env::current_dir()?)
+    }
+
+    pub(crate) fn open_session_at_cwd(
+        config: &Config,
+        path: PathBuf,
+        cwd: PathBuf,
+    ) -> Result<Self> {
+        Self::open_session_with_preview_at_cwd(config, path, cwd, false)
     }
 
     fn open_session_with_preview(
@@ -2008,7 +2016,21 @@ impl AgentSession {
         path: PathBuf,
         show_preview: bool,
     ) -> Result<Self> {
-        let cwd = std::env::current_dir()?;
+        Self::open_session_with_preview_at_cwd(config, path, std::env::current_dir()?, show_preview)
+    }
+
+    fn open_session_with_preview_at_cwd(
+        config: &Config,
+        path: PathBuf,
+        cwd: PathBuf,
+        show_preview: bool,
+    ) -> Result<Self> {
+        let cwd = cwd
+            .canonicalize()
+            .with_context(|| format!("failed to resolve session cwd {}", cwd.display()))?;
+        if !cwd.is_dir() {
+            anyhow::bail!("session cwd is not a directory: {}", cwd.display());
+        }
         let session = session::JsonlSession::open(path.clone())?;
         let saved_tool_names = session::jsonl::session_info(&path)?.and_then(|info| info.tools);
         let mut messages = session::jsonl::load_messages(&path)?;
@@ -3002,6 +3024,10 @@ impl AgentSession {
             }
             _ => unreachable!("unknown history tool: {name}"),
         }
+    }
+
+    pub(crate) fn session_path(&self) -> &Path {
+        self.session.path()
     }
 
     fn message_count(&self) -> usize {

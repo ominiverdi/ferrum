@@ -60,7 +60,17 @@ async fn run() -> Result<()> {
     if let Some(command) = &args.command {
         match command {
             cli::Command::Acp => {
-                acp::run(config).await?;
+                acp::run(
+                    config,
+                    acp::SessionRestorePolicy {
+                        thinking: args.thinking.is_none(),
+                        safety: args.safety.is_none(),
+                        tools: !tools_overridden,
+                        provider: args.provider.is_none(),
+                        model: args.model.is_none(),
+                    },
+                )
+                .await?;
                 return Ok(());
             }
             cli::Command::Login { provider }

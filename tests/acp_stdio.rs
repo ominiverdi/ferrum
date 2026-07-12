@@ -11,16 +11,30 @@ struct AcpProcess {
     stdin: Option<ChildStdin>,
     stdout: Option<BufReader<ChildStdout>>,
     stderr: ChildStderr,
-    _root: TempDir,
+    _root: Option<TempDir>,
 }
 
 impl AcpProcess {
     fn spawn(cwd: &Path, fake_script: Option<&str>) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let config = root.path().join("config");
-        let data = root.path().join("data");
-        std::fs::create_dir(&config).unwrap();
-        std::fs::create_dir(&data).unwrap();
+        let storage = root.path().to_path_buf();
+        Self::spawn_with_storage(cwd, fake_script, &storage, Some(root))
+    }
+
+    fn spawn_in(cwd: &Path, fake_script: Option<&str>, storage: &Path) -> Self {
+        Self::spawn_with_storage(cwd, fake_script, storage, None)
+    }
+
+    fn spawn_with_storage(
+        cwd: &Path,
+        fake_script: Option<&str>,
+        storage: &Path,
+        root: Option<TempDir>,
+    ) -> Self {
+        let config = storage.join("config");
+        let data = storage.join("data");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_ferrum"));
         command
             .arg("acp")
@@ -86,6 +100,14 @@ impl AcpProcess {
             response["result"]["agentCapabilities"]["promptCapabilities"]["image"],
             true
         );
+        assert_eq!(response["result"]["agentCapabilities"]["loadSession"], true);
+        for capability in ["list", "delete", "resume", "close"] {
+            assert!(
+                response["result"]["agentCapabilities"]["sessionCapabilities"][capability]
+                    .is_object(),
+                "missing session capability {capability}: {response}"
+            );
+        }
     }
 
     fn new_session(&mut self, cwd: &Path) -> String {
@@ -188,6 +210,226 @@ fn acp_stdio_streams_fake_provider_turn() {
     }
     assert_eq!(text, "fake provider response: smoke\n");
     assert!(saw_usage);
+    acp.finish();
+}
+
+#[test]
+fn acp_stdio_persists_lists_loads_resumes_closes_and_deletes_sessions() {
+    let cwd = tempfile::tempdir().unwrap();
+    let other_cwd = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+
+    let session_id = {
+        let mut acp = AcpProcess::spawn_in(cwd.path(), None, storage.path());
+        acp.initialize();
+        let session_id = acp.new_session(cwd.path());
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+            "params": {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": "persisted"}]
+            }
+        }));
+        loop {
+            let message = acp.recv();
+            if message["id"] == 3 {
+                assert_eq!(message["result"]["stopReason"], "end_turn");
+                break;
+            }
+        }
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": 4, "method": "session/close",
+            "params": {"sessionId": session_id}
+        }));
+        assert_eq!(acp.recv()["result"], json!({}));
+        acp.finish();
+        session_id
+    };
+
+    let malformed_id = "malformed-session";
+    let sessions_dir = storage.path().join("data/sessions");
+    let persisted_path = std::fs::read_dir(&sessions_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let persisted = std::fs::read_to_string(persisted_path).unwrap();
+    let header: Value = serde_json::from_str(persisted.lines().next().unwrap()).unwrap();
+    for ambiguous_id in ["ambiguous-one", "ambiguous-two"] {
+        let mut ambiguous_header = header.clone();
+        ambiguous_header["id"] = Value::String(ambiguous_id.to_string());
+        std::fs::write(
+            sessions_dir.join(format!("{ambiguous_id}.jsonl")),
+            format!("{}\n", serde_json::to_string(&ambiguous_header).unwrap()),
+        )
+        .unwrap();
+    }
+    let mut malformed_header = header;
+    malformed_header["id"] = Value::String(malformed_id.to_string());
+    std::fs::write(
+        sessions_dir.join("malformed-session.jsonl"),
+        format!(
+            "{}\n{{not json\n",
+            serde_json::to_string(&malformed_header).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let mut acp = AcpProcess::spawn_in(cwd.path(), None, storage.path());
+    acp.initialize();
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 5, "method": "session/resume",
+        "params": {"sessionId": "ambiguous", "cwd": cwd.path(), "mcpServers": []}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32002);
+    std::fs::remove_file(sessions_dir.join("ambiguous-one.jsonl")).unwrap();
+    std::fs::remove_file(sessions_dir.join("ambiguous-two.jsonl")).unwrap();
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 9, "method": "session/load",
+        "params": {"sessionId": malformed_id, "cwd": cwd.path(), "mcpServers": []}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32603);
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 8, "method": "session/prompt",
+        "params": {"sessionId": malformed_id, "prompt": [{"type": "text", "text": "x"}]}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32002);
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 6, "method": "session/resume",
+        "params": {"sessionId": malformed_id, "cwd": cwd.path(), "mcpServers": []}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32603);
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 7, "method": "session/delete",
+        "params": {"sessionId": malformed_id}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 10, "method": "session/list", "params": {}
+    }));
+    let listed = acp.recv();
+    let sessions = listed["result"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["sessionId"], session_id);
+    assert_eq!(sessions[0]["cwd"], cwd.path().to_string_lossy().as_ref());
+    assert_eq!(sessions[0]["title"], "persisted");
+    assert!(listed["result"].get("nextCursor").is_none());
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 11, "method": "session/load",
+        "params": {"sessionId": session_id, "cwd": cwd.path(), "mcpServers": []}
+    }));
+    let mut replayed_user = String::new();
+    let mut replayed_agent = String::new();
+    loop {
+        let message = acp.recv();
+        if message["id"] == 11 {
+            assert_eq!(message["result"], json!({}));
+            break;
+        }
+        assert_eq!(message["method"], "session/update");
+        assert_eq!(message["params"]["sessionId"], session_id);
+        match message["params"]["update"]["sessionUpdate"].as_str() {
+            Some("user_message_chunk") => replayed_user.push_str(
+                message["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap(),
+            ),
+            Some("agent_message_chunk") => replayed_agent.push_str(
+                message["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap(),
+            ),
+            other => panic!("unexpected replay update: {other:?}"),
+        }
+    }
+    assert_eq!(replayed_user, "persisted");
+    assert_eq!(replayed_agent, "fake provider response: persisted\n");
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 12, "method": "session/delete",
+        "params": {"sessionId": session_id}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32602);
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 13, "method": "session/close",
+        "params": {"sessionId": session_id}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 14, "method": "session/resume",
+        "params": {"sessionId": session_id, "cwd": other_cwd.path(), "mcpServers": []}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32602);
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 15, "method": "session/resume",
+        "params": {"sessionId": session_id, "cwd": cwd.path(), "mcpServers": []}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 16, "method": "session/close",
+        "params": {"sessionId": session_id}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 17, "method": "session/delete",
+        "params": {"sessionId": "../sessions"}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32602);
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 18, "method": "session/delete",
+        "params": {"sessionId": session_id}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 19, "method": "session/list", "params": {}
+    }));
+    assert_eq!(acp.recv()["result"]["sessions"], json!([]));
+    acp.finish();
+}
+
+#[test]
+fn acp_stdio_can_resume_a_print_mode_session() {
+    let cwd = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let config = storage.path().join("config");
+    let data = storage.path().join("data");
+    std::fs::create_dir(&config).unwrap();
+    std::fs::create_dir(&data).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ferrum"))
+        .arg("-p")
+        .arg("from print mode")
+        .current_dir(cwd.path())
+        .env("FERRUM_CONFIG_DIR", &config)
+        .env("FERRUM_DATA_DIR", &data)
+        .env("FERRUM_OFFLINE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "print mode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut acp = AcpProcess::spawn_in(cwd.path(), None, storage.path());
+    acp.initialize();
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 20, "method": "session/list",
+        "params": {"cwd": cwd.path()}
+    }));
+    let listed = acp.recv();
+    let sessions = listed["result"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["title"], "from print mode");
+    let session_id = sessions[0]["sessionId"].as_str().unwrap();
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 21, "method": "session/resume",
+        "params": {"sessionId": session_id, "cwd": cwd.path(), "mcpServers": []}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
     acp.finish();
 }
 
@@ -318,6 +560,13 @@ fn acp_stdio_rejects_duplicate_prompt_and_cancels_active_turn() {
     let duplicate = acp.recv();
     assert_eq!(duplicate["id"], 4);
     assert_eq!(duplicate["error"]["code"], -32602);
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 5, "method": "session/close",
+        "params": {"sessionId": session_id}
+    }));
+    let busy = acp.recv();
+    assert_eq!(busy["id"], 5);
+    assert_eq!(busy["error"]["code"], -32602);
     acp.send(json!({
         "jsonrpc": "2.0", "method": "session/cancel", "params": {"sessionId": session_id}
     }));

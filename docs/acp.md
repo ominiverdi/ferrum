@@ -14,6 +14,11 @@ Supported:
 
 - `initialize`
 - `session/new`
+- `session/list`
+- `session/load`
+- `session/resume`
+- `session/close`
+- `session/delete`
 - `session/prompt`
 - `session/cancel` notification
 - `$/cancel_request` notification
@@ -26,11 +31,13 @@ Supported:
 
 Prompt responses use the official `stopReason` values. Text, resource-link, and validated image prompt blocks are accepted. Audio and embedded-resource prompt blocks are not advertised or accepted.
 
-Each ACP session owns an independent Ferrum agent session and canonical absolute working directory. Ferrum's configured safety tier, tool selection, writable roots, credential protection, shell guards, containment, and other tier-independent checks remain in force.
+Session IDs are Ferrum's durable JSONL session IDs. Listing is newest-first, supports absolute `cwd` filtering and opaque cursor pagination, and returns bounded pages. Loading replays persisted user, agent, thought, and tool updates before returning; resuming activates the same history without replay. The request `cwd` must match the persisted canonical directory. Session provider, model, thinking, safety, and tool metadata follows the normal Ferrum restoration rules; explicit ACP-process CLI overrides remain authoritative. Active sessions must be idle before close and must be closed before deletion.
+
+Each active ACP session owns an independent Ferrum agent session and canonical absolute working directory. Ferrum's configured safety tier, tool selection, writable roots, credential protection, shell guards, containment, and other tier-independent checks remain in force.
 
 ## Resource bounds
 
-The stdio adapter bounds input lines, decoded request structure, prompt text, output lines, queued output, session count, active turns, tool update content, and tool input metadata. Output writes are serialized. EOF cancels active turns before session and child-process cleanup.
+The stdio adapter bounds input lines, decoded request structure, prompt text, output lines, queued output, active session count, listed-session page size and payload, loaded-history entries and bytes, active turns, tool update content, and tool input metadata. Output writes are serialized. EOF cancels active turns before session and child-process cleanup.
 
 ## Deliberate baseline limits
 
