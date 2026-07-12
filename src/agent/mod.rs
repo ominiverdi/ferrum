@@ -5581,7 +5581,7 @@ mod context_pressure_tests {
             env: Vec::new(),
             enabled: true,
         }];
-        let state = AgentState::new(&config).unwrap();
+        let state = AgentSession::new(&config).unwrap();
 
         assert!(state.mcp.is_none());
         state.print_mcp_status(&config).unwrap();
@@ -5760,7 +5760,7 @@ mod context_pressure_tests {
     fn new_command_starts_a_fresh_session() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
-        let mut state = AgentState::new(&config).unwrap();
+        let mut state = AgentSession::new(&config).unwrap();
         let previous = state.session.path().clone();
 
         let action = handle_command("/new", &mut config, &mut state).unwrap();
