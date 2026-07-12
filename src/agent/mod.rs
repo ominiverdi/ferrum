@@ -1429,6 +1429,26 @@ mod live_render_tests {
     }
 
     #[test]
+    fn streamed_thinking_chunks_preserve_blank_lines() {
+        let mut output = Vec::new();
+        let mut render = LiveRenderState::new(ColorMode::Off, ColorPalette::default());
+        for delta in ["**Planning verification**", "\n\n", "**Checking results**"] {
+            render
+                .render_event_to(
+                    providers::StreamEvent::ThinkingDelta(delta.to_string()),
+                    &mut output,
+                )
+                .unwrap();
+        }
+        render.finish_to(&mut output).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "thinking:\r\n**Planning verification**\r\n\r\n**Checking results**\r\n"
+        );
+    }
+
+    #[test]
     fn thinking_and_answer_sections_use_single_terminal_newlines() {
         let mut output = Vec::new();
         let mut render = LiveRenderState::new(ColorMode::Off, ColorPalette::default());

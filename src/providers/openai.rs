@@ -1664,6 +1664,7 @@ struct ResponsesSseParser {
     thinking: String,
     thinking_comment_open: bool,
     thinking_comment_pending: String,
+    thinking_summary_part: Option<(u64, u64)>,
     thinking_signature: Option<String>,
     usage: Option<TokenUsage>,
     tool_calls: Vec<(String, String, String, String)>,
@@ -1734,16 +1735,17 @@ impl ResponsesSseParser {
         if let Some(event_type) = event_type {
             emit_codex_usage_metrics_if_enabled(event_type, &event);
             if event_type.contains("reasoning") && event_type.contains("summary") {
+                let summary_part = reasoning_summary_part(&event);
                 if let Some(delta) = optional_string_field(&event, "delta", event_type)? {
-                    self.append_thinking_delta(delta, &mut on_event)?;
+                    self.append_thinking_delta(delta, summary_part.as_ref(), &mut on_event)?;
                 }
                 if let Some(text) = optional_string_field(&event, "text", event_type)? {
-                    self.absorb_completed_thinking(text, &mut on_event)?;
+                    self.absorb_completed_thinking(text, summary_part.as_ref(), &mut on_event)?;
                 }
             } else if event_type == "response.reasoning_text.delta"
                 && let Some(delta) = optional_string_field(&event, "delta", event_type)?
             {
-                self.append_thinking_delta(delta, &mut on_event)?;
+                self.append_thinking_delta(delta, None, &mut on_event)?;
             }
         }
         match event_type {
@@ -1887,10 +1889,15 @@ impl ResponsesSseParser {
     fn append_thinking_delta(
         &mut self,
         text: &str,
+        summary_part: Option<&(u64, u64)>,
         on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     ) -> Result<()> {
         validate_field(text, MAX_PROVIDER_THINKING_BYTES, "reasoning delta")?;
         let text = self.sanitize_thinking_delta(text);
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.start_thinking_summary_part(summary_part, on_event)?;
         let delta = self.merge_thinking_text(&text);
         validate_field(
             &self.thinking,
@@ -1909,10 +1916,15 @@ impl ResponsesSseParser {
     fn absorb_completed_thinking(
         &mut self,
         text: &str,
+        summary_part: Option<&(u64, u64)>,
         on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
     ) -> Result<()> {
         validate_field(text, MAX_PROVIDER_THINKING_BYTES, "completed reasoning")?;
         let text = sanitize_thinking_text(text);
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.start_thinking_summary_part(summary_part, on_event)?;
         let delta = self.merge_thinking_text(&text);
         validate_field(
             &self.thinking,
@@ -1923,6 +1935,43 @@ impl ResponsesSseParser {
             && let Some(on_event) = on_event.as_deref_mut()
         {
             on_event(StreamEvent::ThinkingDelta(delta));
+        }
+        Ok(())
+    }
+
+    fn start_thinking_summary_part(
+        &mut self,
+        summary_part: Option<&(u64, u64)>,
+        on_event: &mut Option<&mut (dyn FnMut(StreamEvent) + Send)>,
+    ) -> Result<()> {
+        let Some(summary_part) = summary_part else {
+            return Ok(());
+        };
+        if self.thinking_summary_part.as_ref() == Some(summary_part) {
+            return Ok(());
+        }
+        let changed = self.thinking_summary_part.is_some();
+        self.thinking_summary_part = Some(*summary_part);
+        if !changed || self.thinking.is_empty() {
+            return Ok(());
+        }
+        let separator = if self.thinking.ends_with("\n\n") {
+            ""
+        } else if self.thinking.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        push_bounded(
+            &mut self.thinking,
+            separator,
+            MAX_PROVIDER_THINKING_BYTES,
+            "reasoning text",
+        )?;
+        if !separator.is_empty()
+            && let Some(on_event) = on_event.as_deref_mut()
+        {
+            on_event(StreamEvent::ThinkingDelta(separator.to_string()));
         }
         Ok(())
     }
@@ -2186,6 +2235,12 @@ impl ResponsesSseParser {
 
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn reasoning_summary_part(event: &serde_json::Value) -> Option<(u64, u64)> {
+    let output_index = event.get("output_index")?.as_u64()?;
+    let summary_index = event.get("summary_index")?.as_u64()?;
+    Some((output_index, summary_index))
 }
 
 fn partial_comment_prefix_suffix_len(text: &str) -> usize {
@@ -3152,6 +3207,41 @@ mod tests {
             1
         );
         assert!(!rendered.contains("<!--"));
+    }
+
+    #[test]
+    fn codex_reasoning_summary_parts_keep_streamed_newlines() {
+        let sse = concat!(
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"delta\":\"**Planning verification**\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":0,\"text\":\"**Planning verification**\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":1,\"delta\":\"**Checking results**\"}\n\n",
+            "data: {\"type\":\"response.reasoning_summary_text.done\",\"item_id\":\"rs_1\",\"output_index\":0,\"summary_index\":1,\"text\":\"**Checking results**\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"text\":\"**Planning verification**\"},{\"text\":\"**Checking results**\"}]}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut events = Vec::new();
+        let mut parser = ResponsesSseParser::default();
+        for line in sse.lines() {
+            parser
+                .process_line(line, Some(&mut |event| events.push(event)))
+                .unwrap();
+        }
+        let message = parser.finish().unwrap().message;
+        let rendered = events
+            .iter()
+            .filter_map(|event| match event {
+                StreamEvent::ThinkingDelta(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+
+        assert_eq!(
+            rendered,
+            "**Planning verification**\n\n**Checking results**"
+        );
+        assert_eq!(message.thinking_text(), rendered);
     }
 
     #[test]
