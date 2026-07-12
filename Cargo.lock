@@ -533,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "ferrum"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "agent-client-protocol-schema",
  "anyhow",
