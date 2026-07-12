@@ -74,8 +74,57 @@ Supplying an executable definition authorizes Ferrum to start that process. Expo
 
 The stdio adapter bounds input lines, decoded request structure, prompt text, output lines, queued output, active session count, listed-session page size and payload, loaded-history entries and bytes, active turns, tool update content, tool input metadata, client MCP server counts, names, commands, arguments, environment entries, and aggregate environment bytes. MCP transport framing, pagination, tool counts, names, descriptions, schemas, stderr, and output are independently bounded. Output writes are serialized. EOF cancels active turns before session and child-process cleanup.
 
+## Interoperability
+
+Ferrum's supported integration surface is the stable ACP v1 stdio subset documented on this page. It was validated locally against independent clients, not only Ferrum's protocol tests:
+
+| Client | Version | Validated behavior |
+|---|---:|---|
+| `acpx` | 0.12.0 | initialization with filesystem/terminal capabilities, session creation, text streaming, and normal turn completion |
+| Official Python `agent-client-protocol` SDK | 0.11.0 | initialization without optional filesystem/terminal services; create, text and validated PNG prompts, list, resume after process restart, load/replay, close, and streaming updates |
+| `opencode-chat-bridge` reference checkout | 0.4.0 plus the backend-neutral adapter patch | executable/argument selection, omitted optional client capabilities, text and thought streaming, command discovery/execution, tool activity/result mapping, cancellation, process restart, durable session resume/delete, isolated per-thread working directories, and restrictive Ferrum workspace policy |
+
+Ferrum's black-box stdio suite additionally covers successful and failed tool updates, client-supplied stdio MCP, permissions, concurrent isolated sessions, cancellation, abrupt output disconnect, malformed requests, incompatible protocol versions, bounded session persistence, and stdout protocol cleanliness.
+
+The bridge profile used for validation placed `.ferrum/config.toml`, `AGENTS.md`, and an allowlisted skill in each deterministic thread workspace. It allowed native artifact reads/writes only inside that workspace and disabled `bash`, `wait`, and MCP. A tool-using turn created `generated/bridge-marker.txt`; an attempted absolute write outside the workspace was rejected. These native roots are policy boundaries, not an operating-system sandbox.
+
+### `acpx` example
+
+```bash
+acpx --agent "/usr/bin/ferrum acp" --cwd "$PWD" exec "summarize this project"
+```
+
+A persistent `acpx` session can use its normal `sessions new`, prompt, close, and reconnect flows. Ferrum configuration, credentials, safety, and project policy still come from Ferrum; ACP client capability declarations do not grant tools or bypass policy.
+
+### Chat bridge example
+
+A backend-neutral bridge configuration can launch Ferrum without parsing terminal output:
+
+```json
+{
+  "sessionStorePath": "./state/acp-sessions.json",
+  "acp": {
+    "command": "/usr/bin/ferrum",
+    "args": ["acp"],
+    "backendId": "ferrum",
+    "profileDir": "./profiles/ferrum-chat"
+  }
+}
+```
+
+Use a deterministic canonical `cwd` per chat thread. Persist the ACP `sessionId` together with that `cwd` and a stable backend identity; send `session/resume` after bridge restart and `session/close` followed by `session/delete` for `/clear`. Keep generated and downloaded files under the thread workspace. Do not put provider credentials in the copied profile or bridge session store.
+
+### Troubleshooting
+
+- Keep stdout reserved for newline-delimited ACP JSON-RPC. Inspect sanitized diagnostics on stderr.
+- Supply an absolute existing `cwd`; loading or resuming with a different canonical directory is rejected.
+- Re-send client MCP definitions on load/resume. They are intentionally not persisted by Ferrum.
+- If a project policy unexpectedly removes a capability, inspect `/session` and the nearest `.ferrum/config.toml`; project restrictions override broader CLI/global choices.
+- A client advertising filesystem or terminal support does not make Ferrum call those services. Ferrum currently performs authorized work through its own tools.
+- Protocol versions below v1 are rejected. A newer client version negotiates stable v1.
+
 ## Deliberate baseline limits
 
-This milestone does not accept additional workspace directories. HTTP/SSE MCP remains tracked separately. Unsupported ACP methods return JSON-RPC `method not found` errors.
+Ferrum does not accept additional workspace directories. HTTP/SSE MCP, ACP authentication, client filesystem/terminal delegation, session modes/config options, plans, and elicitation are not advertised. Unsupported ACP methods return JSON-RPC `method not found` errors.
 
-Do not describe or register this build as fully ACP-compatible until the interoperability suite is complete.
+This is a bounded stable ACP v1 compatibility claim, not support for every current or unstable ACP extension.
