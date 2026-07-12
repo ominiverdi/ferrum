@@ -1,7 +1,8 @@
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
-    path::Path,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
 };
 use tempfile::TempDir;
@@ -42,6 +43,7 @@ impl AcpProcess {
             .env("FERRUM_CONFIG_DIR", config)
             .env("FERRUM_DATA_DIR", data)
             .env("FERRUM_OFFLINE", "1")
+            .env("OPENAI_API_KEY", "provider-sentinel-must-not-reach-mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -101,6 +103,10 @@ impl AcpProcess {
             true
         );
         assert_eq!(response["result"]["agentCapabilities"]["loadSession"], true);
+        assert_eq!(
+            response["result"]["agentCapabilities"]["mcpCapabilities"],
+            json!({"http": false, "sse": false})
+        );
         for capability in ["list", "delete", "resume", "close"] {
             assert!(
                 response["result"]["agentCapabilities"]["sessionCapabilities"][capability]
@@ -171,6 +177,272 @@ impl Drop for AcpProcess {
             let _ = self.child.wait();
         }
     }
+}
+
+fn write_fake_mcp_server(root: &Path) -> (PathBuf, PathBuf) {
+    let script = root.join("fake-mcp.py");
+    let pid_file = root.join("fake-mcp.pid");
+    std::fs::write(
+        &script,
+        r#"#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"client-test","version":"1"}}})
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo","description":"echo test","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}]}})
+    elif method == "tools/call":
+        result = {
+            "text": message["params"]["arguments"].get("text"),
+            "explicitValuePresent": os.environ.get("ACP_EXPLICIT") == "allowed",
+            "providerCredentialPresent": "OPENAI_API_KEY" in os.environ,
+        }
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":json.dumps(result, separators=(",", ":"))}]}})
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&script, permissions).unwrap();
+    (script, pid_file)
+}
+
+fn wait_for_process_exit(pid: u32) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    true
+}
+
+fn run_mcp_echo_prompt(acp: &mut AcpProcess, id: u64, session_id: &str) -> (String, String) {
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": id, "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "call dynamic MCP"}]
+        }
+    }));
+    let mut tool_output = String::new();
+    let mut assistant_text = String::new();
+    loop {
+        let message = acp.recv();
+        if message["id"] == id {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+        let update = &message["params"]["update"];
+        match update["sessionUpdate"].as_str() {
+            Some("tool_call_update") => {
+                if let Some(text) = update["content"][0]["content"]["text"].as_str() {
+                    tool_output.push_str(text);
+                }
+            }
+            Some("agent_message_chunk") => {
+                assistant_text.push_str(update["content"]["text"].as_str().unwrap());
+            }
+            _ => {}
+        }
+    }
+    (tool_output, assistant_text)
+}
+
+#[test]
+fn acp_stdio_runs_client_stdio_mcp_with_isolated_environment_and_cleanup() {
+    let cwd = tempfile::tempdir().unwrap();
+    let (script, pid_file) = write_fake_mcp_server(cwd.path());
+    let mut acp = AcpProcess::spawn(cwd.path(), Some("mcp_echo"));
+    acp.initialize();
+    let mcp_server = || {
+        json!({
+            "name": "client",
+            "command": script,
+            "args": [pid_file],
+            "env": [{"name": "ACP_EXPLICIT", "value": "allowed"}]
+        })
+    };
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": {"cwd": cwd.path(), "mcpServers": [mcp_server()]}
+    }));
+    let created = acp.recv();
+    assert_eq!(created["id"], 2, "session setup failed: {created}");
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_string();
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+
+    let (tool_output, assistant_text) = run_mcp_echo_prompt(&mut acp, 3, &session_id);
+    assert!(tool_output.contains("\"explicitValuePresent\":true"));
+    assert!(tool_output.contains("\"providerCredentialPresent\":false"));
+    assert!(assistant_text.contains("MCP result:"));
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 4, "method": "session/close",
+        "params": {"sessionId": session_id}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+    assert!(
+        wait_for_process_exit(pid),
+        "MCP child survived session close"
+    );
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 5, "method": "session/resume",
+        "params": {
+            "sessionId": session_id,
+            "cwd": cwd.path(),
+            "mcpServers": [mcp_server()]
+        }
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+    let resumed_pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    let (resumed_output, _) = run_mcp_echo_prompt(&mut acp, 6, &session_id);
+    assert!(resumed_output.contains("\"providerCredentialPresent\":false"));
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 7, "method": "session/close",
+        "params": {"sessionId": session_id}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+    assert!(
+        wait_for_process_exit(resumed_pid),
+        "resumed MCP child survived session close"
+    );
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 8, "method": "session/load",
+        "params": {
+            "sessionId": session_id,
+            "cwd": cwd.path(),
+            "mcpServers": [mcp_server()]
+        }
+    }));
+    loop {
+        let message = acp.recv();
+        if message["id"] == 8 {
+            assert_eq!(message["result"], json!({}));
+            break;
+        }
+        assert_eq!(message["method"], "session/update");
+    }
+    let loaded_pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    let (loaded_output, _) = run_mcp_echo_prompt(&mut acp, 9, &session_id);
+    assert!(loaded_output.contains("\"explicitValuePresent\":true"));
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 10, "method": "session/close",
+        "params": {"sessionId": session_id}
+    }));
+    assert_eq!(acp.recv()["result"], json!({}));
+    assert!(
+        wait_for_process_exit(loaded_pid),
+        "loaded MCP child survived session close"
+    );
+    acp.finish();
+}
+
+#[test]
+fn acp_stdio_disconnect_cleans_up_client_mcp_processes() {
+    let cwd = tempfile::tempdir().unwrap();
+    let (script, pid_file) = write_fake_mcp_server(cwd.path());
+    let mut acp = AcpProcess::spawn(cwd.path(), None);
+    acp.initialize();
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": {"cwd": cwd.path(), "mcpServers": [{
+            "name": "client", "command": script, "args": [pid_file], "env": []
+        }]}
+    }));
+    assert!(acp.recv()["result"]["sessionId"].is_string());
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    acp.finish();
+    assert!(
+        wait_for_process_exit(pid),
+        "MCP child survived ACP disconnect"
+    );
+}
+
+#[test]
+fn acp_stdio_rejects_invalid_or_failed_client_mcp_setup_without_secret_echo() {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn(cwd.path(), None);
+    acp.initialize();
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 2, "method": "session/new",
+        "params": {"cwd": cwd.path(), "mcpServers": [{
+            "name": "relative", "command": "python3", "args": [], "env": []
+        }]}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32602);
+
+    let secret = "dynamic-environment-secret-must-not-be-echoed";
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/new",
+        "params": {"cwd": cwd.path(), "mcpServers": [{
+            "name": "missing", "command": "/definitely/missing/ferrum-mcp", "args": [],
+            "env": [{"name": "SECRET_VALUE", "value": secret}]
+        }]}
+    }));
+    let failed = acp.recv();
+    assert_eq!(failed["error"]["code"], -32603);
+    assert!(!failed.to_string().contains(secret));
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 4, "method": "session/list", "params": {}
+    }));
+    assert_eq!(acp.recv()["result"]["sessions"], json!([]));
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 5, "method": "session/new",
+        "params": {"cwd": cwd.path(), "mcpServers": [
+            {"name": "same", "command": "/bin/true", "args": [], "env": []},
+            {"name": "same", "command": "/bin/true", "args": [], "env": []}
+        ]}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32602);
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 6, "method": "session/new",
+        "params": {"cwd": cwd.path(), "mcpServers": [{
+            "name": "x".repeat(257), "command": "/bin/true", "args": [], "env": []
+        }]}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32602);
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 7, "method": "session/new",
+        "params": {"cwd": cwd.path(), "mcpServers": [{
+            "type": "http", "name": "remote", "url": "https://example.invalid", "headers": []
+        }]}
+    }));
+    assert_eq!(acp.recv()["error"]["code"], -32602);
+    acp.finish();
 }
 
 #[test]

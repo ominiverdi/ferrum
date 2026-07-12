@@ -6,7 +6,7 @@ use crate::{
         restore_session_preferences,
     },
     config::Config,
-    session, terminal_text,
+    mcp, session, terminal_text,
     text_truncate::truncate_to_max_bytes,
 };
 use agent_client_protocol_schema::{
@@ -16,13 +16,14 @@ use agent_client_protocol_schema::{
         CloseSessionRequest, CloseSessionResponse, ContentBlock, ContentChunk,
         DeleteSessionRequest, DeleteSessionResponse, Error as AcpError, Implementation,
         InitializeRequest, InitializeResponse, JsonRpcMessage, ListSessionsRequest,
-        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, NewSessionRequest,
-        NewSessionResponse, Notification, PromptCapabilities, PromptRequest, PromptResponse,
-        RequestId, Response, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-        SessionCloseCapabilities, SessionDeleteCapabilities, SessionInfo as AcpSessionInfo,
-        SessionListCapabilities, SessionNotification, SessionResumeCapabilities, SessionUpdate,
-        StopReason, TextContent, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate,
-        ToolCallUpdateFields, ToolKind, UsageUpdate,
+        ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer,
+        NewSessionRequest, NewSessionResponse, Notification, PromptCapabilities, PromptRequest,
+        PromptResponse, RequestId, Response, ResumeSessionRequest, ResumeSessionResponse,
+        SessionCapabilities, SessionCloseCapabilities, SessionDeleteCapabilities,
+        SessionInfo as AcpSessionInfo, SessionListCapabilities, SessionNotification,
+        SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, ToolCall,
+        ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+        UsageUpdate,
     },
 };
 use anyhow::{Context, Result};
@@ -30,6 +31,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
+    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -67,10 +69,21 @@ const MAX_UPDATE_TEXT_BYTES: usize = 48 * 1024;
 const MAX_TOOL_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_TOOL_INPUT_BYTES: usize = 64 * 1024;
 const MAX_TOOL_ID_BYTES: usize = 16 * 1024;
+const MAX_CLIENT_MCP_SERVERS: usize = 16;
+const MAX_CLIENT_MCP_SERVER_NAME_BYTES: usize = 256;
+const MAX_CLIENT_MCP_COMMAND_BYTES: usize = 16 * 1024;
+const MAX_CLIENT_MCP_ARGS: usize = 256;
+const MAX_CLIENT_MCP_ARG_BYTES: usize = 16 * 1024;
+const MAX_CLIENT_MCP_ARG_TOTAL_BYTES: usize = 128 * 1024;
+const MAX_CLIENT_MCP_ENV: usize = 128;
+const MAX_CLIENT_MCP_ENV_NAME_BYTES: usize = 256;
+const MAX_CLIENT_MCP_ENV_VALUE_BYTES: usize = 64 * 1024;
+const MAX_CLIENT_MCP_ENV_TOTAL_BYTES: usize = 256 * 1024;
 
 struct ServerState {
     initialized: bool,
     sessions: HashMap<String, Arc<SessionEntry>>,
+    opening_session_ids: HashSet<String>,
     active_request_ids: HashSet<RequestId>,
 }
 
@@ -79,6 +92,7 @@ impl ServerState {
         Self {
             initialized: false,
             sessions: HashMap::new(),
+            opening_session_ids: HashSet::new(),
             active_request_ids: HashSet::new(),
         }
     }
@@ -586,6 +600,7 @@ async fn handle_line(
             let capabilities = AgentCapabilities::new()
                 .load_session(true)
                 .prompt_capabilities(PromptCapabilities::new().image(true))
+                .mcp_capabilities(McpCapabilities::new().http(false).sse(false))
                 .session_capabilities(session_capabilities);
             let response = InitializeResponse::new(version)
                 .agent_capabilities(capabilities)
@@ -614,16 +629,14 @@ async fn handle_line(
                     .await?;
                 return Ok(());
             }
-            if !request.mcp_servers.is_empty() {
-                output
-                    .send(error_response(
-                        id,
-                        AcpError::invalid_params()
-                            .data("client-supplied MCP servers are not supported yet"),
-                    )?)
-                    .await?;
-                return Ok(());
-            }
+            let client_mcp_servers = match validate_client_mcp_servers(request.mcp_servers, &config)
+            {
+                Ok(servers) => servers,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
             let cwd = match validate_cwd(&request.cwd) {
                 Ok(cwd) => cwd,
                 Err(error) => {
@@ -633,7 +646,12 @@ async fn handle_line(
             };
             {
                 let state = state.lock().await;
-                if state.sessions.len() >= MAX_SESSIONS {
+                if state
+                    .sessions
+                    .len()
+                    .saturating_add(state.opening_session_ids.len())
+                    >= MAX_SESSIONS
+                {
                     drop(state);
                     output
                         .send(error_response(id, invalid_state("session limit reached"))?)
@@ -641,7 +659,7 @@ async fn handle_line(
                     return Ok(());
                 }
             }
-            let agent = match AgentSession::new_at_cwd(&config, cwd) {
+            let mut agent = match AgentSession::new_at_cwd(&config, cwd) {
                 Ok(agent) => agent,
                 Err(_) => {
                     output
@@ -650,9 +668,24 @@ async fn handle_line(
                     return Ok(());
                 }
             };
+            if let Err(_error) = agent.start_client_mcp(&config, client_mcp_servers).await {
+                let path = agent.session_path().to_path_buf();
+                drop(agent);
+                let _ = session::jsonl::delete_session(&path);
+                output
+                    .send(error_response(
+                        id,
+                        AcpError::internal_error().data("MCP session setup failed"),
+                    )?)
+                    .await?;
+                return Ok(());
+            }
             let session_info = match session::jsonl::session_info(agent.session_path()) {
                 Ok(Some(info)) => info,
                 _ => {
+                    let path = agent.session_path().to_path_buf();
+                    drop(agent);
+                    let _ = session::jsonl::delete_session(&path);
                     output
                         .send(error_response(id, AcpError::internal_error())?)
                         .await?;
@@ -660,14 +693,22 @@ async fn handle_line(
                 }
             };
             let session_id = session_info.id;
+            let session_path = agent.session_path().to_path_buf();
             let entry = Arc::new(SessionEntry {
                 agent: AsyncMutex::new(agent),
                 config: (*config).clone(),
                 active: Mutex::new(None),
             });
             let mut state = state.lock().await;
-            if state.sessions.len() >= MAX_SESSIONS {
+            if state
+                .sessions
+                .len()
+                .saturating_add(state.opening_session_ids.len())
+                >= MAX_SESSIONS
+            {
                 drop(state);
+                drop(entry);
+                let _ = session::jsonl::delete_session(&session_path);
                 output
                     .send(error_response(id, invalid_state("session limit reached"))?)
                     .await?;
@@ -740,13 +781,18 @@ async fn handle_line(
                     return Ok(());
                 }
             };
-            if let Err(error) = validate_lifecycle_extensions(
-                &request.additional_directories,
-                request.mcp_servers.len(),
-            ) {
+            if let Err(error) = validate_additional_directories(&request.additional_directories) {
                 output.send(error_response(id, error)?).await?;
                 return Ok(());
             }
+            let client_mcp_servers = match validate_client_mcp_servers(request.mcp_servers, &config)
+            {
+                Ok(servers) => servers,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
             let requested_session_id = request.session_id.to_string();
             let session_id = match validate_session_id(&requested_session_id) {
                 Ok(session_id) => session_id,
@@ -776,14 +822,22 @@ async fn handle_line(
                     return Ok(());
                 }
             };
-            let entry =
-                match open_persisted_session(&state, &config, &info, cwd, restore_policy).await {
-                    Ok(entry) => entry,
-                    Err(error) => {
-                        output.send(error_response(id, error)?).await?;
-                        return Ok(());
-                    }
-                };
+            let entry = match open_persisted_session(
+                &state,
+                &config,
+                &info,
+                cwd,
+                restore_policy,
+                client_mcp_servers,
+            )
+            .await
+            {
+                Ok(entry) => entry,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
             if let Err(error) = replay_session_history(&output, session_id, history).await {
                 let mut state = state.lock().await;
                 if state
@@ -809,13 +863,18 @@ async fn handle_line(
                     return Ok(());
                 }
             };
-            if let Err(error) = validate_lifecycle_extensions(
-                &request.additional_directories,
-                request.mcp_servers.len(),
-            ) {
+            if let Err(error) = validate_additional_directories(&request.additional_directories) {
                 output.send(error_response(id, error)?).await?;
                 return Ok(());
             }
+            let client_mcp_servers = match validate_client_mcp_servers(request.mcp_servers, &config)
+            {
+                Ok(servers) => servers,
+                Err(error) => {
+                    output.send(error_response(id, error)?).await?;
+                    return Ok(());
+                }
+            };
             let requested_session_id = request.session_id.to_string();
             let session_id = match validate_session_id(&requested_session_id) {
                 Ok(session_id) => session_id,
@@ -842,8 +901,15 @@ async fn handle_line(
                 output.send(error_response(id, error)?).await?;
                 return Ok(());
             }
-            if let Err(error) =
-                open_persisted_session(&state, &config, &info, cwd, restore_policy).await
+            if let Err(error) = open_persisted_session(
+                &state,
+                &config,
+                &info,
+                cwd,
+                restore_policy,
+                client_mcp_servers,
+            )
+            .await
             {
                 output.send(error_response(id, error)?).await?;
                 return Ok(());
@@ -869,6 +935,13 @@ async fn handle_line(
                 }
             };
             let mut server = state.lock().await;
+            if server.opening_session_ids.contains(session_id) {
+                drop(server);
+                output
+                    .send(error_response(id, invalid_state("session is opening"))?)
+                    .await?;
+                return Ok(());
+            }
             let Some(entry) = server.sessions.get(session_id) else {
                 drop(server);
                 output
@@ -891,8 +964,9 @@ async fn handle_line(
                     .await?;
                 return Ok(());
             }
-            server.sessions.remove(session_id);
+            let removed = server.sessions.remove(session_id);
             drop(server);
+            drop(removed);
             output
                 .send(success_response(id, CloseSessionResponse::new())?)
                 .await?;
@@ -914,7 +988,9 @@ async fn handle_line(
                 }
             };
             let server = state.lock().await;
-            if server.sessions.contains_key(session_id) {
+            if server.sessions.contains_key(session_id)
+                || server.opening_session_ids.contains(session_id)
+            {
                 drop(server);
                 output
                     .send(error_response(
@@ -1330,19 +1406,112 @@ fn validate_session_id(session_id: &str) -> std::result::Result<&str, AcpError> 
     Ok(session_id)
 }
 
-fn validate_lifecycle_extensions(
+fn validate_additional_directories(
     additional_directories: &[PathBuf],
-    mcp_server_count: usize,
 ) -> std::result::Result<(), AcpError> {
     if !additional_directories.is_empty() {
         return Err(AcpError::invalid_params().data("additionalDirectories is not supported"));
     }
-    if mcp_server_count != 0 {
-        return Err(
-            AcpError::invalid_params().data("client-supplied MCP servers are not supported")
-        );
-    }
     Ok(())
+}
+
+fn validate_client_mcp_servers(
+    servers: Vec<McpServer>,
+    config: &Config,
+) -> std::result::Result<Vec<mcp::ClientMcpServer>, AcpError> {
+    if servers.len() > MAX_CLIENT_MCP_SERVERS {
+        return Err(AcpError::invalid_params().data("too many MCP servers"));
+    }
+    if !servers.is_empty() && !config.mcp_enabled {
+        return Err(AcpError::invalid_params().data("MCP is disabled by Ferrum configuration"));
+    }
+
+    let mut names = HashSet::new();
+    let mut validated = Vec::with_capacity(servers.len());
+    for server in servers {
+        let server = match server {
+            McpServer::Stdio(server) => server,
+            McpServer::Http(_) | McpServer::Sse(_) => {
+                return Err(
+                    AcpError::invalid_params().data("remote MCP transport is not supported")
+                );
+            }
+            _ => {
+                return Err(AcpError::invalid_params().data("unsupported MCP transport"));
+            }
+        };
+        if server.name.is_empty()
+            || server.name.len() > MAX_CLIENT_MCP_SERVER_NAME_BYTES
+            || server.name.chars().any(char::is_control)
+        {
+            return Err(AcpError::invalid_params().data("invalid MCP server name"));
+        }
+        if !names.insert(server.name.clone()) {
+            return Err(AcpError::invalid_params().data("duplicate MCP server name"));
+        }
+        let command_bytes = server.command.as_os_str().as_bytes();
+        if !server.command.is_absolute()
+            || command_bytes.is_empty()
+            || command_bytes.len() > MAX_CLIENT_MCP_COMMAND_BYTES
+            || command_bytes.contains(&0)
+        {
+            return Err(AcpError::invalid_params().data("invalid MCP server command"));
+        }
+        if server.args.len() > MAX_CLIENT_MCP_ARGS {
+            return Err(AcpError::invalid_params().data("too many MCP server arguments"));
+        }
+        let mut argument_bytes = 0usize;
+        for argument in &server.args {
+            argument_bytes = argument_bytes.saturating_add(argument.len());
+            if argument.len() > MAX_CLIENT_MCP_ARG_BYTES || argument.contains('\0') {
+                return Err(AcpError::invalid_params().data("invalid MCP server argument"));
+            }
+        }
+        if argument_bytes > MAX_CLIENT_MCP_ARG_TOTAL_BYTES {
+            return Err(AcpError::invalid_params().data("MCP server arguments are too large"));
+        }
+        if server.env.len() > MAX_CLIENT_MCP_ENV {
+            return Err(AcpError::invalid_params().data("too many MCP environment variables"));
+        }
+        let mut environment_names = HashSet::new();
+        let mut environment_bytes = 0usize;
+        let mut environment = Vec::with_capacity(server.env.len());
+        for variable in server.env {
+            if variable.name.is_empty()
+                || variable.name.len() > MAX_CLIENT_MCP_ENV_NAME_BYTES
+                || !variable
+                    .name
+                    .bytes()
+                    .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+                || !environment_names.insert(variable.name.clone())
+            {
+                return Err(
+                    AcpError::invalid_params().data("invalid MCP environment variable name")
+                );
+            }
+            environment_bytes = environment_bytes
+                .saturating_add(variable.name.len())
+                .saturating_add(variable.value.len());
+            if variable.value.len() > MAX_CLIENT_MCP_ENV_VALUE_BYTES
+                || variable.value.contains('\0')
+            {
+                return Err(
+                    AcpError::invalid_params().data("invalid MCP environment variable value")
+                );
+            }
+            environment.push((variable.name, variable.value));
+        }
+        if environment_bytes > MAX_CLIENT_MCP_ENV_TOTAL_BYTES {
+            return Err(AcpError::invalid_params().data("MCP environment is too large"));
+        }
+        validated.push(mcp::ClientMcpServer {
+            name: server.name,
+            command: server.command,
+            args: server.args,
+            env: environment,
+        });
+    }
+    Ok(validated)
 }
 
 fn find_persisted_session(
@@ -1383,32 +1552,56 @@ async fn open_persisted_session(
     info: &session::jsonl::SessionInfo,
     cwd: PathBuf,
     restore_policy: SessionRestorePolicy,
+    client_mcp_servers: Vec<mcp::ClientMcpServer>,
 ) -> std::result::Result<Arc<SessionEntry>, AcpError> {
+    {
+        let mut server = state.lock().await;
+        if server.sessions.contains_key(&info.id) || server.opening_session_ids.contains(&info.id) {
+            return Err(invalid_state("session is already active or opening"));
+        }
+        if server
+            .sessions
+            .len()
+            .saturating_add(server.opening_session_ids.len())
+            >= MAX_SESSIONS
+        {
+            return Err(invalid_state("session limit reached"));
+        }
+        server.opening_session_ids.insert(info.id.clone());
+    }
+
+    let setup = async {
+        let mut session_config = config.clone();
+        restore_session_preferences(
+            &mut session_config,
+            &info.path,
+            restore_policy.thinking,
+            restore_policy.safety,
+            restore_policy.tools,
+            restore_policy.provider,
+            restore_policy.model,
+        )
+        .map_err(|_| AcpError::internal_error())?;
+        let mut agent = AgentSession::open_session_at_cwd(&session_config, info.path.clone(), cwd)
+            .map_err(|_| AcpError::internal_error())?;
+        agent
+            .start_client_mcp(&session_config, client_mcp_servers)
+            .await
+            .map_err(|_| AcpError::internal_error().data("MCP session setup failed"))?;
+        Ok::<_, AcpError>(Arc::new(SessionEntry {
+            agent: AsyncMutex::new(agent),
+            config: session_config,
+            active: Mutex::new(None),
+        }))
+    }
+    .await;
+
     let mut server = state.lock().await;
+    server.opening_session_ids.remove(&info.id);
+    let entry = setup?;
     if server.sessions.contains_key(&info.id) {
         return Err(invalid_state("session is already active"));
     }
-    if server.sessions.len() >= MAX_SESSIONS {
-        return Err(invalid_state("session limit reached"));
-    }
-    let mut session_config = config.clone();
-    restore_session_preferences(
-        &mut session_config,
-        &info.path,
-        restore_policy.thinking,
-        restore_policy.safety,
-        restore_policy.tools,
-        restore_policy.provider,
-        restore_policy.model,
-    )
-    .map_err(|_| AcpError::internal_error())?;
-    let agent = AgentSession::open_session_at_cwd(&session_config, info.path.clone(), cwd)
-        .map_err(|_| AcpError::internal_error())?;
-    let entry = Arc::new(SessionEntry {
-        agent: AsyncMutex::new(agent),
-        config: session_config,
-        active: Mutex::new(None),
-    });
     server.sessions.insert(info.id.clone(), Arc::clone(&entry));
     Ok(entry)
 }

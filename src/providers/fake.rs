@@ -172,7 +172,40 @@ fn scripted_response(script: &str, messages: &[Message]) -> Message {
         "mixed_write_read" => mixed_write_read_response(messages),
         "edit_preview" => edit_preview_response(messages),
         "history_search_read" => history_search_read_response(messages),
+        "mcp_echo" => mcp_echo_response(messages),
         _ => Message::text(Role::Assistant, format!("unknown fake script: {script}\n")),
+    }
+}
+
+fn mcp_echo_response(messages: &[Message]) -> Message {
+    let mut result = None;
+    for message in messages.iter().rev() {
+        if matches!(message.role, Role::User) {
+            break;
+        }
+        result = message.content.iter().find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } if tool_use_id == "fake-mcp-echo" => Some(content.clone()),
+            _ => None,
+        });
+        if result.is_some() {
+            break;
+        }
+    }
+    if let Some(result) = result {
+        return Message::text(Role::Assistant, format!("MCP result: {result}\n"));
+    }
+    Message {
+        role: Role::Assistant,
+        content: vec![ContentBlock::ToolUse {
+            id: "fake-mcp-echo".to_string(),
+            name: "mcp__client__echo".to_string(),
+            input: serde_json::json!({"text": "hello"}),
+        }],
+        usage: None,
     }
 }
 

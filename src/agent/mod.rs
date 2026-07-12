@@ -2651,6 +2651,25 @@ impl AgentSession {
         Ok(())
     }
 
+    pub(crate) async fn start_client_mcp(
+        &mut self,
+        config: &Config,
+        client_servers: Vec<mcp::ClientMcpServer>,
+    ) -> Result<()> {
+        if client_servers.is_empty() {
+            return Ok(());
+        }
+        if !self.mcp_enabled {
+            anyhow::bail!("MCP is disabled by Ferrum configuration");
+        }
+        let local_servers = active_mcp_servers(config);
+        self.mcp = Some(
+            mcp::McpManager::start_session_at_cwd(&local_servers, client_servers, &self.cwd)
+                .await?,
+        );
+        Ok(())
+    }
+
     async fn ensure_mcp(&mut self, config: &Config) -> Result<()> {
         let servers = active_mcp_servers(config);
         if self.mcp_enabled && self.mcp.is_none() && !servers.is_empty() {
@@ -6159,6 +6178,25 @@ mod context_pressure_tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|result| result.aborted));
         assert!(results.iter().all(|result| result.is_error));
+    }
+
+    #[tokio::test]
+    async fn client_mcp_respects_disabled_process_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.mcp_enabled = false;
+        let mut session = AgentSession::new_at_cwd(&config, temp.path().to_path_buf()).unwrap();
+        let server = crate::mcp::ClientMcpServer {
+            name: "client".to_string(),
+            command: std::path::PathBuf::from("/bin/true"),
+            args: Vec::new(),
+            env: Vec::new(),
+        };
+        let error = session
+            .start_client_mcp(&config, vec![server])
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("disabled"));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     env, io,
     os::unix::process::CommandExt,
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         Arc,
@@ -34,6 +34,8 @@ use transport::McpTransport;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MAX_MCP_OUTPUT_CHARS: usize = 20_000;
+const MAX_MCP_SERVER_NAME_CHARS: usize = 512;
+const MAX_MCP_TOOL_NAME_CHARS: usize = 512;
 const MAX_MCP_DESCRIPTION_CHARS: usize = 2_000;
 const MAX_MCP_SCHEMA_BYTES: usize = 8_000;
 const MAX_MCP_TOOL_PAGES: usize = 100;
@@ -97,6 +99,43 @@ impl DiagnosticRing {
 #[error("MCP tool returned error: {0}")]
 struct McpToolError(String);
 
+pub(crate) struct ClientMcpServer {
+    pub name: String,
+    pub command: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+struct McpLaunchConfig {
+    name: String,
+    command: PathBuf,
+    args: Vec<String>,
+    environment: McpLaunchEnvironment,
+    required: bool,
+}
+
+enum McpLaunchEnvironment {
+    InheritedAllowlist(Vec<String>),
+    Explicit(Vec<(String, String)>),
+}
+
+impl McpLaunchConfig {
+    fn redact_text(&self, text: &str) -> String {
+        let McpLaunchEnvironment::Explicit(variables) = &self.environment else {
+            return text.to_string();
+        };
+        let mut secrets = variables
+            .iter()
+            .map(|(_, value)| value)
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        secrets.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        secrets.dedup();
+        redact_secrets(text, &secrets)
+    }
+}
+
 pub struct McpManager {
     servers: Vec<McpServer>,
     tools: Vec<ToolDefinition>,
@@ -105,61 +144,110 @@ pub struct McpManager {
 
 impl McpManager {
     pub async fn start_at_cwd(configs: &[McpServerConfig], cwd: &Path) -> Result<Self> {
+        let configs = local_launch_configs(configs);
+        Self::start_launch_configs(&configs, cwd).await
+    }
+
+    pub(crate) async fn start_session_at_cwd(
+        local_configs: &[McpServerConfig],
+        client_servers: Vec<ClientMcpServer>,
+        cwd: &Path,
+    ) -> Result<Self> {
+        let mut configs = local_launch_configs(local_configs);
+        configs.extend(client_servers.into_iter().map(|server| McpLaunchConfig {
+            name: server.name,
+            command: server.command,
+            args: server.args,
+            environment: McpLaunchEnvironment::Explicit(server.env),
+            required: true,
+        }));
+        Self::start_launch_configs(&configs, cwd).await
+    }
+
+    async fn start_launch_configs(configs: &[McpLaunchConfig], cwd: &Path) -> Result<Self> {
+        let mut names = HashSet::new();
+        for config in configs {
+            if !names.insert(config.name.as_str()) {
+                anyhow::bail!("duplicate MCP server name");
+            }
+        }
+
+        let started_servers = join_all(configs.iter().map(|server_config| async move {
+            let mut server = match timeout(
+                MCP_START_TIMEOUT,
+                McpServer::start_launch(server_config, cwd),
+            )
+            .await
+            {
+                Ok(Ok(server)) => server,
+                Ok(Err(error)) if server_config.required => {
+                    return Err(error.context("failed to start required MCP server"));
+                }
+                Ok(Err(error)) => {
+                    eprintln!("[mcp] failed to start `{}`: {error}", server_config.name);
+                    return Ok(None);
+                }
+                Err(_) if server_config.required => {
+                    anyhow::bail!("timed out starting required MCP server");
+                }
+                Err(_) => {
+                    eprintln!("[mcp] timed out starting `{}`", server_config.name);
+                    return Ok(None);
+                }
+            };
+            let listed_tools = match timeout(MCP_REQUEST_TIMEOUT, server.list_tools()).await {
+                Ok(Ok(tools)) => tools,
+                Ok(Err(error)) if server_config.required => {
+                    return Err(error.context("failed to list tools for required MCP server"));
+                }
+                Ok(Err(error)) => {
+                    eprintln!(
+                        "[mcp] failed to list tools for `{}`: {error}",
+                        server_config.name
+                    );
+                    return Ok(None);
+                }
+                Err(_) if server_config.required => {
+                    anyhow::bail!("timed out listing tools for required MCP server");
+                }
+                Err(_) => {
+                    eprintln!("[mcp] timed out listing tools for `{}`", server_config.name);
+                    return Ok(None);
+                }
+            };
+            Ok(Some((server_config, server, listed_tools)))
+        }))
+        .await;
+
         let mut servers = Vec::new();
         let mut tools = Vec::new();
         let mut tool_routes = HashMap::new();
-
-        let started_servers = join_all(configs.iter().filter(|server| server.enabled).map(
-            |server_config| async move {
-                let mut server =
-                    match timeout(MCP_START_TIMEOUT, McpServer::start(server_config, cwd)).await {
-                        Ok(Ok(server)) => server,
-                        Ok(Err(error)) => {
-                            eprintln!("[mcp] failed to start `{}`: {error}", server_config.name);
-                            return None;
-                        }
-                        Err(_) => {
-                            eprintln!("[mcp] timed out starting `{}`", server_config.name);
-                            return None;
-                        }
-                    };
-                let listed_tools = match timeout(MCP_REQUEST_TIMEOUT, server.list_tools()).await {
-                    Ok(Ok(tools)) => tools,
-                    Ok(Err(error)) => {
-                        eprintln!(
-                            "[mcp] failed to list tools for `{}`: {error}",
-                            server_config.name
-                        );
-                        return None;
-                    }
-                    Err(_) => {
-                        eprintln!("[mcp] timed out listing tools for `{}`", server_config.name);
-                        return None;
-                    }
-                };
-                Some((server_config, server, listed_tools))
-            },
-        ))
-        .await;
-
-        for (server_config, server, listed_tools) in started_servers.into_iter().flatten() {
+        for result in started_servers {
+            let Some((server_config, server, listed_tools)) = result? else {
+                continue;
+            };
+            let display_server_name = server.redact_text(&server_config.name);
+            validate_mcp_server_display_name(&display_server_name)?;
             let server_index = servers.len();
-            for tool in listed_tools {
-                let exposed_name = exposed_tool_name(&server_config.name, &tool.name);
+            for mut tool in listed_tools {
+                let display_tool_name = server.redact_text(&tool.name);
+                validate_mcp_tool_name(&display_tool_name)?;
+                let exposed_name = exposed_tool_name(&display_server_name, &display_tool_name);
                 let route = (server_index, tool.name.clone());
-                if let Some((_existing_server_index, existing_tool_name)) =
-                    tool_routes.insert(exposed_name.clone(), route)
-                {
-                    anyhow::bail!(
-                        "MCP tool name collision after sanitization: {exposed_name} maps to both `{existing_tool_name}` and `{}`",
-                        tool.name
-                    );
+                if tool_routes.insert(exposed_name.clone(), route).is_some() {
+                    anyhow::bail!("MCP tool name collision after sanitization: {exposed_name}");
+                }
+                if let Some(description) = &mut tool.description {
+                    *description = server.redact_text(description);
+                }
+                if let Some(schema) = &mut tool.input_schema {
+                    server.redact_json(schema);
                 }
                 tools.push(ToolDefinition {
                     name: exposed_name,
                     description: bounded_tool_description(
-                        &tool.name,
-                        &server_config.name,
+                        &display_tool_name,
+                        &display_server_name,
                         tool.description.as_deref().unwrap_or_default(),
                     ),
                     input_schema: bounded_input_schema(
@@ -210,10 +298,21 @@ struct McpServer {
     cgroup: Option<CgroupV2>,
     next_id: u64,
     diagnostics: DiagnosticRing,
+    explicit_secrets: Vec<String>,
 }
 
 impl McpServer {
+    #[cfg(test)]
     async fn start(config: &McpServerConfig, cwd: &Path) -> Result<Self> {
+        let launch = local_launch_configs(std::slice::from_ref(config))
+            .pop()
+            .context("test MCP server config is disabled")?;
+        Self::start_launch(&launch, cwd).await
+    }
+
+    async fn start_launch(config: &McpLaunchConfig, cwd: &Path) -> Result<Self> {
+        let display_name = config.redact_text(&config.name);
+        validate_mcp_server_display_name(&display_name)?;
         let mut command = Command::new(&config.command);
         command
             .args(&config.args)
@@ -223,9 +322,31 @@ impl McpServer {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .env_clear();
-        for name in mcp_environment_names(&config.env)? {
+        for name in MCP_BASE_ENVIRONMENT {
             if let Some(value) = env::var_os(name) {
                 command.env(name, value);
+            }
+        }
+        match &config.environment {
+            McpLaunchEnvironment::InheritedAllowlist(names) => {
+                for name in mcp_environment_names(names)? {
+                    if let Some(value) = env::var_os(name) {
+                        command.env(name, value);
+                    }
+                }
+            }
+            McpLaunchEnvironment::Explicit(variables) => {
+                let mut seen = HashSet::new();
+                for (name, value) in variables {
+                    validate_environment_name(name)?;
+                    if !seen.insert(name.as_str()) {
+                        anyhow::bail!("duplicate MCP environment variable name `{name}`");
+                    }
+                    if value.contains('\0') {
+                        anyhow::bail!("MCP environment variable value contains NUL");
+                    }
+                    command.env(name, value);
+                }
             }
         }
         command.as_std_mut().process_group(0);
@@ -236,15 +357,14 @@ impl McpServer {
             }
             Err(error) => {
                 eprintln!(
-                    "[mcp] cgroup-v2 containment unavailable for `{}`; using process-group fallback: {error:#}",
-                    config.name
+                    "[mcp] cgroup-v2 containment unavailable for `{display_name}`; using process-group fallback: {error:#}"
                 );
                 None
             }
         };
         let mut child = command
             .spawn()
-            .with_context(|| format!("failed to start MCP server `{}`", config.name))?;
+            .with_context(|| format!("failed to start MCP server `{display_name}`"))?;
         let process_group = child
             .id()
             .and_then(|pid| i32::try_from(pid).ok())
@@ -261,6 +381,17 @@ impl McpServer {
         if let Some(stderr) = child.stderr.take() {
             collect_stderr(stderr, diagnostics.clone());
         }
+        let mut explicit_secrets = match &config.environment {
+            McpLaunchEnvironment::Explicit(variables) => variables
+                .iter()
+                .map(|(_, value)| value)
+                .filter(|value| !value.is_empty())
+                .cloned()
+                .collect::<Vec<_>>(),
+            McpLaunchEnvironment::InheritedAllowlist(_) => Vec::new(),
+        };
+        explicit_secrets.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        explicit_secrets.dedup();
         let mut server = Self {
             transport: McpTransport::start(stdin, stdout, diagnostics.clone()),
             child,
@@ -268,10 +399,12 @@ impl McpServer {
             cgroup,
             next_id: 1,
             diagnostics,
+            explicit_secrets,
         };
         if let Err(error) = server.initialize().await {
             let context = server.diagnostics.context().await;
-            anyhow::bail!("{error}{context}");
+            let message = server.redact_error(&format!("{error}{context}"));
+            anyhow::bail!("{message}");
         }
         Ok(server)
     }
@@ -325,6 +458,7 @@ impl McpServer {
             let page: McpToolsListResult =
                 serde_json::from_value(value).context("failed to parse MCP tools/list response")?;
             for tool in page.tools {
+                validate_mcp_tool_name(&tool.name)?;
                 if seen_tool_names.insert(tool.name.clone()) {
                     if tools.len() >= MAX_MCP_TOOLS {
                         anyhow::bail!("MCP tools/list exceeded {MAX_MCP_TOOLS} tools");
@@ -355,6 +489,7 @@ impl McpServer {
         if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
             anyhow::bail!("aborted");
         }
+        let display_name = self.redact_text(name);
         let id = self.allocate_id()?;
         let message = json!({
             "jsonrpc": "2.0",
@@ -373,7 +508,9 @@ impl McpServer {
         )
         .await;
         let value = match result {
-            Ok(result) => result?,
+            Ok(result) => {
+                result.map_err(|error| anyhow::anyhow!(self.redact_error(&error.to_string())))?
+            }
             Err(WaitError::Cancelled) => {
                 self.transport.abandon(id).await;
                 if queued.load(Ordering::Acquire) {
@@ -389,13 +526,30 @@ impl McpServer {
                 if queued.load(Ordering::Acquire) {
                     self.cancel_request(id, "MCP tool call timed out").await;
                     anyhow::bail!(
-                        "MCP tool `{name}` timed out after dispatch; side-effect outcome is indeterminate"
+                        "MCP tool `{display_name}` timed out after dispatch; side-effect outcome is indeterminate"
                     );
                 }
-                anyhow::bail!("MCP tool `{name}` timed out before dispatch");
+                anyhow::bail!("MCP tool `{display_name}` timed out before dispatch");
             }
         };
-        mcp_tool_result_to_output(&value)
+        let output = mcp_tool_result_to_output(&value)
+            .map_err(|error| anyhow::anyhow!(self.redact_error(&error.to_string())))?;
+        Ok(truncate_chars(
+            &self.redact_text(&output),
+            MAX_MCP_OUTPUT_CHARS,
+        ))
+    }
+
+    fn redact_error(&self, text: &str) -> String {
+        truncate_chars(&self.redact_text(text), MCP_DIAGNOSTIC_CHARS)
+    }
+
+    fn redact_text(&self, text: &str) -> String {
+        redact_secrets(text, &self.explicit_secrets)
+    }
+
+    fn redact_json(&self, value: &mut Value) {
+        redact_json_secrets(value, &self.explicit_secrets);
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -407,7 +561,10 @@ impl McpServer {
             "params": params,
         });
         let queued = AtomicBool::new(false);
-        self.transport.request(id, method, &message, &queued).await
+        self.transport
+            .request(id, method, &message, &queued)
+            .await
+            .map_err(|error| anyhow::anyhow!(self.redact_error(&error.to_string())))
     }
 
     fn allocate_id(&mut self) -> Result<u64> {
@@ -486,6 +643,70 @@ impl Drop for McpServer {
             eprintln!("[mcp] failed to kill direct MCP child: {error}");
         }
     }
+}
+
+fn validate_mcp_server_display_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.chars().count() > MAX_MCP_SERVER_NAME_CHARS
+        || name.chars().any(char::is_control)
+    {
+        anyhow::bail!("invalid MCP server name");
+    }
+    Ok(())
+}
+
+fn validate_mcp_tool_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.chars().count() > MAX_MCP_TOOL_NAME_CHARS
+        || name.chars().any(char::is_control)
+    {
+        anyhow::bail!("MCP tools/list returned an invalid tool name");
+    }
+    Ok(())
+}
+
+fn redact_secrets(text: &str, secrets: &[String]) -> String {
+    secrets.iter().fold(text.to_string(), |redacted, secret| {
+        redacted.replace(secret, "[redacted]")
+    })
+}
+
+fn redact_json_secrets(value: &mut Value, secrets: &[String]) {
+    match value {
+        Value::String(text) => *text = redact_secrets(text, secrets),
+        Value::Array(values) => {
+            for value in values {
+                redact_json_secrets(value, secrets);
+            }
+        }
+        Value::Object(object) => {
+            let old = std::mem::take(object);
+            for (key, mut value) in old {
+                redact_json_secrets(&mut value, secrets);
+                object.insert(redact_secrets(&key, secrets), value);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {
+            let rendered = value.to_string();
+            if secrets.iter().any(|secret| secret == &rendered) {
+                *value = Value::String("[redacted]".to_string());
+            }
+        }
+    }
+}
+
+fn local_launch_configs(configs: &[McpServerConfig]) -> Vec<McpLaunchConfig> {
+    configs
+        .iter()
+        .filter(|server| server.enabled)
+        .map(|server| McpLaunchConfig {
+            name: server.name.clone(),
+            command: PathBuf::from(&server.command),
+            args: server.args.clone(),
+            environment: McpLaunchEnvironment::InheritedAllowlist(server.env.clone()),
+            required: false,
+        })
+        .collect()
 }
 
 fn mcp_environment_names(extra: &[String]) -> Result<Vec<&str>> {
@@ -820,6 +1041,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_mcp_tool_names() {
+        assert!(validate_mcp_server_display_name("valid-server").is_ok());
+        assert!(validate_mcp_server_display_name("").is_err());
+        assert!(validate_mcp_server_display_name("line\nbreak").is_err());
+        assert!(
+            validate_mcp_server_display_name(&"x".repeat(MAX_MCP_SERVER_NAME_CHARS + 1)).is_err()
+        );
+        assert!(validate_mcp_tool_name("valid-tool").is_ok());
+        assert!(validate_mcp_tool_name("").is_err());
+        assert!(validate_mcp_tool_name("line\nbreak").is_err());
+        assert!(validate_mcp_tool_name(&"x".repeat(MAX_MCP_TOOL_NAME_CHARS + 1)).is_err());
+    }
+
+    #[test]
     fn bounds_mcp_metadata() {
         let description = "x".repeat(MAX_MCP_DESCRIPTION_CHARS + 10);
         let bounded = bounded_tool_description("tool", "server", &description);
@@ -835,6 +1070,185 @@ mod tests {
                 .unwrap()
                 .contains("omitted")
         );
+    }
+
+    #[tokio::test]
+    async fn client_mcp_servers_merge_with_local_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("merge_server.py");
+        std::fs::write(
+            &script,
+            r#"import json
+import sys
+
+tool = sys.argv[1]
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"merge-test","version":"1"}}})
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":tool,"inputSchema":{"type":"object"}}]}})
+"#,
+        )
+        .unwrap();
+        let local = McpServerConfig {
+            name: "local".to_string(),
+            command: "/usr/bin/python3".to_string(),
+            args: vec![script.display().to_string(), "local-tool".to_string()],
+            env: Vec::new(),
+            enabled: true,
+        };
+        let client = ClientMcpServer {
+            name: "client".to_string(),
+            command: PathBuf::from("/usr/bin/python3"),
+            args: vec![script.display().to_string(), "client-tool".to_string()],
+            env: Vec::new(),
+        };
+        let manager = McpManager::start_session_at_cwd(&[local], vec![client], temp.path())
+            .await
+            .unwrap();
+        let names = manager
+            .definitions()
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["mcp__local__local-tool", "mcp__client__client-tool"]
+        );
+    }
+
+    #[tokio::test]
+    async fn client_mcp_environment_values_are_redacted_from_server_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("secret_error_server.py");
+        std::fs::write(
+            &script,
+            r#"import json
+import os
+import sys
+
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get("method") == "initialize":
+        response = {"jsonrpc":"2.0","id":message["id"],"error":{"code":-32000,"message":"denied " + os.environ["PRIVATE_VALUE"]}}
+        sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+        sys.stdout.flush()
+"#,
+        )
+        .unwrap();
+        let secret = "client-secret-error";
+        let client = ClientMcpServer {
+            name: format!("server-{secret}"),
+            command: PathBuf::from("/usr/bin/python3"),
+            args: vec![script.display().to_string()],
+            env: vec![("PRIVATE_VALUE".to_string(), secret.to_string())],
+        };
+        let error = match McpManager::start_session_at_cwd(&[], vec![client], temp.path()).await {
+            Ok(_) => panic!("secret-bearing MCP error unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let rendered = format!("{error:#}");
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn client_mcp_environment_values_are_redacted_from_metadata_and_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("secret_echo_server.py");
+        std::fs::write(
+            &script,
+            r#"import json
+import os
+import sys
+
+secret = os.environ["PRIVATE_VALUE"]
+
+def send(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"secret-test","version":"1"}}})
+    elif method == "notifications/initialized":
+        continue
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"tools":[{"name":"echo-" + secret,"description":"description " + secret,"inputSchema":{"type":"object","properties":{secret:{"description":secret}}}}]}})
+    elif method == "tools/call":
+        send({"jsonrpc":"2.0","id":message["id"],"result":{"content":[{"type":"text","text":"output " + secret}]}})
+"#,
+        )
+        .unwrap();
+        let secret = "client-secret-value";
+        let client = ClientMcpServer {
+            name: "secret".to_string(),
+            command: PathBuf::from("/usr/bin/python3"),
+            args: vec![script.display().to_string()],
+            env: vec![("PRIVATE_VALUE".to_string(), secret.to_string())],
+        };
+        let mut manager = McpManager::start_session_at_cwd(&[], vec![client], temp.path())
+            .await
+            .unwrap();
+        let definition = &manager.definitions()[0];
+        let metadata = serde_json::to_string(definition).unwrap();
+        assert!(!metadata.contains(secret));
+        assert!(metadata.contains("redacted"));
+        let tool_name = definition.name.clone();
+        let output = manager.call(&tool_name, &json!({}), None).await.unwrap();
+        assert!(!output.contains(secret));
+        assert!(output.contains("[redacted]"));
+    }
+
+    #[tokio::test]
+    async fn client_mcp_server_name_cannot_collide_with_local_config() {
+        let local = McpServerConfig {
+            name: "duplicate".to_string(),
+            command: "/definitely/missing/local-mcp".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            enabled: true,
+        };
+        let client = ClientMcpServer {
+            name: "duplicate".to_string(),
+            command: PathBuf::from("/definitely/missing/client-mcp"),
+            args: Vec::new(),
+            env: Vec::new(),
+        };
+        let error =
+            match McpManager::start_session_at_cwd(&[local], vec![client], Path::new(".")).await {
+                Ok(_) => panic!("duplicate server name unexpectedly succeeded"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains("duplicate MCP server name"));
+    }
+
+    #[tokio::test]
+    async fn client_mcp_startup_failure_is_not_silently_skipped() {
+        let client = ClientMcpServer {
+            name: "required".to_string(),
+            command: PathBuf::from("/definitely/missing/client-mcp"),
+            args: Vec::new(),
+            env: vec![("PRIVATE_VALUE".to_string(), "not-in-error".to_string())],
+        };
+        let error = match McpManager::start_session_at_cwd(&[], vec![client], Path::new(".")).await
+        {
+            Ok(_) => panic!("required client MCP startup unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(message.contains("failed to start required MCP server"));
+        assert!(!message.contains("not-in-error"));
     }
 
     #[test]
@@ -920,7 +1334,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_tool_call_sends_standard_mcp_notification() {
+    async fn cancelled_client_mcp_tool_call_sends_standard_notification() {
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("cancel_server.py");
         let marker = temp.path().join("cancelled.json");
@@ -956,20 +1370,20 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let config = McpServerConfig {
+        let client = ClientMcpServer {
             name: "cancel".to_string(),
-            command: "python3".to_string(),
+            command: PathBuf::from("/usr/bin/python3"),
             args: vec![
                 script.display().to_string(),
                 marker.display().to_string(),
                 request_marker.display().to_string(),
             ],
             env: Vec::new(),
-            enabled: true,
         };
-        let mut manager = McpManager::start_at_cwd(&[config], std::path::Path::new("."))
-            .await
-            .unwrap();
+        let mut manager =
+            McpManager::start_session_at_cwd(&[], vec![client], std::path::Path::new("."))
+                .await
+                .unwrap();
         let exposed_name = manager.definitions()[0].name.clone();
         let pre_cancelled = Arc::new(AtomicBool::new(true));
         let error = manager
@@ -1197,7 +1611,7 @@ while True:
     }
 
     #[tokio::test]
-    async fn mcp_cgroup_contains_detached_descendants_on_drop() {
+    async fn client_mcp_cgroup_contains_detached_descendants_on_drop() {
         let temp = tempfile::tempdir().unwrap();
         let marker = temp.path().join("detached-finished");
         let script = temp.path().join("detached_server.py");
@@ -1234,20 +1648,20 @@ for line in sys.stdin:
 "#,
         )
         .unwrap();
-        let config = McpServerConfig {
+        let client = ClientMcpServer {
             name: "detached".to_string(),
-            command: "python3".to_string(),
+            command: PathBuf::from("/usr/bin/python3"),
             args: vec![script.display().to_string(), marker.display().to_string()],
             env: Vec::new(),
-            enabled: true,
         };
-        let mut server = McpServer::start(&config, temp.path()).await.unwrap();
-        server.list_tools().await.unwrap();
-        if server.cgroup.is_none() {
+        let manager = McpManager::start_session_at_cwd(&[], vec![client], temp.path())
+            .await
+            .unwrap();
+        if manager.servers[0].cgroup.is_none() {
             eprintln!("skipping cgroup assertion because delegated cgroup-v2 is unavailable");
             return;
         }
-        drop(server);
+        drop(manager);
 
         tokio::time::sleep(Duration::from_millis(1200)).await;
         assert!(!marker.exists());
@@ -1372,7 +1786,7 @@ sys.stderr.flush()
     }
 
     #[tokio::test]
-    async fn manager_start_rejects_sanitized_tool_name_collisions() {
+    async fn client_mcp_start_rejects_sanitized_tool_name_collisions() {
         let script = std::env::temp_dir().join("ferrum_mcp_collision_server.py");
         std::fs::write(
             &script,
@@ -1416,21 +1830,23 @@ while True:
 "#,
         )
         .unwrap();
-        let config = McpServerConfig {
+        let client = ClientMcpServer {
             name: "server-a".to_string(),
-            command: "python3".to_string(),
+            command: PathBuf::from("/usr/bin/python3"),
             args: vec![
                 script.display().to_string(),
                 "foo/bar".to_string(),
                 "foo_bar".to_string(),
             ],
             env: Vec::new(),
-            enabled: true,
         };
-        let error = match McpManager::start_at_cwd(&[config], std::path::Path::new(".")).await {
-            Ok(_) => panic!("expected MCP collision to fail"),
-            Err(error) => error,
-        };
+        let error =
+            match McpManager::start_session_at_cwd(&[], vec![client], std::path::Path::new("."))
+                .await
+            {
+                Ok(_) => panic!("expected MCP collision to fail"),
+                Err(error) => error,
+            };
         assert!(
             error
                 .to_string()
