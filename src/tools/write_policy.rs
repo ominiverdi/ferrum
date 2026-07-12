@@ -43,8 +43,14 @@ fn reject_protected_credential_target(path: &Path) -> Result<()> {
     let protected_credentials = components
         .iter()
         .any(|component| matches!(component.to_str(), Some(".ssh" | ".aws" | ".vault")))
-        || components.windows(2).any(|pair| {
-            pair[0] == std::ffi::OsStr::new(".config") && pair[1] == std::ffi::OsStr::new("ferrum")
+        || components.windows(3).any(|parts| {
+            parts[0] == std::ffi::OsStr::new(".config")
+                && parts[1] == std::ffi::OsStr::new("ferrum")
+                && parts[2].to_str().is_some_and(|name| {
+                    name == "auth.json"
+                        || name == ".auth.json.lock"
+                        || name.starts_with(".auth.json.")
+                })
         });
     let protected_system = path.is_absolute()
         && (path.starts_with("/dev")
@@ -264,6 +270,20 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_ferrum_config_paths_are_not_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        for relative in [
+            ".config/ferrum/config.toml",
+            ".config/ferrum/AGENTS.md",
+            ".config/ferrum/skills/city-repair/SKILL.md",
+        ] {
+            let target = temp.path().join(relative);
+            validate_mutation_target(&target, temp.path()).unwrap();
+            validate_mutation_path(&target, temp.path(), &[PathBuf::from(".")]).unwrap();
+        }
+    }
+
+    #[test]
     fn every_tier_validation_rejects_protected_credential_targets() {
         let temp = tempfile::tempdir().unwrap();
         for relative in [
@@ -271,6 +291,8 @@ mod tests {
             ".aws/credentials",
             ".vault/token",
             ".config/ferrum/auth.json",
+            ".config/ferrum/.auth.json.lock",
+            ".config/ferrum/.auth.json.00000000-0000-0000-0000-000000000000.tmp",
         ] {
             let target = temp.path().join(relative);
             assert!(validate_mutation_target(&target, temp.path()).is_err());

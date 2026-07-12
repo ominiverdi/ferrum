@@ -1251,7 +1251,7 @@ struct LiveRenderState {
     terminal_sanitizer: terminal_text::Sanitizer,
     thinking_started: bool,
     text_started: bool,
-    text_ended_with_newline: bool,
+    output_ended_with_newline: bool,
 }
 
 impl LiveRenderState {
@@ -1262,74 +1262,173 @@ impl LiveRenderState {
             terminal_sanitizer: terminal_text::Sanitizer::default(),
             thinking_started: false,
             text_started: false,
-            text_ended_with_newline: false,
+            output_ended_with_newline: false,
         }
     }
 
     fn render_event(&mut self, event: providers::StreamEvent) -> Result<()> {
+        let mut stdout = io::stdout().lock();
+        self.render_event_to(event, &mut stdout)?;
+        stdout.flush()?;
+        Ok(())
+    }
+
+    fn render_event_to(
+        &mut self,
+        event: providers::StreamEvent,
+        output: &mut impl Write,
+    ) -> Result<()> {
         match event {
             providers::StreamEvent::ThinkingDelta(delta) => {
                 let delta = self.terminal_sanitizer.push(&delta);
                 if !self.thinking_started {
                     self.thinking_started = true;
-                    print_raw_mode_text_styled(
+                    self.output_ended_with_newline = true;
+                    write_raw_mode_text_styled(
+                        output,
                         "thinking:\n",
                         ColorToken::Thinking,
                         self.color_mode,
                         &self.colors,
-                    );
+                    )?;
                 }
-                print_raw_mode_text_styled(
-                    &delta,
-                    ColorToken::Thinking,
-                    self.color_mode,
-                    &self.colors,
-                );
+                if !delta.is_empty() {
+                    self.output_ended_with_newline = delta.ends_with('\n');
+                    write_raw_mode_text_styled(
+                        output,
+                        &delta,
+                        ColorToken::Thinking,
+                        self.color_mode,
+                        &self.colors,
+                    )?;
+                }
             }
             providers::StreamEvent::TextDelta(delta) => {
                 let delta = self.terminal_sanitizer.push(&delta);
                 if !self.text_started {
                     self.text_started = true;
                     if self.thinking_started {
-                        print_raw_mode_text_styled(
-                            "\r\n------\r\n",
+                        self.output_ended_with_newline = true;
+                        write_raw_mode_text_styled(
+                            output,
+                            "\n------\n",
                             ColorToken::Hr,
                             self.color_mode,
                             &self.colors,
-                        );
+                        )?;
                     }
                 }
-                self.text_ended_with_newline = delta.ends_with('\n');
-                print_raw_mode_text_styled(
-                    &delta,
-                    ColorToken::Assistant,
-                    self.color_mode,
-                    &self.colors,
-                );
+                if !delta.is_empty() {
+                    self.output_ended_with_newline = delta.ends_with('\n');
+                    write_raw_mode_text_styled(
+                        output,
+                        &delta,
+                        ColorToken::Assistant,
+                        self.color_mode,
+                        &self.colors,
+                    )?;
+                }
             }
         }
-        io::stdout().flush()?;
         Ok(())
     }
 
     fn finish(&self) -> Result<()> {
-        if self.text_started && !self.text_ended_with_newline {
-            println!();
+        let mut stdout = io::stdout().lock();
+        self.finish_to(&mut stdout)?;
+        stdout.flush()?;
+        Ok(())
+    }
+
+    fn finish_to(&self, output: &mut impl Write) -> Result<()> {
+        if (self.thinking_started || self.text_started) && !self.output_ended_with_newline {
+            output.write_all(b"\r\n")?;
         }
-        io::stdout().flush()?;
         Ok(())
     }
 }
 
-fn print_raw_mode_text_styled(
+fn write_raw_mode_text_styled(
+    output: &mut impl Write,
     text: &str,
     token: ColorToken,
     color_mode: ColorMode,
     colors: &ColorPalette,
-) {
+) -> io::Result<()> {
     let text = text.replace('\n', "\r\n");
     let (prefix, suffix) = colors.prefix_suffix_stdout(token, color_mode);
-    print!("{prefix}{text}{suffix}");
+    write!(output, "{prefix}{text}{suffix}")
+}
+
+#[cfg(test)]
+mod live_render_tests {
+    use super::*;
+
+    #[test]
+    fn thinking_only_requests_are_separated_by_newlines() {
+        let mut output = Vec::new();
+        for _ in 0..2 {
+            let mut render = LiveRenderState::new(ColorMode::Off, ColorPalette::default());
+            render
+                .render_event_to(
+                    providers::StreamEvent::ThinkingDelta(
+                        "**Retrying symlink creation**".to_string(),
+                    ),
+                    &mut output,
+                )
+                .unwrap();
+            render.finish_to(&mut output).unwrap();
+        }
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "thinking:\r\n**Retrying symlink creation**\r\nthinking:\r\n**Retrying symlink creation**\r\n"
+        );
+    }
+
+    #[test]
+    fn streamed_thinking_chunks_remain_contiguous() {
+        let mut output = Vec::new();
+        let mut render = LiveRenderState::new(ColorMode::Off, ColorPalette::default());
+        for delta in ["**Retrying ", "symlink creation**"] {
+            render
+                .render_event_to(
+                    providers::StreamEvent::ThinkingDelta(delta.to_string()),
+                    &mut output,
+                )
+                .unwrap();
+        }
+        render.finish_to(&mut output).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "thinking:\r\n**Retrying symlink creation**\r\n"
+        );
+    }
+
+    #[test]
+    fn thinking_and_answer_sections_use_single_terminal_newlines() {
+        let mut output = Vec::new();
+        let mut render = LiveRenderState::new(ColorMode::Off, ColorPalette::default());
+        render
+            .render_event_to(
+                providers::StreamEvent::ThinkingDelta("thought".to_string()),
+                &mut output,
+            )
+            .unwrap();
+        render
+            .render_event_to(
+                providers::StreamEvent::TextDelta("answer".to_string()),
+                &mut output,
+            )
+            .unwrap();
+        render.finish_to(&mut output).unwrap();
+
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "thinking:\r\nthought\r\n------\r\nanswer\r\n"
+        );
+    }
 }
 
 fn render_hr(color_mode: ColorMode, colors: &ColorPalette) {

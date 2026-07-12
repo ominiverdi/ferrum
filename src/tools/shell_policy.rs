@@ -774,13 +774,14 @@ pub(super) fn is_protected_credential_path(arg: &str) -> bool {
     normalized.starts_with("~/.ssh")
         || normalized.starts_with("~/.aws")
         || normalized.starts_with("~/.vault")
-        || normalized.starts_with("~/.config/ferrum")
         || components
             .iter()
             .any(|component| matches!(*component, ".ssh" | ".aws" | ".vault"))
-        || components
-            .windows(2)
-            .any(|pair| matches!(pair, [".config", "ferrum"]))
+        || components.windows(3).any(|parts| {
+            matches!(parts, [".config", "ferrum", name] if *name == "auth.json"
+                || *name == ".auth.json.lock"
+                || name.starts_with(".auth.json."))
+        })
 }
 
 fn normalize_shell_path(arg: &str) -> String {

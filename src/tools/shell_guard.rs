@@ -835,6 +835,19 @@ mod tests {
     }
 
     #[test]
+    fn low_safety_allows_ordinary_ferrum_config_mutations() {
+        let command = "mkdir -p /home/ominiverdi/.config/ferrum/skills/city-repair && ln -sfn /home/ominiverdi/github/green-city-index/skills/city-repair/SKILL.md /home/ominiverdi/.config/ferrum/skills/city-repair/SKILL.md && readlink -f /home/ominiverdi/.config/ferrum/skills/city-repair/SKILL.md";
+        assert_allowed_at(command, SafetyLevel::Low);
+        assert_allowed_at(
+            "printf enabled > ~/.config/ferrum/config.toml",
+            SafetyLevel::Low,
+        );
+
+        assert_denied_at("printf bad > ~/.config/ferrum/auth.json", SafetyLevel::Low);
+        assert_denied_at("touch ~/.config/ferrum/.auth.json.lock", SafetyLevel::Low);
+    }
+
+    #[test]
     fn low_safety_allows_non_privileged_user_install_outside_roots() {
         assert_allowed_at(
             "install -m755 target/release/ferrum /home/example/.cargo/bin/ferrum",
