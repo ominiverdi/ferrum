@@ -69,6 +69,7 @@ Slash commands:
 - `/session`
 - `/new`
 - `/title [text]``
+- `/goal [text|clear]`
 - `/sessions`
 - `/sessions pick`
 - `/sessions del`
@@ -216,7 +217,7 @@ Current persisted entry types:
 - `metadata`
 - `compaction`
 
-Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, thinking level, safety level, diff mode, color mode, and resolved tool lists. Timestamps are `u64` milliseconds.
+Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, a bounded session goal note, thinking level, safety level, diff mode, color mode, and resolved tool lists. Goal notes are operator metadata and are not added to model context. Timestamps are `u64` milliseconds.
 
 Sessions remain human-inspectable and append-oriented. Anonymous names include UUID entropy. Records are bounded to 16 MiB, pre-serialized with their newline, and appended under an exclusive advisory lock; readers take a shared lock and stream bounded records. A writer repairs an incomplete trailing record under lock before appending. Successful appends are flushed and synced, and creation syncs the session directory. Header-only sessions are retained, while automatic latest-session selection skips abandoned anonymous headers. Session/config switches validate a candidate session and resolve candidate provider/model state before committing either in-memory transition. Future branching/forking must preserve backward compatibility.
 

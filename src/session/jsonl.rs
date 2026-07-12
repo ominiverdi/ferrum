@@ -17,6 +17,8 @@ use std::{
 };
 use uuid::Uuid;
 
+const MAX_GOAL_BYTES: usize = 4 * 1024;
+
 #[derive(Debug)]
 pub struct JsonlSession {
     path: PathBuf,
@@ -65,6 +67,8 @@ pub enum SessionEntry {
         diff_mode: Option<String>,
         safety: Option<String>,
         tools: Option<Vec<String>>,
+        #[serde(default)]
+        goal: Option<String>,
     },
 }
 
@@ -327,6 +331,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            goal: None,
         })
     }
 
@@ -343,6 +348,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            goal: None,
         })
     }
 
@@ -359,6 +365,7 @@ impl JsonlSession {
             diff_mode: Some(diff_mode.to_string()),
             safety: None,
             tools: None,
+            goal: None,
         })
     }
 
@@ -375,6 +382,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: Some(safety.to_string()),
             tools: None,
+            goal: None,
         })
     }
 
@@ -391,6 +399,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: Some(tools.to_vec()),
+            goal: None,
         })
     }
 
@@ -407,6 +416,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            goal: None,
         })
     }
 
@@ -423,6 +433,27 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            goal: None,
+        })
+    }
+
+    pub fn append_goal(&mut self, goal: &str) -> Result<()> {
+        if goal.len() > MAX_GOAL_BYTES {
+            anyhow::bail!("goal must be at most {MAX_GOAL_BYTES} bytes");
+        }
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            provider: None,
+            model: None,
+            thinking: None,
+            color_mode: None,
+            diff_mode: None,
+            safety: None,
+            tools: None,
+            goal: Some(goal.to_string()),
         })
     }
 
@@ -640,6 +671,7 @@ pub struct SessionInfo {
     pub diff_mode: Option<String>,
     pub safety: Option<String>,
     pub tools: Option<Vec<String>>,
+    pub goal: Option<String>,
     pub title: String,
     pub message_count: usize,
     pub archived_message_count: usize,
@@ -651,7 +683,9 @@ pub struct SessionInfo {
 pub fn latest_session_for_cwd(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
     Ok(list_sessions_for_cwd(dir, cwd)?
         .into_iter()
-        .find(|info| info.message_count > 0 || info.title != "(empty session)")
+        .find(|info| {
+            info.message_count > 0 || info.title != "(empty session)" || info.goal.is_some()
+        })
         .map(|info| info.path))
 }
 
@@ -1108,6 +1142,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
     let mut explicit_diff_mode = None;
     let mut explicit_safety = None;
     let mut explicit_tools = None;
+    let mut explicit_goal = None;
     let mut total_message_count = 0usize;
     let mut visible_message_count = 0usize;
     let mut archived_message_count = 0usize;
@@ -1159,6 +1194,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
                 diff_mode,
                 safety,
                 tools,
+                goal,
                 ..
             } => {
                 if let Some(title) = title
@@ -1199,6 +1235,14 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
                 if let Some(tools) = tools {
                     explicit_tools = Some(tools);
                 }
+                if let Some(goal) = goal {
+                    let goal = goal.trim();
+                    if goal.len() <= MAX_GOAL_BYTES {
+                        explicit_goal = (!goal.is_empty()).then(|| goal.to_string());
+                    } else if diagnose {
+                        eprintln!("[session] ignored goal larger than {MAX_GOAL_BYTES} bytes");
+                    }
+                }
             }
             SessionEntry::Compaction { timestamp_ms, .. } => {
                 archived_message_count = total_message_count;
@@ -1226,6 +1270,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
         diff_mode: explicit_diff_mode,
         safety: explicit_safety,
         tools: explicit_tools,
+        goal: explicit_goal,
         title: explicit_title
             .or(inferred_title)
             .unwrap_or_else(|| "(empty session)".to_string()),
@@ -2008,6 +2053,54 @@ mod tests {
     }
 
     #[test]
+    fn goal_survives_compaction_and_empty_update_clears_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        session.append_goal("Finish the bounded change").unwrap();
+        session.append_compaction("summary checkpoint").unwrap();
+
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.goal.as_deref(), Some("Finish the bounded change"));
+
+        session.append_goal("").unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.goal, None);
+    }
+
+    #[test]
+    fn goal_storage_rejects_oversized_notes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let error = session
+            .append_goal(&"x".repeat(MAX_GOAL_BYTES + 1))
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!("goal must be at most {MAX_GOAL_BYTES} bytes")
+        );
+    }
+
+    #[test]
     fn stores_initial_thinking_in_header() {
         let temp = tempfile::tempdir().unwrap();
         let session = JsonlSession::create(
@@ -2192,6 +2285,30 @@ mod tests {
         assert_eq!(
             latest_session_for_cwd(temp.path(), &cwd).unwrap(),
             Some(useful_path)
+        );
+    }
+
+    #[test]
+    fn latest_session_keeps_goal_only_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        session.append_goal("Resume this note").unwrap();
+        let goal_path = session.path().clone();
+        drop(session);
+
+        assert_eq!(
+            latest_session_for_cwd(temp.path(), &cwd).unwrap(),
+            Some(goal_path)
         );
     }
 

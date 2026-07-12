@@ -227,6 +227,7 @@ impl FerrumLineHelper {
         command_hints.insert("/image-paste", "");
         command_hints.insert("/paste-image", "");
         command_hints.insert("/session", "");
+        command_hints.insert("/goal", " <text>|clear");
         command_hints.insert("/sessions", " pick | del | new");
         command_hints.insert("/colors", " auto|on|off");
         command_hints.insert("/palette", " <name>  (/palettes to list)");
@@ -282,6 +283,7 @@ fn slash_command_words() -> &'static [&'static str] {
         "/new",
         "/sessions",
         "/title",
+        "/goal",
         "/skills",
         "/skill",
         "/model",
@@ -923,7 +925,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -3767,6 +3769,7 @@ impl AgentSession {
                     session.message_count > 0
                         || session.path == *self.session.path()
                         || session.title != "(empty session)"
+                        || session.goal.is_some()
                 })
                 .collect(),
         )
@@ -5492,6 +5495,7 @@ mod context_pressure_tests {
             "/session",
             "/new",
             "/title [text]",
+            "/goal [text|clear]",
             "/sessions del",
             "/skill <name> [args]",
             "/skill:<name> [args]",
@@ -8329,6 +8333,7 @@ fn handle_command(
             println!("  /version              show Ferrum version");
             println!("  /session              show session path/status/size");
             println!("  /title [text]         show or set session title");
+            println!("  /goal [text|clear]    show, set, or clear the session goal note");
             println!("  /new                  start a new session");
             println!("  /sessions             list recent sessions for current directory");
             println!("  /sessions pick        open session picker");
@@ -8388,6 +8393,13 @@ fn handle_command(
                     } else {
                         println!("last_compaction: none");
                     }
+                    println!(
+                        "goal: {}",
+                        info.goal
+                            .as_deref()
+                            .map(terminal_text::sanitize)
+                            .unwrap_or_else(|| "(none)".to_string())
+                    );
                     println!("chars: {}", stats.chars);
                     println!("context_tokens: {}", stats.estimated_tokens);
                     println!("context_source: {}", stats.context_source.as_str());
@@ -8429,6 +8441,27 @@ fn handle_command(
             } else {
                 state.set_title(&title)?;
                 println!("title: {}", terminal_text::sanitize(title.trim()));
+            }
+            Ok(CommandAction::Continue)
+        }
+        "/goal" => {
+            let goal = parts.collect::<Vec<_>>().join(" ");
+            if goal.is_empty() {
+                let info = session::jsonl::session_info(state.session.path())?
+                    .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
+                println!(
+                    "goal: {}",
+                    info.goal
+                        .as_deref()
+                        .map(terminal_text::sanitize)
+                        .unwrap_or_else(|| "(none)".to_string())
+                );
+            } else if goal == "clear" {
+                state.session.append_goal("")?;
+                println!("goal: (none)");
+            } else {
+                state.session.append_goal(&goal)?;
+                println!("goal: {}", terminal_text::sanitize(&goal));
             }
             Ok(CommandAction::Continue)
         }

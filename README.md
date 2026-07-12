@@ -241,6 +241,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /version
 /session
 /title [text]
+/goal [text|clear]
 /new
 /sessions
 /sessions pick
@@ -270,6 +271,8 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 ```
 
 `/new` and `/sessions new` both start a fresh session.
+
+`/goal` shows one session-scoped note, `/goal <text>` replaces it, and `/goal clear` removes it. The note is limited to 4096 bytes, persists with the session, and does not trigger model work.
 
 Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths. After `/models` succeeds, its provider model ids are available to `/model <Tab>` completion until the active provider changes.
 

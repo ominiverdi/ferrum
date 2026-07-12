@@ -81,6 +81,7 @@ ferrum --title "Quick check" -p "summarize this repo"
 ```text
 /session
 /title [text]
+/goal [text|clear]
 /new
 /sessions
 /sessions pick
@@ -98,6 +99,8 @@ When an interactive session is resumed with `--resume`, `--continue`, or `--sess
 Header-only and metadata-only sessions are retained so a failed start or state transition never unlinks an active file handle. `/sessions` hides old empty sessions by default, while still showing the current empty session so you can see where you are. Automatic latest-session selection skips abandoned anonymous header-only sessions.
 
 `/title` shows the current session title. `/title <text>` sets an explicit title used by `/sessions`. `--title <text>` sets the title when starting, resuming, or running a print-mode session. If no title is set, Ferrum falls back to a title inferred from the first user message.
+
+`/goal` shows a single session-scoped note. `/goal <text>` replaces the note, and `/goal clear` removes it. Goal notes are limited to 4096 bytes and remain available after compaction and session resume. They are operator metadata only: Ferrum does not inject them into model context, expose goal tools, or start additional turns.
 
 Thinking level is stored in session metadata. New sessions record the current thinking level, and `/thinking <level>` appends an updated level. Resuming or switching sessions restores the session thinking level unless the process was started with an explicit `--thinking` override. Provider-supplied thinking content and replay signatures are stored in message history when the provider sends them.
 

@@ -185,6 +185,9 @@ Common slash commands:
 **/title** TEXT
 : Set session title.
 
+**/goal** [TEXT|clear]
+: Show, replace, or clear the bounded session goal note. The note persists with the session and does not trigger model work.
+
 **/model** NAME
 : Switch model.
 
