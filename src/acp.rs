@@ -2183,6 +2183,20 @@ mod tests {
         assert_eq!(line, b"{}");
     }
 
+    #[tokio::test]
+    async fn slow_reader_cannot_grow_output_queue_past_bound() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let output = Output { sender };
+
+        output.try_send(json!({"sequence": 1})).unwrap();
+        let error = output.try_send(json!({"sequence": 2})).unwrap_err();
+        assert!(error.to_string().contains("output queue limit"));
+
+        assert_eq!(receiver.recv().await.unwrap(), json!({"sequence": 1}));
+        output.try_send(json!({"sequence": 2})).unwrap();
+        assert_eq!(receiver.recv().await.unwrap(), json!({"sequence": 2}));
+    }
+
     #[test]
     fn decoded_request_budget_limits_nodes_bytes_and_depth() {
         assert!(decoded_request_within_bounds(
