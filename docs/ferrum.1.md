@@ -343,9 +343,9 @@ configuration directory.
 Download the release tarball from Codeberg, extract it, and install the binary and man page:
 
 ```sh
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.0/ferrum-v0.7.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.7.0-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.7.0-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.1/ferrum-v0.7.1-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.7.1-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.7.1-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -354,9 +354,9 @@ man ferrum
 Optional checksum verification:
 
 ```sh
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.0/ferrum-v0.7.0-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.0/ferrum-v0.7.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.7.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.1/ferrum-v0.7.1-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.1/ferrum-v0.7.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.7.1-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## From source
