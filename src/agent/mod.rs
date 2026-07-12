@@ -4575,9 +4575,24 @@ fn print_recent_conversation_lines(
         )
     );
     for line in lines {
-        println!("{}", terminal_text::sanitize(&line));
+        println!(
+            "{}",
+            style_recent_conversation_line(&line, color_mode, colors)
+        );
     }
     render_hr(color_mode, colors);
+}
+
+fn style_recent_conversation_line(
+    line: &str,
+    color_mode: ColorMode,
+    colors: &ColorPalette,
+) -> String {
+    match line {
+        "user:" => colors.paint_stdout(ColorToken::Prompt, color_mode, line),
+        "assistant:" => colors.paint_stdout(ColorToken::Highlight, color_mode, line),
+        _ => terminal_text::sanitize(line),
+    }
 }
 
 fn current_preview_timestamp() -> String {
@@ -5041,6 +5056,32 @@ mod context_pressure_tests {
         let (_start, candidates) = helper.complete("/title p", "/title p".len(), &ctx).unwrap();
 
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn recent_conversation_labels_are_colored_without_coloring_content() {
+        let colors = ColorPalette::default();
+
+        assert_eq!(
+            style_recent_conversation_line("user:", ColorMode::On, &colors),
+            "\u{1b}[36muser:\u{1b}[0m"
+        );
+        assert_eq!(
+            style_recent_conversation_line("assistant:", ColorMode::On, &colors),
+            "\u{1b}[33massistant:\u{1b}[0m"
+        );
+        assert_eq!(
+            style_recent_conversation_line("  message", ColorMode::On, &colors),
+            "  message"
+        );
+        assert_eq!(
+            style_recent_conversation_line("tool:", ColorMode::On, &colors),
+            "tool:"
+        );
+        assert_eq!(
+            style_recent_conversation_line("user:", ColorMode::Off, &colors),
+            "user:"
+        );
     }
 
     #[test]
