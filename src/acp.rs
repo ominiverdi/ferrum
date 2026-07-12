@@ -793,14 +793,7 @@ async fn handle_line(
                     .await?;
                 return Ok(());
             }
-            let client_mcp_servers = match validate_client_mcp_servers(request.mcp_servers, &config)
-            {
-                Ok(servers) => servers,
-                Err(error) => {
-                    output.send(error_response(id, error)?).await?;
-                    return Ok(());
-                }
-            };
+            let requested_mcp_servers = request.mcp_servers;
             let cwd = match validate_cwd(&request.cwd) {
                 Ok(cwd) => cwd,
                 Err(error) => {
@@ -808,6 +801,26 @@ async fn handle_line(
                     return Ok(());
                 }
             };
+            let session_config = match config.for_cwd(&cwd) {
+                Ok(config) => config,
+                Err(_) => {
+                    output
+                        .send(error_response(
+                            id,
+                            AcpError::invalid_params().data("project configuration is invalid"),
+                        )?)
+                        .await?;
+                    return Ok(());
+                }
+            };
+            let client_mcp_servers =
+                match validate_client_mcp_servers(requested_mcp_servers, &session_config) {
+                    Ok(servers) => servers,
+                    Err(error) => {
+                        output.send(error_response(id, error)?).await?;
+                        return Ok(());
+                    }
+                };
             {
                 let state = state.lock().await;
                 if state
@@ -823,7 +836,7 @@ async fn handle_line(
                     return Ok(());
                 }
             }
-            let mut agent = match AgentSession::new_at_cwd(&config, cwd) {
+            let mut agent = match AgentSession::new_at_cwd(&session_config, cwd) {
                 Ok(agent) => agent,
                 Err(_) => {
                     output
@@ -832,7 +845,10 @@ async fn handle_line(
                     return Ok(());
                 }
             };
-            if let Err(_error) = agent.start_client_mcp(&config, client_mcp_servers).await {
+            if let Err(_error) = agent
+                .start_client_mcp(&session_config, client_mcp_servers)
+                .await
+            {
                 let path = agent.session_path().to_path_buf();
                 drop(agent);
                 let _ = session::jsonl::delete_session(&path);
@@ -860,7 +876,7 @@ async fn handle_line(
             let session_path = agent.session_path().to_path_buf();
             let entry = Arc::new(SessionEntry {
                 agent: AsyncMutex::new(agent),
-                config: (*config).clone(),
+                config: session_config,
                 active: Mutex::new(None),
             });
             let mut state = state.lock().await;
@@ -953,14 +969,7 @@ async fn handle_line(
                 output.send(error_response(id, error)?).await?;
                 return Ok(());
             }
-            let client_mcp_servers = match validate_client_mcp_servers(request.mcp_servers, &config)
-            {
-                Ok(servers) => servers,
-                Err(error) => {
-                    output.send(error_response(id, error)?).await?;
-                    return Ok(());
-                }
-            };
+            let requested_mcp_servers = request.mcp_servers;
             let requested_session_id = request.session_id.to_string();
             let session_id = match validate_session_id(&requested_session_id) {
                 Ok(session_id) => session_id,
@@ -983,6 +992,26 @@ async fn handle_line(
                     return Ok(());
                 }
             };
+            let session_config = match config.for_cwd(&cwd) {
+                Ok(config) => config,
+                Err(_) => {
+                    output
+                        .send(error_response(
+                            id,
+                            AcpError::invalid_params().data("project configuration is invalid"),
+                        )?)
+                        .await?;
+                    return Ok(());
+                }
+            };
+            let client_mcp_servers =
+                match validate_client_mcp_servers(requested_mcp_servers, &session_config) {
+                    Ok(servers) => servers,
+                    Err(error) => {
+                        output.send(error_response(id, error)?).await?;
+                        return Ok(());
+                    }
+                };
             let history = match load_session_history(&info.path) {
                 Ok(history) => history,
                 Err(error) => {
@@ -992,7 +1021,7 @@ async fn handle_line(
             };
             let entry = match open_persisted_session(
                 &state,
-                &config,
+                &session_config,
                 &info,
                 cwd,
                 policy.restore,
@@ -1036,14 +1065,7 @@ async fn handle_line(
                 output.send(error_response(id, error)?).await?;
                 return Ok(());
             }
-            let client_mcp_servers = match validate_client_mcp_servers(request.mcp_servers, &config)
-            {
-                Ok(servers) => servers,
-                Err(error) => {
-                    output.send(error_response(id, error)?).await?;
-                    return Ok(());
-                }
-            };
+            let requested_mcp_servers = request.mcp_servers;
             let requested_session_id = request.session_id.to_string();
             let session_id = match validate_session_id(&requested_session_id) {
                 Ok(session_id) => session_id,
@@ -1066,13 +1088,33 @@ async fn handle_line(
                     return Ok(());
                 }
             };
+            let session_config = match config.for_cwd(&cwd) {
+                Ok(config) => config,
+                Err(_) => {
+                    output
+                        .send(error_response(
+                            id,
+                            AcpError::invalid_params().data("project configuration is invalid"),
+                        )?)
+                        .await?;
+                    return Ok(());
+                }
+            };
+            let client_mcp_servers =
+                match validate_client_mcp_servers(requested_mcp_servers, &session_config) {
+                    Ok(servers) => servers,
+                    Err(error) => {
+                        output.send(error_response(id, error)?).await?;
+                        return Ok(());
+                    }
+                };
             if let Err(error) = validate_session_history(&info.path) {
                 output.send(error_response(id, error)?).await?;
                 return Ok(());
             }
             if let Err(error) = open_persisted_session(
                 &state,
-                &config,
+                &session_config,
                 &info,
                 cwd,
                 policy.restore,
@@ -1673,6 +1715,17 @@ fn validate_client_mcp_servers(
         {
             return Err(AcpError::invalid_params().data("invalid MCP server name"));
         }
+        if config
+            .project_mcp_allow
+            .as_ref()
+            .is_some_and(|allow| !allow.iter().any(|name| name == &server.name))
+            || config
+                .mcp_server_deny
+                .iter()
+                .any(|name| name == &server.name)
+        {
+            return Err(AcpError::invalid_params().data("MCP server is denied by project policy"));
+        }
         if !names.insert(server.name.clone()) {
             return Err(AcpError::invalid_params().data("duplicate MCP server name"));
         }
@@ -1809,6 +1862,7 @@ async fn open_persisted_session(
             restore_policy.model,
         )
         .map_err(|_| AcpError::internal_error())?;
+        session_config.enforce_project_constraints();
         let mut agent = AgentSession::open_session_at_cwd(&session_config, info.path.clone(), cwd)
             .map_err(|_| AcpError::internal_error())?;
         agent

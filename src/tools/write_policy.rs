@@ -5,6 +5,31 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub fn validate_read_path(path: &Path, cwd: &Path, roots: &[PathBuf]) -> Result<()> {
+    let target = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+    .canonicalize()
+    .with_context(|| format!("failed to resolve read path {}", path.display()))?;
+    let roots = canonical_roots(cwd, roots)?;
+    if roots.iter().any(|root| target.starts_with(root)) {
+        return Ok(());
+    }
+
+    let rendered = roots
+        .iter()
+        .map(|root| root.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!(
+        "read path {} is outside configured readable roots [{}]",
+        path.display(),
+        rendered
+    )
+}
+
 pub fn validate_mutation_path(path: &Path, cwd: &Path, roots: &[PathBuf]) -> Result<()> {
     reject_protected_credential_target(path)?;
     let target = resolved_mutation_target(path, cwd)?;
@@ -51,7 +76,13 @@ fn reject_protected_credential_target(path: &Path) -> Result<()> {
                         || name == ".auth.json.lock"
                         || name.starts_with(".auth.json.")
                 })
-        });
+        })
+        || components.windows(2).any(|parts| {
+            parts[0] == std::ffi::OsStr::new(".ferrum")
+                && parts[1] == std::ffi::OsStr::new("config.toml")
+        })
+        || (path.file_name() == Some(std::ffi::OsStr::new(".ferrum"))
+            && path.join("config.toml").is_file());
     let protected_system = path.is_absolute()
         && (path.starts_with("/dev")
             || path.starts_with("/proc")
@@ -147,6 +178,38 @@ fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn project_policy_file_is_never_mutable_by_native_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let policy = temp.path().join(".ferrum/config.toml");
+        std::fs::create_dir_all(policy.parent().unwrap()).unwrap();
+        std::fs::write(&policy, "[tools]\n").unwrap();
+
+        assert!(validate_mutation_target(&policy, temp.path()).is_err());
+        assert!(validate_mutation_path(&policy, temp.path(), &[PathBuf::from(".")]).is_err());
+        assert!(validate_mutation_target(policy.parent().unwrap(), temp.path()).is_err());
+    }
+
+    #[test]
+    fn readable_roots_follow_symlinks_before_authorizing() {
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        symlink(outside.path(), temp.path().join("link")).unwrap();
+
+        let error = validate_read_path(
+            &temp.path().join("link/secret.txt"),
+            temp.path(),
+            &[PathBuf::from(".")],
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured readable roots")
+        );
+    }
 
     #[test]
     fn allows_target_inside_default_root() {

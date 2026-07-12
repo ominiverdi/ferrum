@@ -20,7 +20,7 @@ Project:
 .agents/skills/
 ```
 
-Project locations are discovered from the current directory upward to the git repository root. Project skills override global skills with the same name.
+Project locations are discovered from the current directory upward to the git repository root. Project skills override global skills with the same name. A restrictive `.ferrum/config.toml` may set `skills.inherit_global = false` and apply skill allow/deny filters; see [Configuration](config.md#project-local-restrictive-policy).
 
 ## Structure
 

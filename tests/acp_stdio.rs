@@ -1347,6 +1347,42 @@ fn acp_stdio_output_disconnect_cancels_work_and_exits() {
 }
 
 #[test]
+fn acp_stdio_applies_restrictive_project_config_per_session_cwd() {
+    let cwd = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(cwd.path().join(".ferrum")).unwrap();
+    std::fs::write(
+        cwd.path().join(".ferrum/config.toml"),
+        "safety = \"high\"\n[tools]\nallow = [\"write\"]\nwritable_roots = [\".\"]\n",
+    )
+    .unwrap();
+    let mut acp = AcpProcess::spawn(cwd.path(), Some("permission_write"));
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": {"sessionId": session_id, "prompt": [{"type": "text", "text": "write"}]}
+    }));
+    let mut saw_policy_failure = false;
+    loop {
+        let message = acp.recv();
+        if message["id"] == 3 {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+        if message["params"]["update"]["sessionUpdate"] == "tool_call_update"
+            && message["params"]["update"]["status"] == "failed"
+        {
+            saw_policy_failure = message["params"]["update"]["content"]
+                .to_string()
+                .contains("not authorized at high safety");
+        }
+    }
+    assert!(saw_policy_failure);
+    assert!(!cwd.path().join("permission.txt").exists());
+    acp.finish();
+}
+
+#[test]
 fn acp_stdio_maps_tool_failure_to_official_updates() {
     let cwd = tempfile::tempdir().unwrap();
     let mut acp = AcpProcess::spawn(cwd.path(), Some("missing_read"));

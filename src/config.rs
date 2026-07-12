@@ -1,7 +1,12 @@
 use crate::ui_colors::ColorPalette;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, collections::BTreeSet, env, fs, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    collections::BTreeSet,
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -26,10 +31,19 @@ pub struct Config {
     pub safety: SafetyLevel,
     pub tools_allow: Option<Vec<String>>,
     pub tools_deny: Vec<String>,
+    pub readable_roots: Option<Vec<PathBuf>>,
     pub writable_roots: Vec<PathBuf>,
     pub allow_external_global_skill_symlinks: bool,
+    pub inherit_global_skills: bool,
+    pub skills_allow: Option<Vec<String>>,
+    pub skills_deny: Vec<String>,
     pub tool_selection: Option<ToolSelection>,
     pub mcp_servers: Vec<McpServerConfig>,
+    pub mcp_server_deny: Vec<String>,
+    pub project_config_path: Option<PathBuf>,
+    pub project_safety_floor: Option<SafetyLevel>,
+    pub project_mcp_disabled: bool,
+    pub project_mcp_allow: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +277,7 @@ struct FileToolsConfig {
     allow: Option<Vec<String>>,
     #[serde(default)]
     deny: Vec<String>,
+    readable_roots: Option<Vec<PathBuf>>,
     #[serde(default = "default_writable_roots")]
     writable_roots: Vec<PathBuf>,
 }
@@ -275,6 +290,55 @@ fn default_writable_roots() -> Vec<PathBuf> {
 struct FileMcpConfig {
     #[serde(default)]
     servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ProjectConfig {
+    safety: Option<String>,
+    max_tool_rounds: Option<usize>,
+    tools: Option<ProjectToolsConfig>,
+    skills: Option<ProjectSkillsConfig>,
+    mcp: Option<ProjectMcpConfig>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ProjectToolsConfig {
+    allow: Option<Vec<String>>,
+    #[serde(default)]
+    deny: Vec<String>,
+    readable_roots: Option<Vec<PathBuf>>,
+    writable_roots: Option<Vec<PathBuf>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProjectSkillsConfig {
+    #[serde(default = "default_true")]
+    inherit_global: bool,
+    allow: Option<Vec<String>>,
+    #[serde(default)]
+    deny: Vec<String>,
+}
+
+impl Default for ProjectSkillsConfig {
+    fn default() -> Self {
+        Self {
+            inherit_global: true,
+            allow: None,
+            deny: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ProjectMcpConfig {
+    enabled: Option<bool>,
+    allow: Option<Vec<String>>,
+    #[serde(default)]
+    deny: Vec<String>,
 }
 
 impl Config {
@@ -351,10 +415,14 @@ impl Config {
             .map(validate_tool_name_list)
             .transpose()?;
         let tools_deny = validate_tool_name_list(tools_config.deny)?;
+        let readable_roots = tools_config
+            .readable_roots
+            .map(|roots| validate_root_list(roots, "readable_roots"))
+            .transpose()?;
         let writable_roots = if tools_config.writable_roots.is_empty() {
             default_writable_roots()
         } else {
-            tools_config.writable_roots
+            validate_root_list(tools_config.writable_roots, "writable_roots")?
         };
 
         let colors = ColorPalette::load(&config_dir)?;
@@ -408,11 +476,138 @@ impl Config {
                 .unwrap_or(SafetyLevel::Medium),
             tools_allow,
             tools_deny,
+            readable_roots,
             writable_roots,
             allow_external_global_skill_symlinks: skills_config.allow_external_global_symlinks,
+            inherit_global_skills: true,
+            skills_allow: None,
+            skills_deny: Vec::new(),
             tool_selection: None,
             mcp_servers: file_config.mcp.map(|mcp| mcp.servers).unwrap_or_default(),
+            mcp_server_deny: Vec::new(),
+            project_config_path: None,
+            project_safety_floor: None,
+            project_mcp_disabled: false,
+            project_mcp_allow: None,
         })
+    }
+
+    pub fn for_cwd(&self, cwd: &Path) -> Result<Self> {
+        let mut candidate = self.clone();
+        candidate.apply_project_config(cwd)?;
+        Ok(candidate)
+    }
+
+    pub fn apply_project_config(&mut self, cwd: &Path) -> Result<()> {
+        let cwd = cwd
+            .canonicalize()
+            .with_context(|| format!("failed to resolve project cwd {}", cwd.display()))?;
+        if !cwd.is_dir() {
+            anyhow::bail!("project cwd is not a directory: {}", cwd.display());
+        }
+        let Some(path) = find_project_config(&cwd) else {
+            return Ok(());
+        };
+        let metadata =
+            fs::metadata(&path).with_context(|| format!("failed to inspect {}", path.display()))?;
+        const MAX_PROJECT_CONFIG_BYTES: u64 = 1024 * 1024;
+        if metadata.len() > MAX_PROJECT_CONFIG_BYTES {
+            anyhow::bail!(
+                "project config exceeds {MAX_PROJECT_CONFIG_BYTES} bytes: {}",
+                path.display()
+            );
+        }
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let project: ProjectConfig =
+            toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        let mut candidate = self.clone();
+        candidate.apply_project_policy(project, &cwd, &path)?;
+        *self = candidate;
+        Ok(())
+    }
+
+    fn apply_project_policy(
+        &mut self,
+        project: ProjectConfig,
+        cwd: &Path,
+        path: &Path,
+    ) -> Result<()> {
+        if let Some(safety) = project.safety.as_deref() {
+            let safety = SafetyLevel::parse(safety)?;
+            self.safety = stricter_safety(self.safety, safety);
+            self.project_safety_floor = Some(self.safety);
+        }
+        if let Some(limit) = project.max_tool_rounds {
+            if limit == 0 {
+                anyhow::bail!("project max_tool_rounds must be greater than zero");
+            }
+            self.max_tool_rounds = narrower_round_limit(self.max_tool_rounds, limit);
+        }
+        if let Some(tools) = project.tools {
+            if let Some(allow) = tools.allow {
+                let allow = validate_tool_name_list(allow)?;
+                self.tools_allow = intersect_optional_allow(self.tools_allow.take(), allow);
+            }
+            merge_unique(&mut self.tools_deny, validate_tool_name_list(tools.deny)?);
+            if let Some(roots) = tools.readable_roots {
+                let roots = validate_root_list(roots, "readable_roots")?;
+                if let Some(global) = &self.readable_roots {
+                    ensure_roots_narrow(global, &roots, cwd, "readable_roots")?;
+                }
+                self.readable_roots = Some(roots);
+            }
+            if let Some(roots) = tools.writable_roots {
+                let roots = validate_root_list(roots, "writable_roots")?;
+                ensure_roots_narrow(&self.writable_roots, &roots, cwd, "writable_roots")?;
+                self.writable_roots = roots;
+            }
+        }
+        if let Some(skills) = project.skills {
+            self.inherit_global_skills &= skills.inherit_global;
+            if let Some(allow) = skills.allow {
+                let allow = validate_named_list(allow, "skill")?;
+                self.skills_allow = intersect_optional_allow(self.skills_allow.take(), allow);
+            }
+            merge_unique(
+                &mut self.skills_deny,
+                validate_named_list(skills.deny, "skill")?,
+            );
+        }
+        if let Some(mcp) = project.mcp {
+            if mcp.enabled == Some(false) {
+                self.mcp_enabled = false;
+                self.project_mcp_disabled = true;
+            }
+            if let Some(allow) = mcp.allow {
+                let allow = validate_mcp_server_name_list(allow)?;
+                self.project_mcp_allow = Some(allow.clone());
+                let configured_allow = allow
+                    .into_iter()
+                    .filter(|name| self.mcp_servers.iter().any(|server| server.name == *name))
+                    .collect();
+                self.mcp_server_allow =
+                    intersect_optional_allow(self.mcp_server_allow.take(), configured_allow);
+            }
+            let deny = validate_mcp_server_name_list(mcp.deny)?;
+            merge_unique(&mut self.mcp_server_deny, deny);
+        }
+        self.project_config_path = Some(path.to_path_buf());
+        Ok(())
+    }
+
+    pub fn enforce_project_constraints(&mut self) {
+        if let Some(floor) = self.project_safety_floor {
+            self.safety = stricter_safety(self.safety, floor);
+        }
+        if self.project_mcp_disabled {
+            self.mcp_enabled = false;
+        }
+    }
+
+    pub fn constrained_safety(&self, requested: SafetyLevel) -> SafetyLevel {
+        self.project_safety_floor
+            .map_or(requested, |floor| stricter_safety(requested, floor))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -452,6 +647,7 @@ impl Config {
                 ToolSelection::List(names) => ToolSelection::List(validate_tool_name_list(names)?),
             });
         }
+        candidate.enforce_project_constraints();
         *self = candidate;
         Ok(())
     }
@@ -542,19 +738,123 @@ impl Config {
 
     fn set_mcp_server_allow(&mut self, servers: Vec<String>) -> Result<()> {
         let servers = validate_mcp_server_name_list(servers)?;
+        self.ensure_known_mcp_servers(&servers, "--mcp list")?;
+        self.mcp_server_allow = intersect_optional_allow(self.mcp_server_allow.take(), servers);
+        Ok(())
+    }
+
+    fn ensure_known_mcp_servers(&self, servers: &[String], source: &str) -> Result<()> {
         let configured = self
             .mcp_servers
             .iter()
             .map(|server| server.name.as_str())
             .collect::<BTreeSet<_>>();
-        for server in &servers {
+        for server in servers {
             if !configured.contains(server.as_str()) {
-                anyhow::bail!("unknown MCP server requested by --mcp: {server}");
+                anyhow::bail!("unknown MCP server in {source}: {server}");
             }
         }
-        self.mcp_server_allow = Some(servers);
         Ok(())
     }
+}
+
+fn find_project_config(cwd: &Path) -> Option<PathBuf> {
+    cwd.ancestors()
+        .map(|dir| dir.join(".ferrum/config.toml"))
+        .find(|path| path.is_file())
+}
+
+fn stricter_safety(left: SafetyLevel, right: SafetyLevel) -> SafetyLevel {
+    use SafetyLevel::{High, Low, Medium};
+    match (left, right) {
+        (High, _) | (_, High) => High,
+        (Medium, _) | (_, Medium) => Medium,
+        (Low, Low) => Low,
+    }
+}
+
+fn narrower_round_limit(current: usize, project: usize) -> usize {
+    if current == 0 {
+        project
+    } else {
+        current.min(project)
+    }
+}
+
+fn intersect_optional_allow(
+    current: Option<Vec<String>>,
+    proposed: Vec<String>,
+) -> Option<Vec<String>> {
+    let Some(current) = current else {
+        return Some(proposed);
+    };
+    let proposed = proposed.into_iter().collect::<BTreeSet<_>>();
+    Some(
+        current
+            .into_iter()
+            .filter(|name| proposed.contains(name))
+            .collect(),
+    )
+}
+
+fn merge_unique(target: &mut Vec<String>, values: Vec<String>) {
+    let mut seen = target.iter().cloned().collect::<BTreeSet<_>>();
+    for value in values {
+        if seen.insert(value.clone()) {
+            target.push(value);
+        }
+    }
+}
+
+fn validate_named_list(values: Vec<String>, kind: &str) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for raw in values {
+        let name = raw.trim();
+        if name.is_empty() {
+            anyhow::bail!("{kind} lists must not contain empty entries");
+        }
+        if !seen.insert(name.to_string()) {
+            anyhow::bail!("duplicate {kind} name in {kind} list: {name}");
+        }
+        normalized.push(name.to_string());
+    }
+    Ok(normalized)
+}
+
+fn validate_root_list(values: Vec<PathBuf>, key: &str) -> Result<Vec<PathBuf>> {
+    if values.is_empty() {
+        anyhow::bail!("{key} must not be empty");
+    }
+    let mut seen = BTreeSet::new();
+    for value in &values {
+        if value.as_os_str().is_empty() {
+            anyhow::bail!("{key} must not contain empty paths");
+        }
+        if !seen.insert(value.clone()) {
+            anyhow::bail!("{key} contains duplicate path: {}", value.display());
+        }
+    }
+    Ok(values)
+}
+
+fn ensure_roots_narrow(
+    current: &[PathBuf],
+    proposed: &[PathBuf],
+    cwd: &Path,
+    key: &str,
+) -> Result<()> {
+    let current = crate::tools::write_policy::canonical_roots(cwd, current)?;
+    let proposed_resolved = crate::tools::write_policy::canonical_roots(cwd, proposed)?;
+    for (raw, resolved) in proposed.iter().zip(proposed_resolved) {
+        if !current.iter().any(|root| resolved.starts_with(root)) {
+            anyhow::bail!(
+                "project {key} entry {} broadens the global roots",
+                raw.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn validate_mcp_server_name_list(values: Vec<String>) -> Result<Vec<String>> {
@@ -724,6 +1024,142 @@ fn home_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn project_config_applies_only_restrictive_runtime_policy() {
+        let config_dir = TempDir::new().unwrap();
+        fs::write(
+            config_dir.path().join("config.toml"),
+            r#"
+safety = "low"
+max_tool_rounds = 20
+
+[tools]
+allow = ["read", "grep", "bash"]
+deny = ["write"]
+readable_roots = ["."]
+writable_roots = ["."]
+
+[[mcp.servers]]
+name = "time"
+command = "true"
+
+[[mcp.servers]]
+name = "chrome"
+command = "true"
+"#,
+        )
+        .unwrap();
+        let workspace = TempDir::new().unwrap();
+        let cwd = workspace.path().join("threads/one");
+        fs::create_dir_all(cwd.join("downloads")).unwrap();
+        fs::create_dir_all(workspace.path().join(".ferrum")).unwrap();
+        fs::write(
+            workspace.path().join(".ferrum/config.toml"),
+            r#"
+safety = "high"
+max_tool_rounds = 8
+
+[tools]
+allow = ["read", "grep"]
+deny = ["bash", "edit"]
+readable_roots = ["."]
+writable_roots = ["downloads"]
+
+[skills]
+inherit_global = false
+allow = ["bridge-help"]
+deny = ["other"]
+
+[mcp]
+enabled = false
+allow = ["time", "client-extra"]
+deny = ["chrome"]
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from_dir(config_dir.path().to_path_buf())
+            .unwrap()
+            .for_cwd(&cwd)
+            .unwrap();
+
+        assert_eq!(config.safety, SafetyLevel::High);
+        assert_eq!(config.project_safety_floor, Some(SafetyLevel::High));
+        assert_eq!(config.max_tool_rounds, 8);
+        assert_eq!(config.tools_allow, Some(vec!["read".into(), "grep".into()]));
+        assert_eq!(config.tools_deny, vec!["write", "bash", "edit"]);
+        assert_eq!(config.readable_roots, Some(vec![PathBuf::from(".")]));
+        assert_eq!(config.writable_roots, vec![PathBuf::from("downloads")]);
+        assert!(!config.inherit_global_skills);
+        assert_eq!(config.skills_allow, Some(vec!["bridge-help".into()]));
+        assert_eq!(config.skills_deny, vec!["other"]);
+        assert!(!config.mcp_enabled);
+        assert!(config.project_mcp_disabled);
+        assert_eq!(config.mcp_server_allow, Some(vec!["time".into()]));
+        assert_eq!(
+            config.project_mcp_allow,
+            Some(vec!["time".into(), "client-extra".into()])
+        );
+        assert_eq!(config.mcp_server_deny, vec!["chrome"]);
+        assert_eq!(
+            config.project_config_path,
+            Some(workspace.path().join(".ferrum/config.toml"))
+        );
+    }
+
+    #[test]
+    fn project_config_cannot_change_provider_or_broaden_roots() {
+        let config_dir = TempDir::new().unwrap();
+        fs::write(
+            config_dir.path().join("config.toml"),
+            "[tools]\nwritable_roots = [\"allowed\"]\n",
+        )
+        .unwrap();
+        let workspace = TempDir::new().unwrap();
+        let cwd = workspace.path().join("work");
+        fs::create_dir_all(cwd.join("allowed")).unwrap();
+        fs::create_dir_all(workspace.path().join(".ferrum")).unwrap();
+        fs::write(
+            workspace.path().join(".ferrum/config.toml"),
+            "provider = \"fake\"\n",
+        )
+        .unwrap();
+        let config = Config::load_from_dir(config_dir.path().to_path_buf()).unwrap();
+        let error = config.for_cwd(&cwd).unwrap_err();
+        assert!(format!("{error:#}").contains("unknown field `provider`"));
+
+        fs::write(
+            workspace.path().join(".ferrum/config.toml"),
+            "[tools]\nwritable_roots = [\"..\"]\n",
+        )
+        .unwrap();
+        let error = config.for_cwd(&cwd).unwrap_err();
+        assert!(error.to_string().contains("broadens the global roots"));
+    }
+
+    #[test]
+    fn cli_cannot_weaken_project_safety_or_reenable_project_disabled_mcp() {
+        let config_dir = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+        fs::create_dir_all(workspace.path().join(".ferrum")).unwrap();
+        fs::write(
+            workspace.path().join(".ferrum/config.toml"),
+            "safety = \"high\"\n[mcp]\nenabled = false\n",
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(config_dir.path().to_path_buf())
+            .unwrap()
+            .for_cwd(workspace.path())
+            .unwrap();
+
+        config
+            .apply_cli_overrides(None, None, None, Some("low"), Some(true), None, None)
+            .unwrap();
+
+        assert_eq!(config.safety, SafetyLevel::High);
+        assert!(!config.mcp_enabled);
+    }
 
     #[test]
     fn mcp_enabled_defaults_true() {

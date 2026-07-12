@@ -263,6 +263,8 @@ or, if XDG_CONFIG_HOME is unset:
 
 **~/.config/ferrum/config.toml**
 
+The nearest ancestor **.ferrum/config.toml** may add restrictive project policy for safety, tool exposure, native readable/writable roots, skills, MCP selection, and tool-round limits. It cannot configure providers, models, authentication, endpoints, or MCP executable definitions. ACP resolves this project policy separately from each session working directory.
+
 A minimal OpenAI-compatible provider configuration looks like:
 
 ```toml

@@ -845,6 +845,7 @@ mod tests {
 
         assert_denied_at("printf bad > ~/.config/ferrum/auth.json", SafetyLevel::Low);
         assert_denied_at("touch ~/.config/ferrum/.auth.json.lock", SafetyLevel::Low);
+        assert_denied_at("printf bad > .ferrum/config.toml", SafetyLevel::Low);
     }
 
     #[test]

@@ -32,9 +32,11 @@ Supported:
 
 Prompt responses use the official `stopReason` values. Text, resource-link, and validated image prompt blocks are accepted. Audio and embedded-resource prompt blocks are not advertised or accepted.
 
-Session IDs are Ferrum's durable JSONL session IDs. Listing is newest-first, supports absolute `cwd` filtering and opaque cursor pagination, and returns bounded pages. Loading replays persisted user, agent, thought, and tool updates before returning; resuming activates the same history without replay. The request `cwd` must match the persisted canonical directory. Session provider, model, thinking, safety, and tool metadata follows the normal Ferrum restoration rules; explicit ACP-process CLI overrides remain authoritative. Active sessions must be idle before close and must be closed before deletion.
+Session IDs are Ferrum's durable JSONL session IDs. Listing is newest-first, supports absolute `cwd` filtering and opaque cursor pagination, and returns bounded pages. Loading replays persisted user, agent, thought, and tool updates before returning; resuming activates the same history without replay. The request `cwd` must match the persisted canonical directory. Session provider, model, thinking, safety, and tool metadata follows the normal Ferrum restoration rules; explicit ACP-process CLI overrides remain authoritative unless a restrictive project policy narrows them. Active sessions must be idle before close and must be closed before deletion.
 
-Each active ACP session owns an independent Ferrum agent session and canonical absolute working directory. Ferrum's configured safety tier, tool selection, writable roots, credential protection, shell guards, containment, and other tier-independent checks remain in force.
+Each active ACP session owns an independent Ferrum agent session and canonical absolute working directory. Ferrum's configured safety tier, tool selection, readable and writable roots, credential protection, shell guards, containment, and other tier-independent checks remain in force.
+
+Ferrum resolves the nearest `.ferrum/config.toml` independently for every `session/new`, `session/load`, and `session/resume` canonical `cwd`. This project file is restrictive only: it can narrow tools, roots, skills, MCP access, safety, and tool-round limits, but cannot select providers/models, configure credentials or endpoints, or add MCP executable definitions. Current project restrictions remain authoritative over ACP-process CLI choices and restored session metadata. See [Configuration](config.md#project-local-restrictive-policy).
 
 ## Session commands
 

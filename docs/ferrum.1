@@ -312,6 +312,14 @@ or, if XDG_CONFIG_HOME is unset:
 .PP
 \f[B]\[ti]/.config/ferrum/config.toml\f[R]
 .PP
+The nearest ancestor \f[B].ferrum/config.toml\f[R] may add restrictive
+project policy for safety, tool exposure, native readable/writable
+roots, skills, MCP selection, and tool-round limits.
+It cannot configure providers, models, authentication, endpoints, or MCP
+executable definitions.
+ACP resolves this project policy separately from each session working
+directory.
+.PP
 A minimal OpenAI-compatible provider configuration looks like:
 .IP
 .nf

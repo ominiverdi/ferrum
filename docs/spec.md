@@ -165,6 +165,13 @@ Provider entries:
 - `type = "openai-compatible"` uses Chat Completions with `base_url` and optional `api_key_env`.
 - `type = "fake"` is for local tests/offline mode.
 
+Project policy:
+
+- The nearest ancestor `.ferrum/config.toml` is loaded for each canonical working directory, including each ACP session independently.
+- It may only narrow safety, tool exposure, native readable/writable roots, skills, MCP selection, and tool-round limits.
+- Provider/model selection, provider definitions, credentials, endpoint configuration, data paths, system prompt overrides, and MCP executable definitions remain user-global or CLI-owned.
+- Unknown project keys fail loading. Project policy remains authoritative over CLI choices and restored session metadata.
+
 Secrets:
 
 - API keys are read from environment variables named by `api_key_env`.

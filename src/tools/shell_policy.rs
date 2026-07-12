@@ -782,6 +782,9 @@ pub(super) fn is_protected_credential_path(arg: &str) -> bool {
                 || *name == ".auth.json.lock"
                 || name.starts_with(".auth.json."))
         })
+        || components
+            .windows(2)
+            .any(|parts| matches!(parts, [".ferrum", "config.toml"]))
 }
 
 fn normalize_shell_path(arg: &str) -> String {

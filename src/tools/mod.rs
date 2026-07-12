@@ -188,6 +188,7 @@ pub fn validate_before_permission(
     input: &serde_json::Value,
     cwd: &Path,
     safety: SafetyLevel,
+    readable_roots: Option<&[std::path::PathBuf]>,
     writable_roots: &[std::path::PathBuf],
 ) -> Result<bool> {
     match name {
@@ -259,11 +260,21 @@ pub fn validate_before_permission(
             }
             Ok(true)
         }
-        "read" | "ls" | "grep" | "find" => Ok(false),
+        "read" | "grep" | "find" => {
+            let path = required_str(input, "path")?;
+            validate_native_read_path(path, cwd, readable_roots)?;
+            Ok(false)
+        }
+        "ls" => {
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            validate_native_read_path(path, cwd, readable_roots)?;
+            Ok(false)
+        }
         other => anyhow::bail!("unknown tool: {other}"),
     }
 }
 
+#[cfg(test)]
 pub async fn execute_with_cancel_and_safety(
     name: &str,
     input: &serde_json::Value,
@@ -271,6 +282,30 @@ pub async fn execute_with_cancel_and_safety(
     cancel: Option<Arc<AtomicBool>>,
     progress: bool,
     safety: SafetyLevel,
+    writable_roots: &[std::path::PathBuf],
+) -> Result<String> {
+    execute_with_cancel_and_policy(
+        name,
+        input,
+        cwd,
+        cancel,
+        progress,
+        safety,
+        None,
+        writable_roots,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_with_cancel_and_policy(
+    name: &str,
+    input: &serde_json::Value,
+    cwd: &Path,
+    cancel: Option<Arc<AtomicBool>>,
+    progress: bool,
+    safety: SafetyLevel,
+    readable_roots: Option<&[std::path::PathBuf]>,
     writable_roots: &[std::path::PathBuf],
 ) -> Result<String> {
     match name {
@@ -282,6 +317,7 @@ pub async fn execute_with_cancel_and_safety(
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             let resolved = path::resolve_to_cwd(path, cwd)?;
+            validate_native_read_path(path, cwd, readable_roots)?;
             tokio::task::spawn_blocking(move || read::read_text(&resolved, offset, limit))
                 .await
                 .context("read worker failed")?
@@ -293,6 +329,7 @@ pub async fn execute_with_cancel_and_safety(
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
             let resolved = path::resolve_to_cwd(path, cwd)?;
+            validate_native_read_path(path, cwd, readable_roots)?;
             tokio::task::spawn_blocking(move || ls::list(&resolved, limit))
                 .await
                 .context("ls worker failed")?
@@ -401,6 +438,7 @@ pub async fn execute_with_cancel_and_safety(
             };
             let pattern = pattern.to_string();
             let resolved = path::resolve_to_cwd(path, cwd)?;
+            validate_native_read_path(path, cwd, readable_roots)?;
             let glob = options.glob.map(str::to_string);
             let cancel = cancel.clone();
             tokio::task::spawn_blocking(move || {
@@ -432,6 +470,7 @@ pub async fn execute_with_cancel_and_safety(
                     .map(|v| v as usize),
             };
             let resolved = path::resolve_to_cwd(path, cwd)?;
+            validate_native_read_path(path, cwd, readable_roots)?;
             let pattern = options.pattern.map(str::to_string);
             let name = options.name.map(str::to_string);
             let extension = options.extension.map(str::to_string);
@@ -453,6 +492,18 @@ pub async fn execute_with_cancel_and_safety(
         }
         other => anyhow::bail!("unknown tool: {other}"),
     }
+}
+
+fn validate_native_read_path(
+    input: &str,
+    cwd: &Path,
+    readable_roots: Option<&[std::path::PathBuf]>,
+) -> Result<()> {
+    let Some(roots) = readable_roots else {
+        return Ok(());
+    };
+    let resolved = path::resolve_to_cwd(input, cwd)?;
+    write_policy::validate_read_path(&resolved, cwd, roots)
 }
 
 fn render_bash_output(output: &bash::BashOutput) -> String {
@@ -640,6 +691,34 @@ mod tests {
 
         let output = execute("bash", &input, root.path()).await.unwrap();
         assert!(output.contains("stdout:\nrm -rf /"), "{output}");
+    }
+
+    #[tokio::test]
+    async fn native_reads_are_limited_to_readable_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().join("outside.txt");
+        std::fs::write(&outside_path, "secret").unwrap();
+        let input = json!({"path": outside_path});
+
+        let error = execute_with_cancel_and_policy(
+            "read",
+            &input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::Low,
+            Some(&[std::path::PathBuf::from(".")]),
+            &[std::path::PathBuf::from(".")],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured readable roots")
+        );
     }
 
     #[tokio::test]

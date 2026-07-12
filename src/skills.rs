@@ -32,33 +32,63 @@ pub fn discover(
     config_dir: &Path,
     cwd: &Path,
     allow_external_global_symlinks: bool,
+    inherit_global: bool,
+    allow: Option<&[String]>,
+    deny: &[String],
 ) -> Result<Vec<Skill>> {
-    discover_with_home(
+    discover_with_home_policy(
         config_dir,
         &home_dir()?,
         cwd,
         allow_external_global_symlinks,
+        inherit_global,
+        allow,
+        deny,
     )
 }
 
+#[cfg(test)]
 fn discover_with_home(
     config_dir: &Path,
     home: &Path,
     cwd: &Path,
     allow_external_global_symlinks: bool,
 ) -> Result<Vec<Skill>> {
+    discover_with_home_policy(
+        config_dir,
+        home,
+        cwd,
+        allow_external_global_symlinks,
+        true,
+        None,
+        &[],
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn discover_with_home_policy(
+    config_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    allow_external_global_symlinks: bool,
+    inherit_global: bool,
+    allow: Option<&[String]>,
+    deny: &[String],
+) -> Result<Vec<Skill>> {
     let mut discovery = Discovery::default();
 
-    discovery.add_root(
-        &config_dir.join("skills"),
-        true,
-        allow_external_global_symlinks,
-    )?;
-    discovery.add_root(
-        &home.join(".agents/skills"),
-        false,
-        allow_external_global_symlinks,
-    )?;
+    if inherit_global {
+        discovery.add_root(
+            &config_dir.join("skills"),
+            true,
+            allow_external_global_symlinks,
+        )?;
+        discovery.add_root(
+            &home.join(".agents/skills"),
+            false,
+            allow_external_global_symlinks,
+        )?;
+    }
 
     let mut ancestors = project_ancestors(cwd);
     ancestors.reverse();
@@ -68,7 +98,17 @@ fn discover_with_home(
         discovery.add_root(&dir.join(".agents/skills"), false, false)?;
     }
 
-    Ok(dedup_project_overrides(discovery.skills))
+    let allow = allow.map(|names| names.iter().map(String::as_str).collect::<HashSet<_>>());
+    let deny = deny.iter().map(String::as_str).collect::<HashSet<_>>();
+    Ok(dedup_project_overrides(discovery.skills)
+        .into_iter()
+        .filter(|skill| {
+            allow
+                .as_ref()
+                .is_none_or(|allow| allow.contains(skill.name.as_str()))
+                && !deny.contains(skill.name.as_str())
+        })
+        .collect())
 }
 
 #[derive(Default)]
@@ -610,6 +650,52 @@ mod tests {
         assert!(!valid_skill_name("PDF"));
         assert!(!valid_skill_name("-pdf"));
         assert!(!valid_skill_name("pdf--tools"));
+    }
+
+    #[test]
+    fn project_policy_can_exclude_global_skills_and_filter_project_skills() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = temp.path().join("config");
+        let home = temp.path().join("home");
+        let project = temp.path().join("project");
+        fs::create_dir_all(project.join(".ferrum")).unwrap();
+        write_skill(
+            &config.join("skills/global/SKILL.md"),
+            "global",
+            "global skill",
+            "global",
+        );
+        write_skill(
+            &project.join(".ferrum/skills/allowed/SKILL.md"),
+            "allowed",
+            "allowed skill",
+            "allowed",
+        );
+        write_skill(
+            &project.join(".ferrum/skills/denied/SKILL.md"),
+            "denied",
+            "denied skill",
+            "denied",
+        );
+
+        let skills = discover_with_home_policy(
+            &config,
+            &home,
+            &project,
+            false,
+            false,
+            Some(&["allowed".to_string(), "global".to_string()]),
+            &["denied".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            skills
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>(),
+            ["allowed"]
+        );
     }
 
     #[test]

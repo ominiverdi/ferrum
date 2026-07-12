@@ -142,7 +142,7 @@ ferrum --session port-audit --tools bash -p "compare current open ports with pri
 
 ## Minimal config
 
-Ferrum reads config from `~/.config/ferrum/config.toml`.
+Ferrum reads user configuration from `~/.config/ferrum/config.toml`. A project may add a restrictive `.ferrum/config.toml` for tool, root, skill, MCP, safety, and turn-limit policy; it cannot change providers or authentication. See [`docs/config.md`](docs/config.md).
 
 An optional system prompt override can live at `~/.config/ferrum/system.md`.
 

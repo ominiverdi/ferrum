@@ -33,6 +33,12 @@ async fn main() {
 async fn run() -> Result<()> {
     let args = cli::Args::parse();
     let mut config = config::Config::load()?;
+    if !matches!(
+        &args.command,
+        Some(cli::Command::Acp { .. } | cli::Command::Login { .. })
+    ) {
+        config.apply_project_config(&std::env::current_dir()?)?;
+    }
     let mcp_enabled = if args.no_mcp {
         Some(false)
     } else if args.mcp.is_some() {
