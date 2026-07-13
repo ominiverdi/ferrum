@@ -1,12 +1,12 @@
 # Ferrum
 
-Ferrum is a small Rust-native coding agent for Linux.
+Ferrum is a small Rust-native coding agent for Linux with interactive and print modes.
 
-It provides a simple CLI, local file and shell tools, image input, JSONL sessions, AGENTS.md context loading, configurable OpenAI-compatible providers, ChatGPT/Codex OAuth, Agent Skills, and a minimal MCP stdio bridge.
+It provides local file and shell tools, image input, JSONL sessions, AGENTS.md context loading, configurable OpenAI-compatible providers, ChatGPT/Codex OAuth, Agent Skills, and an MCP stdio bridge.
 
 Ferrum is inspired by Pi's agent-harness ideas, but it is a separate Rust project. It does not aim to support Pi extensions, packages, themes, or SDK compatibility.
 
-Status: early MVP. Useful for real work, still evolving.
+Status: active beta. Ready for day-to-day Linux coding work, still evolving.
 
 Primary repository and binary releases: https://codeberg.org/ominiverdi/ferrum
 
@@ -22,7 +22,7 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 - Provider-supplied thinking display for supported models
 - Image input with optional terminal previews
 - Agent Skills-style instruction packages
-- Minimal MCP stdio tool bridge
+- MCP stdio tool bridge
 - OpenAI Codex / ChatGPT OAuth provider
 - OpenAI-compatible providers for remote APIs and local servers
 - Config-backed provider registry
@@ -56,6 +56,13 @@ curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-
 sha256sum -c ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
+Debian and RPM packages are also available on the release page:
+
+```bash
+sudo apt install ./ferrum_0.7.2_amd64.deb
+sudo dnf install ./ferrum-0.7.2-1.x86_64.rpm
+```
+
 ### From source
 
 Install with Cargo:
@@ -74,7 +81,6 @@ sudo install -Dm644 docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 mandb 2>/dev/null || true
 man ferrum
 ```
-
 
 ## Quick start
 
@@ -140,7 +146,7 @@ ferrum --session port-audit --tools bash -p "compare current open ports with pri
 
 ## Minimal config
 
-Ferrum reads user configuration from `~/.config/ferrum/config.toml`. A project may add a restrictive `.ferrum/config.toml` for tool, root, skill, MCP, safety, and turn-limit policy; it cannot change providers or authentication. See [`docs/config.md`](docs/config.md).
+Ferrum reads user configuration from `~/.config/ferrum/config.toml`. This is an example starting point; adjust the provider, model, and context budget for your account and backend. A project may add a restrictive `.ferrum/config.toml` for tool, root, skill, MCP, safety, and turn-limit policy; it cannot change providers or authentication. See [`docs/config.md`](docs/config.md).
 
 An optional system prompt override can live at `~/.config/ferrum/system.md`.
 
