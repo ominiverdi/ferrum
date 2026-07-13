@@ -83,6 +83,7 @@ Ferrum's supported integration surface is the stable ACP v1 stdio subset documen
 | `acpx` | 0.12.0 | initialization with filesystem/terminal capabilities, session creation, text streaming, and normal turn completion |
 | Official Python `agent-client-protocol` SDK | 0.11.0 | initialization without optional filesystem/terminal services; create, text and validated PNG prompts, list, resume after process restart, load/replay, close, and streaming updates |
 | `opencode-chat-bridge` reference checkout | 0.4.0 plus the backend-neutral adapter patch | executable/argument selection, omitted optional client capabilities, text and thought streaming, command discovery/execution, tool activity/result mapping, cancellation, process restart, durable session resume/delete, isolated per-thread working directories, and restrictive Ferrum workspace policy |
+| Zed | 1.10.3 | custom External Agent configuration, ACP process startup, and normal thread use |
 
 Ferrum's black-box stdio suite additionally covers successful and failed tool updates, client-supplied stdio MCP, permissions, concurrent isolated sessions, cancellation, abrupt output disconnect, malformed requests, incompatible protocol versions, bounded session persistence, and stdout protocol cleanliness.
 
@@ -95,6 +96,10 @@ acpx --agent "/usr/bin/ferrum acp" --cwd "$PWD" exec "summarize this project"
 ```
 
 A persistent `acpx` session can use its normal `sessions new`, prompt, close, and reconnect flows. Ferrum configuration, credentials, safety, and project policy still come from Ferrum; ACP client capability declarations do not grant tools or bypass policy.
+
+### Zed example
+
+Zed can launch Ferrum as a custom External Agent and host its ACP threads in the Agent Panel and Threads Sidebar. See [Using Ferrum in Zed](zed.md) for setup, permission behavior, configuration boundaries, and troubleshooting.
 
 ### Chat bridge example
 

@@ -301,6 +301,7 @@ Shell shortcuts:
 - Images: [`docs/images.md`](docs/images.md)
 - MCP: [`docs/mcp.md`](docs/mcp.md) for stdio server configuration, tool-name namespacing, frame limits, and safety notes
 - ACP v1 support and interoperability: [`docs/acp.md`](docs/acp.md)
+- Zed External Agent setup: [`docs/zed.md`](docs/zed.md)
 - Provider secrets investigation: [`docs/provider-secrets.md`](docs/provider-secrets.md)
 - Skills: [`docs/skills.md`](docs/skills.md)
 - Roadmap: [`docs/roadmap.md`](docs/roadmap.md)
