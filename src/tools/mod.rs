@@ -22,7 +22,8 @@ use std::{
 
 const DEFAULT_BASH_TIMEOUT_SECONDS: u64 = 30;
 pub(crate) const MAX_BASH_TIMEOUT_SECONDS: u64 = 600;
-const MAX_WAIT_SECONDS: u64 = 1800;
+const MAX_WAIT_INTERVAL_SECONDS: u64 = 1800;
+const MAX_WAIT_TOTAL_SECONDS: u64 = 7 * 24 * 60 * 60;
 
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![
@@ -70,14 +71,39 @@ pub fn definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "wait".to_string(),
-            description: "Wait in the foreground, then run a bash command using the same permissions, timeout, output limits, process cleanup, execution tier, and writable-root policy as the bash tool. Use this for scheduled follow-up checks up to 30 minutes. Esc or Ctrl-C aborts the wait or command."
+            description: "Wait in the foreground, then run a bash command using the same permissions, timeout, output limits, process cleanup, execution tier, and writable-root policy as the bash tool. With until and max_wait_seconds, repeat the check at the requested interval and return only on a regex match, command failure, deadline, or cancellation. Intervals are capped at 30 minutes and monitoring at 7 days. Esc or Ctrl-C aborts."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "seconds": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT_SECONDS },
+                    "seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_WAIT_INTERVAL_SECONDS,
+                        "description": "Delay before the command and interval between repeated checks"
+                    },
                     "command": { "type": "string" },
-                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": MAX_BASH_TIMEOUT_SECONDS }
+                    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": MAX_BASH_TIMEOUT_SECONDS },
+                    "until": {
+                        "type": "object",
+                        "description": "Repeat until this condition matches stdout or stderr; requires max_wait_seconds",
+                        "properties": {
+                            "output_matches": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 1024,
+                                "description": "Case-sensitive Rust regular expression; use (?i) for case-insensitive matching"
+                            }
+                        },
+                        "required": ["output_matches"],
+                        "additionalProperties": false
+                    },
+                    "max_wait_seconds": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_WAIT_TOTAL_SECONDS,
+                        "description": "Maximum foreground monitoring duration before one final check; valid only with until"
+                    }
                 },
                 "required": ["seconds", "command"],
                 "additionalProperties": false
@@ -207,26 +233,8 @@ pub fn validate_before_permission(
             Ok(true)
         }
         "wait" => {
-            let seconds = input
-                .get("seconds")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| anyhow::anyhow!("missing required integer field: seconds"))?;
-            if seconds == 0 || seconds > MAX_WAIT_SECONDS {
-                anyhow::bail!(
-                    "wait seconds must be between 1 and {MAX_WAIT_SECONDS}, got {seconds}"
-                );
-            }
-            let command = required_str(input, "command")?;
-            shell_guard::validate_with_policy(command, cwd, writable_roots, safety)?;
-            let timeout = input
-                .get("timeout_seconds")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(DEFAULT_BASH_TIMEOUT_SECONDS);
-            if timeout > MAX_BASH_TIMEOUT_SECONDS {
-                anyhow::bail!(
-                    "wait timeout_seconds must be <= {MAX_BASH_TIMEOUT_SECONDS}, got {timeout}"
-                );
-            }
+            let options = parse_wait_options(input)?;
+            shell_guard::validate_with_policy(options.command, cwd, writable_roots, safety)?;
             Ok(true)
         }
         "write" => {
@@ -351,36 +359,22 @@ pub async fn execute_with_cancel_and_policy(
             Ok(render_bash_output(&output))
         }
         "wait" => {
-            let seconds = input
-                .get("seconds")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| anyhow::anyhow!("missing required integer field: seconds"))?;
-            if seconds == 0 || seconds > MAX_WAIT_SECONDS {
-                anyhow::bail!(
-                    "wait seconds must be between 1 and {MAX_WAIT_SECONDS}, got {seconds}"
-                );
-            }
-            let command = required_str(input, "command")?;
-            shell_guard::validate_with_policy(command, cwd, writable_roots, safety)?;
-            let timeout = input
-                .get("timeout_seconds")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(DEFAULT_BASH_TIMEOUT_SECONDS);
-            if timeout > MAX_BASH_TIMEOUT_SECONDS {
-                anyhow::bail!(
-                    "wait timeout_seconds must be <= {MAX_BASH_TIMEOUT_SECONDS}, got {timeout}"
-                );
-            }
+            let options = parse_wait_options(input)?;
+            shell_guard::validate_with_policy(options.command, cwd, writable_roots, safety)?;
             let output = wait::run(
-                command,
-                cwd,
-                Duration::from_secs(seconds),
-                Duration::from_secs(timeout),
+                wait::RunOptions {
+                    command: options.command,
+                    cwd,
+                    interval: Duration::from_secs(options.seconds),
+                    timeout: Duration::from_secs(options.timeout),
+                    until: options.until.as_ref(),
+                    max_wait: options.max_wait.map(Duration::from_secs),
+                },
                 cancel,
                 progress,
             )
             .await?;
-            Ok(render_bash_output(&output))
+            Ok(render_wait_output(&output))
         }
         "write" => {
             if matches!(safety, SafetyLevel::High) {
@@ -506,6 +500,67 @@ fn validate_native_read_path(
     write_policy::validate_read_path(&resolved, cwd, roots)
 }
 
+#[derive(Debug)]
+struct WaitOptions<'a> {
+    command: &'a str,
+    seconds: u64,
+    timeout: u64,
+    until: Option<wait::UntilCondition>,
+    max_wait: Option<u64>,
+}
+
+fn parse_wait_options(input: &serde_json::Value) -> Result<WaitOptions<'_>> {
+    let seconds = input
+        .get("seconds")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("missing required integer field: seconds"))?;
+    if seconds == 0 || seconds > MAX_WAIT_INTERVAL_SECONDS {
+        anyhow::bail!(
+            "wait seconds must be between 1 and {MAX_WAIT_INTERVAL_SECONDS}, got {seconds}"
+        );
+    }
+
+    let command = required_str(input, "command")?;
+    let timeout = input
+        .get("timeout_seconds")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(DEFAULT_BASH_TIMEOUT_SECONDS);
+    if timeout == 0 || timeout > MAX_BASH_TIMEOUT_SECONDS {
+        anyhow::bail!(
+            "wait timeout_seconds must be between 1 and {MAX_BASH_TIMEOUT_SECONDS}, got {timeout}"
+        );
+    }
+
+    let until = wait::parse_until(input.get("until"))?;
+    let max_wait =
+        match input.get("max_wait_seconds") {
+            Some(value) => Some(value.as_u64().ok_or_else(|| {
+                anyhow::anyhow!("wait max_wait_seconds must be a positive integer")
+            })?),
+            None => None,
+        };
+    if let Some(max_wait) = max_wait
+        && (max_wait == 0 || max_wait > MAX_WAIT_TOTAL_SECONDS)
+    {
+        anyhow::bail!(
+            "wait max_wait_seconds must be between 1 and {MAX_WAIT_TOTAL_SECONDS}, got {max_wait}"
+        );
+    }
+    match (until.is_some(), max_wait.is_some()) {
+        (true, false) => anyhow::bail!("wait until requires max_wait_seconds"),
+        (false, true) => anyhow::bail!("wait max_wait_seconds requires until"),
+        _ => {}
+    }
+
+    Ok(WaitOptions {
+        command,
+        seconds,
+        timeout,
+        until,
+        max_wait,
+    })
+}
+
 fn render_bash_output(output: &bash::BashOutput) -> String {
     format!(
         "outcome: {}\nstatus: {:?}\noutput_incomplete: {}\noutput_error: {}\ntermination_error: {}\ncontainment: {}\ncontainment_error: {}\nresidual_descendants: {}\nstdout:\n{}\nstderr:\n{}",
@@ -522,6 +577,16 @@ fn render_bash_output(output: &bash::BashOutput) -> String {
             .unwrap_or_else(|| "unknown".to_string()),
         output.stdout,
         output.stderr
+    )
+}
+
+fn render_wait_output(output: &wait::WaitOutput) -> String {
+    format!(
+        "wait_reason: {}\nchecks: {}\nelapsed_seconds: {}\n{}",
+        output.reason.as_str(),
+        output.checks,
+        output.elapsed.as_secs(),
+        render_bash_output(&output.output)
     )
 }
 
@@ -550,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_schema_allows_thirty_minute_delay() {
+    fn wait_schema_allows_thirty_minute_intervals_and_seven_day_monitoring() {
         let wait = definitions()
             .into_iter()
             .find(|tool| tool.name == "wait")
@@ -558,16 +623,65 @@ mod tests {
 
         assert_eq!(
             wait.input_schema["properties"]["seconds"]["maximum"],
-            MAX_WAIT_SECONDS
+            MAX_WAIT_INTERVAL_SECONDS
         );
-        assert_eq!(MAX_WAIT_SECONDS, 1800);
+        assert_eq!(
+            wait.input_schema["properties"]["max_wait_seconds"]["maximum"],
+            MAX_WAIT_TOTAL_SECONDS
+        );
+        assert_eq!(MAX_WAIT_INTERVAL_SECONDS, 1800);
+        assert_eq!(MAX_WAIT_TOTAL_SECONDS, 604800);
+    }
+
+    #[test]
+    fn wait_monitor_requires_condition_and_deadline_together() {
+        let missing_deadline = serde_json::json!({
+            "seconds": 60,
+            "command": "true",
+            "until": { "output_matches": "done" }
+        });
+        let missing_condition = serde_json::json!({
+            "seconds": 60,
+            "command": "true",
+            "max_wait_seconds": 3600
+        });
+
+        assert!(
+            parse_wait_options(&missing_deadline)
+                .unwrap_err()
+                .to_string()
+                .contains("until requires max_wait_seconds")
+        );
+        assert!(
+            parse_wait_options(&missing_condition)
+                .unwrap_err()
+                .to_string()
+                .contains("max_wait_seconds requires until")
+        );
+    }
+
+    #[test]
+    fn wait_monitor_rejects_total_above_limit() {
+        let input = serde_json::json!({
+            "seconds": 60,
+            "command": "true",
+            "until": { "output_matches": "done" },
+            "max_wait_seconds": MAX_WAIT_TOTAL_SECONDS + 1
+        });
+
+        assert!(
+            parse_wait_options(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("wait max_wait_seconds must be between")
+        );
     }
 
     #[tokio::test]
     async fn wait_rejects_delay_above_limit() {
         let temp = tempfile::tempdir().unwrap();
         let input = serde_json::json!({
-            "seconds": MAX_WAIT_SECONDS + 1,
+            "seconds": MAX_WAIT_INTERVAL_SECONDS + 1,
             "command": "true",
         });
 
@@ -587,6 +701,8 @@ mod tests {
 
         let output = execute("wait", &input, temp.path()).await.unwrap();
 
+        assert!(output.contains("wait_reason: check_completed"), "{output}");
+        assert!(output.contains("checks: 1"), "{output}");
         assert!(output.contains("stdout:\ndone"), "{output}");
     }
 

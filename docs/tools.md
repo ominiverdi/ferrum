@@ -207,6 +207,8 @@ For broad filesystem exploration, prefer the native `find`, `grep`, and `ls` too
 
 Wait in the foreground, then run a bash command in cwd using the same execution tier, writable roots, and command cleanup path as `bash`.
 
+One scheduled check:
+
 ```json
 {
   "seconds": 240,
@@ -215,9 +217,25 @@ Wait in the foreground, then run a bash command in cwd using the same execution 
 }
 ```
 
-`seconds` is capped at 30 minutes. `timeout_seconds` has the same cap as `bash`. Interactive mode shows a lightweight progress line during the wait. Press `Esc` or `Ctrl-C` to abort the wait or the command and return to the prompt.
+Repeated foreground monitoring:
 
-`wait` is foreground-only. It blocks the current Ferrum session while waiting and running, but the result is persisted like any other tool result. It is exposed only when `bash` is available, because it is delayed bash rather than a separate execution capability.
+```json
+{
+  "seconds": 1800,
+  "command": "ssh host 'check-job-status'",
+  "timeout_seconds": 60,
+  "until": {
+    "output_matches": "(?i)success|error"
+  },
+  "max_wait_seconds": 43200
+}
+```
+
+With `until`, `wait` runs the same command after each interval and returns only when the regular expression matches stdout or stderr, a command fails, the maximum wait is reached, or the user aborts. `max_wait_seconds` is required with `until`, and `until` is required with `max_wait_seconds`. The final result reports the completion reason, check count, elapsed time, and final command output; intermediate output is discarded.
+
+`seconds` is an interval capped at 30 minutes. `max_wait_seconds` is capped at 7 days and schedules one final check when reached. `timeout_seconds` applies separately to each command and has the same cap as `bash`. Interactive mode shows a lightweight progress line. Press `Esc` or `Ctrl-C` to abort the wait or current command and return to the prompt.
+
+`wait` is foreground-only and stops if Ferrum exits. It blocks the current Ferrum session, but its final result is persisted like any other tool result. It is exposed only when `bash` is available, because it is delayed bash rather than a separate execution capability.
 
 ## grep
 

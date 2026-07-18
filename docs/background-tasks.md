@@ -1,8 +1,8 @@
 # Background tasks design note
 
-This is an exploratory design note. It is not an implementation plan yet.
+This is a deferred exploratory design note, not an implementation plan. Ferrum's preferred monitoring model is the foreground polling mode of `wait`: monitoring may safely stop with Ferrum, and the user can resume the same session and request another check.
 
-Ferrum may eventually need a first-class way to run independent agentic work in the background. The motivating case is a long-running operation such as a model download, build, training job, sync, or backup where a normal foreground tool call is the wrong abstraction.
+A first-class background feature should be reconsidered only if a concrete use case requires work or monitoring to survive Ferrum exiting, run concurrently with the active session, or deliver durable asynchronous events.
 
 ## Problem
 
@@ -218,12 +218,4 @@ A proper implementation should include:
 
 ## Recommended path
 
-Start with Level 1 passive monitors only:
-
-1. Add task registry and event queue.
-2. Add model-facing tools to start, inspect, and stop a passive monitor.
-3. Add event draining before and after interactive turns.
-4. Append drained events to the session as visible synthetic system messages.
-5. Later consider idle prompt refresh and desktop notifications.
-
-Do not start with autonomous mutation. Build the durable event and audit substrate first.
+Do not implement background tasks without a concrete persistence or concurrency requirement. Use foreground `wait` monitoring for observational polling. If the requirement emerges later, start with Level 1 passive monitors and do not start with autonomous mutation.
