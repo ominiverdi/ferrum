@@ -8,6 +8,7 @@ mod config;
 mod context;
 mod mcp;
 mod persistence;
+mod picker;
 mod process_containment;
 mod providers;
 mod session;

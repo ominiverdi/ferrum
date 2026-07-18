@@ -223,7 +223,7 @@ Fields:
 - `actual_model`: model id sent to the provider; defaults to the alias name
 - `max_context_tokens`: model-specific operating context budget
 
-This lets each model or alias use a tuned context budget while preserving friendly names for interactive `/model` selection. `/model <Tab>` starts with these configured aliases and the current model; after a successful `/models` call it also completes bounded, command-safe single-token model ids returned by the active provider. The cache is process-local and cleared when the active provider changes.
+This lets each model or alias use a tuned context budget while preserving friendly names for interactive `/model` selection. The `/models` picker is scoped to the active provider: aliases with an explicit `provider` appear for that provider, while aliases without one appear only when their `actual_model` is returned by the active provider's live model query. The `/providers` picker adds a `providerless` entry when such aliases exist; selecting it opens their complete configured list. `/model <Tab>` starts with configured aliases and the current model; after a successful `/models` call it also completes bounded, command-safe single-token model ids returned by the active provider. The cache is process-local and cleared when the active provider changes.
 
 ### max_context_tokens
 
@@ -391,7 +391,7 @@ diff_meta = "dim"
 
 Missing `colors.toml` uses the defaults above. Invalid or unknown entries are ignored with a warning.
 
-Reusable palettes can live in `~/.config/ferrum/color-palettes/*.toml`. In interactive mode, `/palette` shows the current palette, `/palettes` lists palette files, and `/palette <name>` validates and applies one live by writing it to `colors.toml`.
+Reusable palettes can live in `~/.config/ferrum/color-palettes/*.toml`. In interactive mode, `/palette` shows the current palette, `/palettes` opens the numbered, searchable palette picker, and `/palette <name>` validates and applies one live by writing it to `colors.toml`. `/palette default` restores Ferrum's built-in colors.
 
 Supported color values include ANSI-style names, bright ANSI-style names, xterm 256-color table names, xterm 256-color indexes, RGB hex values, and simple styles:
 
@@ -495,8 +495,11 @@ ferrum --thinking high -p "reason about this"
 Interactive:
 
 ```text
+/thinking
 /thinking high
 ```
+
+`/thinking` opens the thinking-level picker. Supplying a level selects it directly.
 
 Ferrum stores thinking level in session metadata. Resuming or switching sessions restores that session's thinking level unless the process was started with an explicit `--thinking` override.
 

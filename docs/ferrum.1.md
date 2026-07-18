@@ -171,10 +171,7 @@ Common slash commands:
 : Start a new session. This is the short alias for **/sessions new**.
 
 **/sessions**
-: List recent sessions.
-
-**/sessions pick**
-: Open an interactive session picker.
+: Open the numbered, searchable session picker. Press Esc to return to the prompt without switching.
 
 **/sessions del**
 : Open an interactive session deletion picker.
@@ -192,7 +189,7 @@ Common slash commands:
 : Switch model.
 
 **/models**
-: List models known to the active provider and cache them for **/model** Tab completion until the active provider changes.
+: Fetch models known to the active provider, cache them for **/model** Tab completion, and open the numbered, searchable model picker.
 
 **/login** {openai,openai-codex}
 : Run the OpenAI Codex / ChatGPT OAuth flow from the interactive session.
@@ -201,28 +198,28 @@ Common slash commands:
 : Switch provider.
 
 **/providers**
-: List configured providers.
+: Open the numbered, searchable provider picker. If configured model aliases omit **provider**, the **providerless** entry opens those aliases.
 
 **/mcp** on|off|status|list
 : Manage MCP server availability for the current session.
 
-**/thinking** LEVEL
-: Set thinking level.
+**/thinking** [LEVEL]
+: Open the thinking-level picker, or set the level directly.
 
-**/safety** LEVEL
-: Set tool execution safety level.
+**/safety** [LEVEL]
+: Open the safety-level picker, or set the level directly.
 
-**/diff** MODE
-: Set diff display mode.
+**/diff** [MODE]
+: Open the diff-mode picker, or set the mode directly.
 
-**/colors** MODE
-: Set color mode.
+**/colors** [MODE]
+: Open the color-mode picker, or set the mode directly.
 
 **/palette** [NAME]
-: Show the current palette, or validate, apply, and persist a palette to **~/.config/ferrum/colors.toml**.
+: Show the current palette, or validate, apply, and persist a palette to **~/.config/ferrum/colors.toml**. Use **default** to restore Ferrum's built-in colors.
 
 **/palettes**
-: List palettes from **~/.config/ferrum/color-palettes/**.
+: Open the numbered, searchable palette picker using **~/.config/ferrum/color-palettes/**.
 
 **/usage** [day|week|month]
 : Show token usage summary.
@@ -322,9 +319,10 @@ Xterm names are matched case-insensitively. Spaces, dashes, and underscores are
 ignored, and **gray**/**grey** are equivalent. Duplicate xterm names map to the
 first matching xterm index; use numeric indexes for exact selection. Reusable
 palettes can live in **~/.config/ferrum/color-palettes/*.toml**; **/palette**
-shows the current palette, **/palettes** lists palette files, and **/palette
-NAME** validates and applies one live. See **docs/colors.md** for all palette
-keys and color values.
+shows the current palette, **/palettes** opens the palette picker, and
+**/palette NAME** validates and applies one live. **/palette default** restores
+Ferrum's built-in colors. See **docs/colors.md** for all palette keys and color
+values.
 
 # FILES
 
@@ -335,7 +333,7 @@ keys and color values.
 : Optional semantic UI color palette.
 
 **~/.config/ferrum/color-palettes/*.toml**
-: Optional reusable UI palettes selectable with **/palette** and listed with **/palettes**.
+: Optional reusable UI palettes selectable with **/palette** and **/palettes**.
 
 **~/.local/share/ferrum/sessions/**
 : JSONL session store, unless data directory is overridden by XDG variables.
@@ -351,9 +349,9 @@ configuration directory.
 Download the release tarball from Codeberg, extract it, and install the binary and man page:
 
 ```sh
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.7.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.7.2-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.7.3-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.7.3-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -362,9 +360,9 @@ man ferrum
 Optional checksum verification:
 
 ```sh
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## From source

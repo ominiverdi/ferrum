@@ -154,7 +154,7 @@ Color highlighting is controlled separately with `/colors` and `color = "auto|on
 
 ### Edit diff display modes
 
-`/diff` shows the current mode. `/diff <mode>` changes it for the current session. `/colors` shows the current color mode. `/colors <auto|on|off>` changes it for the current session.
+`/diff` opens the diff-mode picker. `/diff <mode>` changes it directly for the current session. `/colors` opens the color-mode picker. `/colors <auto|on|off>` changes it directly for the current session.
 
 Modes:
 

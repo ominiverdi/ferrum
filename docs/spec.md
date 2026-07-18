@@ -71,7 +71,6 @@ Slash commands:
 - `/title [text]``
 - `/goal [text|clear]`
 - `/sessions`
-- `/sessions pick`
 - `/sessions del`
 - `/sessions new`
 - `/model [name]`
@@ -107,11 +106,14 @@ Session resume:
 - `ferrum --session <name> -p <prompt>` resumes or creates a named print-mode session.
 - `ferrum --session <path|id-prefix>` opens a specific JSONL session in interactive mode.
 - Resumed interactive sessions show the last 40 visible conversation lines before prompting.
-- `/sessions` lists current-directory sessions.
-- `/sessions pick` provides a lightweight numbered picker with text filtering.
+- `/sessions` provides a numbered picker for current-directory sessions.
 - `/sessions del` provides a deletion picker.
 - `/sessions new` starts a fresh session.
 - `/new` is the short alias for `/sessions new`.
+- `/models`, `/providers`, and `/palettes` provide numbered pickers for their respective resources.
+- `/providers` includes a `providerless` entry when configured model aliases omit `provider`; selecting it opens those aliases in a nested picker.
+- `/thinking`, `/safety`, `/diff`, and `/colors` provide numbered pickers when used without an argument; explicit arguments select directly.
+- Picker text filters labels and descriptions. Esc returns to the interactive prompt without changing state.
 
 ## Configuration
 

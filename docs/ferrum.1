@@ -222,10 +222,8 @@ Start a new session.
 This is the short alias for \f[B]/sessions new\f[R].
 .TP
 \f[B]/sessions\f[R]
-List recent sessions.
-.TP
-\f[B]/sessions pick\f[R]
-Open an interactive session picker.
+Open the numbered, searchable session picker.
+Press Esc to return to the prompt without switching.
 .TP
 \f[B]/sessions del\f[R]
 Open an interactive session deletion picker.
@@ -244,8 +242,8 @@ The note persists with the session and does not trigger model work.
 Switch model.
 .TP
 \f[B]/models\f[R]
-List models known to the active provider and cache them for \f[B]/model\f[R]
-Tab completion until the active provider changes.
+Fetch models known to the active provider, cache them for \f[B]/model\f[R]
+Tab completion, and open the numbered, searchable model picker.
 .TP
 \f[B]/login\f[R] {openai,openai-codex}
 Run the OpenAI Codex / ChatGPT OAuth flow from the interactive session.
@@ -254,29 +252,33 @@ Run the OpenAI Codex / ChatGPT OAuth flow from the interactive session.
 Switch provider.
 .TP
 \f[B]/providers\f[R]
-List configured providers.
+Open the numbered, searchable provider picker.
+If configured model aliases omit \f[B]provider\f[R], the
+\f[B]providerless\f[R] entry opens those aliases.
 .TP
 \f[B]/mcp\f[R] on|off|status|list
 Manage MCP server availability for the current session.
 .TP
-\f[B]/thinking\f[R] LEVEL
-Set thinking level.
+\f[B]/thinking\f[R] [LEVEL]
+Open the thinking-level picker, or set the level directly.
 .TP
-\f[B]/safety\f[R] LEVEL
-Set tool execution safety level.
+\f[B]/safety\f[R] [LEVEL]
+Open the safety-level picker, or set the level directly.
 .TP
-\f[B]/diff\f[R] MODE
-Set diff display mode.
+\f[B]/diff\f[R] [MODE]
+Open the diff-mode picker, or set the mode directly.
 .TP
-\f[B]/colors\f[R] MODE
-Set color mode.
+\f[B]/colors\f[R] [MODE]
+Open the color-mode picker, or set the mode directly.
 .TP
-\f[B]/palette\f[R] NAME
+\f[B]/palette\f[R] [NAME]
 Show the current palette, or validate, apply, and persist a palette to
 \f[B]\[ti]/.config/ferrum/colors.toml\f[R].
+Use \f[B]default\f[R] to restore Ferrum's built-in colors.
 .TP
 \f[B]/palettes\f[R]
-List palettes from \f[B]\[ti]/.config/ferrum/color-palettes/\f[R].
+Open the numbered, searchable palette picker using
+\f[B]\[ti]/.config/ferrum/color-palettes/\f[R].
 .TP
 \f[B]/usage\f[R] [day|week|month]
 Show token usage summary.
@@ -395,10 +397,11 @@ Spaces, dashes, and underscores are ignored, and
 Duplicate xterm names map to the first matching xterm index; use numeric
 indexes for exact selection.
 Reusable palettes can live in
-**\[ti]/.config/ferrum/color-palettes/*.toml\f[B]; \f[R]/palette\f[B]
-shows the current palette, \f[R]/palettes\f[B] lists palette files, and
-\f[R]/palette NAME\f[B] validates and applies one live.
-See \f[R]docs/colors.md** for all palette keys and color values.
+\f[B]\[ti]/.config/ferrum/color-palettes/*.toml\f[R].
+\f[B]/palette\f[R] shows the current palette, \f[B]/palettes\f[R] opens
+the palette picker, and \f[B]/palette NAME\f[R] validates and applies one
+live. \f[B]/palette default\f[R] restores Ferrum's built-in colors.
+See \f[B]docs/colors.md\f[R] for all palette keys and color values.
 .SH FILES
 .TP
 \f[B]\[ti]/.config/ferrum/config.toml\f[R]
@@ -407,9 +410,9 @@ User configuration.
 \f[B]\[ti]/.config/ferrum/colors.toml\f[R]
 Optional semantic UI color palette.
 .TP
-**\[ti]/.config/ferrum/color-palettes/*.toml**
+\f[B]\[ti]/.config/ferrum/color-palettes/*.toml\f[R]
 Optional reusable UI palettes selectable with \f[B]/palette\f[R] and
-listed with \f[B]/palettes\f[R].
+\f[B]/palettes\f[R].
 .TP
 \f[B]\[ti]/.local/share/ferrum/sessions/\f[R]
 JSONL session store, unless data directory is overridden by XDG
@@ -426,9 +429,9 @@ binary and man page:
 .IP
 .nf
 \f[C]
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.7.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.7.2-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.7.3-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.7.3-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -439,9 +442,9 @@ Optional checksum verification:
 .IP
 .nf
 \f[C]
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz.sha256
 \f[R]
 .fi
 .SS From source

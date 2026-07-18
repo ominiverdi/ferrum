@@ -40,9 +40,9 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 Download the latest release asset from Codeberg.
 
 ```bash
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.7.2-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.7.2-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.7.3-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.7.3-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -51,16 +51,16 @@ man ferrum
 Optional checksum verification:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.2/ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.7.2-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.3/ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.7.3-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 Debian and RPM packages are also available on the release page:
 
 ```bash
-sudo apt install ./ferrum_0.7.2_amd64.deb
-sudo dnf install ./ferrum-0.7.2-1.x86_64.rpm
+sudo apt install ./ferrum_0.7.3_amd64.deb
+sudo dnf install ./ferrum-0.7.3-1.x86_64.rpm
 ```
 
 ### From source
@@ -204,7 +204,7 @@ diff_removed = "DeepPink1"
 
 See [`docs/colors.md`](docs/colors.md) for all palette keys and supported color values. Ferrum accepts xterm 256-color table names such as `DeepSkyBlue1`, `Orange3`, and `SpringGreen1`.
 
-Reusable palettes can live in `~/.config/ferrum/color-palettes/*.toml`. Ferrum ships 24 built-in palettes and writes them to that directory on first run if it does not exist. In interactive mode, `/palette` shows the current palette, `/palettes` lists palette files, and `/palette <name>` validates and applies one live.
+Reusable palettes can live in `~/.config/ferrum/color-palettes/*.toml`. Ferrum ships 24 built-in palettes and seeds missing built-ins without replacing existing files. In interactive mode, `/palette` shows the current palette, `/palettes` opens the numbered, searchable palette picker, and `/palette <name>` validates and applies one live. `/palette default` restores Ferrum's built-in colors.
 
 ## System prompt override
 
@@ -248,7 +248,6 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /goal [text|clear]
 /new
 /sessions
-/sessions pick
 /sessions del
 /sessions new
 /model [name]
@@ -274,7 +273,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /exit
 ```
 
-`/new` and `/sessions new` both start a fresh session.
+`/new` and `/sessions new` both start a fresh session. `/sessions`, `/models`, `/providers`, and `/palettes` open numbered, searchable pickers. When configured model aliases omit `provider`, `/providers` includes a `providerless` entry that opens those aliases. `/thinking`, `/safety`, `/diff`, and `/colors` open pickers when used without an argument. Enter a displayed number to select, enter text to filter labels and descriptions, or press Esc to return to the prompt without changing state. Explicit arguments such as `/model gpt-5` remain available for direct selection.
 
 `/goal` shows one session-scoped note, `/goal <text>` replaces it, and `/goal clear` removes it. The note is limited to 4096 bytes, persists with the session, and does not trigger model work.
 

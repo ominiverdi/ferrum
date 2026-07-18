@@ -4,9 +4,10 @@ pub mod tools;
 
 use crate::{
     atomic_file, auth, cancel,
-    config::{ColorMode, Config, DiffMode, SafetyLevel, ToolSelection},
-    context, mcp, providers, session, skills, terminal_text, tools as builtin_tools, ui_colors,
-    usage,
+    config::{ColorMode, Config, DiffMode, SafetyLevel, ThinkingLevel, ToolSelection},
+    context, mcp,
+    picker::{self, PickerItem},
+    providers, session, skills, terminal_text, tools as builtin_tools, ui_colors, usage,
 };
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -228,7 +229,7 @@ impl FerrumLineHelper {
         command_hints.insert("/paste-image", "");
         command_hints.insert("/session", "");
         command_hints.insert("/goal", " <text>|clear");
-        command_hints.insert("/sessions", " pick | del | new");
+        command_hints.insert("/sessions", " del | new");
         command_hints.insert("/colors", " auto|on|off");
         command_hints.insert("/palette", " <name>  (/palettes to list)");
         command_hints.insert("/palettes", "");
@@ -375,7 +376,11 @@ fn palette_list_hint(names: &[String]) -> String {
 }
 
 fn palette_command_words(config: &Config) -> Vec<String> {
-    list_palette_names(&config.config_dir).unwrap_or_default()
+    let mut names = list_palette_names(&config.config_dir).unwrap_or_default();
+    names.push("default".to_string());
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn session_words() -> &'static [&'static str] {
@@ -383,7 +388,7 @@ fn session_words() -> &'static [&'static str] {
 }
 
 fn sessions_words() -> &'static [&'static str] {
-    &["pick", "del", "new"]
+    &["del", "new"]
 }
 
 fn login_provider_words() -> &'static [&'static str] {
@@ -412,6 +417,279 @@ fn mcp_words() -> &'static [&'static str] {
 
 fn usage_words() -> &'static [&'static str] {
     &["day", "week", "month"]
+}
+
+fn thinking_picker_items(current: ThinkingLevel) -> Vec<PickerItem<String>> {
+    [
+        ("off", "no provider reasoning effort"),
+        ("minimal", "shortest available reasoning effort"),
+        ("low", "light reasoning effort"),
+        ("medium", "balanced reasoning effort"),
+        ("high", "deeper reasoning effort"),
+        ("xhigh", "maximum available reasoning effort"),
+    ]
+    .into_iter()
+    .map(|(name, description)| {
+        PickerItem::new(name.to_string(), name)
+            .with_description(description)
+            .current(name == current.as_str())
+    })
+    .collect()
+}
+
+fn safety_picker_items(config: &Config) -> Vec<PickerItem<String>> {
+    [
+        (
+            SafetyLevel::Low,
+            "broad host access as your user; scripts and out-of-root changes allowed",
+        ),
+        (
+            SafetyLevel::Medium,
+            "normal development; direct commands and in-root changes allowed",
+        ),
+        (
+            SafetyLevel::High,
+            "inspection only; writes, builds, interpreters, and network denied",
+        ),
+    ]
+    .into_iter()
+    .filter(|(level, _)| config.constrained_safety(*level) == *level)
+    .map(|(level, description)| {
+        PickerItem::new(level.as_str().to_string(), level.as_str())
+            .with_description(description)
+            .current(level == config.safety)
+    })
+    .collect()
+}
+
+fn diff_picker_items(current: DiffMode) -> Vec<PickerItem<String>> {
+    [
+        (DiffMode::Unified, "unified diff with three context lines"),
+        (DiffMode::Compact, "unified diff with one context line"),
+        (DiffMode::Full, "full old and new text"),
+        (DiffMode::Words, "inline word-level changes"),
+        (DiffMode::SideBySide, "old and new text in two columns"),
+    ]
+    .into_iter()
+    .map(|(mode, description)| {
+        PickerItem::new(mode.as_str().to_string(), mode.as_str())
+            .with_description(description)
+            .current(mode == current)
+    })
+    .collect()
+}
+
+fn color_picker_items(current: ColorMode) -> Vec<PickerItem<String>> {
+    [
+        (ColorMode::Auto, "use colors when output is a terminal"),
+        (ColorMode::On, "always emit terminal colors"),
+        (ColorMode::Off, "never emit terminal colors"),
+    ]
+    .into_iter()
+    .map(|(mode, description)| {
+        PickerItem::new(mode.as_str().to_string(), mode.as_str())
+            .with_description(description)
+            .current(mode == current)
+    })
+    .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderPickerSelection {
+    Provider(String),
+    Providerless,
+}
+
+fn provider_picker_items(config: &Config) -> Vec<PickerItem<ProviderPickerSelection>> {
+    let mut items = provider_command_words(config)
+        .into_iter()
+        .map(|name| {
+            let mut description = Vec::new();
+            if let Some(definition) = config.providers.get(&name) {
+                description.push(format!("type={}", definition.kind));
+                if let Some(model) = definition.default_model.as_deref() {
+                    description.push(format!("default_model={model}"));
+                }
+            } else {
+                description.push("active built-in provider".to_string());
+            }
+            PickerItem::new(ProviderPickerSelection::Provider(name.clone()), &name)
+                .with_description(description.join(" "))
+                .current(name == config.provider_name)
+        })
+        .collect::<Vec<_>>();
+    if config
+        .models
+        .values()
+        .any(|definition| definition.provider.is_none())
+    {
+        let label = if config.providers.contains_key("providerless") {
+            "providerless models"
+        } else {
+            "providerless"
+        };
+        items.push(PickerItem::new(
+            ProviderPickerSelection::Providerless,
+            label,
+        ));
+    }
+    items
+}
+
+fn model_picker_items(config: &Config, live_models: &[String]) -> Vec<PickerItem<String>> {
+    let live = live_models
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let scoped_aliases = config
+        .models
+        .iter()
+        .filter(|(name, definition)| {
+            if definition.provider.is_some() {
+                model_resolves_to_current_provider(config, name)
+            } else {
+                live.contains(definition.actual_model.as_deref().unwrap_or(name))
+            }
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<HashSet<_>>();
+    let mut names = scoped_aliases.iter().cloned().collect::<Vec<_>>();
+    names.extend(
+        live_models
+            .iter()
+            .filter(|name| !config.models.contains_key(*name) || scoped_aliases.contains(*name))
+            .cloned(),
+    );
+    if !names.iter().any(|name| name == &config.model) {
+        names.push(config.model.clone());
+    }
+    names.sort();
+    names.dedup();
+
+    names
+        .into_iter()
+        .map(|name| model_picker_item(config, name))
+        .collect()
+}
+
+fn providerless_model_picker_items(config: &Config) -> Vec<PickerItem<String>> {
+    config
+        .models
+        .iter()
+        .filter(|(_, definition)| definition.provider.is_none())
+        .map(|(name, _)| model_picker_item(config, name.clone()))
+        .collect()
+}
+
+fn model_picker_item(config: &Config, name: String) -> PickerItem<String> {
+    let mut details = Vec::new();
+    let mut search_terms = Vec::new();
+    if let Some(definition) = config.models.get(&name) {
+        if let Some(provider) = definition.provider.as_deref() {
+            details.push(format!("provider={provider}"));
+            search_terms.push(provider.to_string());
+        }
+        if let Some(actual) = definition.actual_model.as_deref() {
+            details.push(format!("model={actual}"));
+            search_terms.push(actual.to_string());
+        }
+        if let Some(tokens) = definition.max_context_tokens {
+            details.push(format!("context={tokens}"));
+        }
+        if details.is_empty() {
+            details.push("configured model".to_string());
+        }
+    }
+    let item = PickerItem::new(name.clone(), &name)
+        .with_search_terms(search_terms)
+        .current(name == config.model);
+    if details.is_empty() {
+        item
+    } else {
+        item.with_description(details.join(" "))
+    }
+}
+
+fn model_resolves_to_current_provider(config: &Config, model: &str) -> bool {
+    let mut candidate = config.clone();
+    candidate.set_model(model).is_ok() && candidate.provider_name == config.provider_name
+}
+
+fn print_model_selection(config: &Config) {
+    println!("model: {}", terminal_text::sanitize(&config.model));
+    if config.provider_model != config.model {
+        println!(
+            "provider_model: {}",
+            terminal_text::sanitize(&config.provider_model)
+        );
+    }
+}
+
+fn palette_picker_items(config: &Config, state: &AgentSession) -> Result<Vec<PickerItem<String>>> {
+    let current = current_palette_name(&config.config_dir, &state.colors)?;
+    let mut names = list_palette_names(&config.config_dir)?;
+    names.push("default".to_string());
+    names.sort();
+    names.dedup();
+    Ok(names
+        .into_iter()
+        .map(|name| {
+            let item = PickerItem::new(name.clone(), &name).current(name == current);
+            if name == "default" {
+                item.with_description("built-in Ferrum colors")
+            } else {
+                item
+            }
+        })
+        .collect())
+}
+
+fn session_picker_items(
+    sessions: &[session::jsonl::SessionInfo],
+    current_path: &Path,
+) -> Vec<PickerItem<usize>> {
+    sessions
+        .iter()
+        .enumerate()
+        .map(|(index, session)| {
+            let age = format_age(session.modified);
+            let provider = session.provider.as_deref().unwrap_or("unknown-provider");
+            let model = session.model.as_deref().unwrap_or("unknown-model");
+            let message_label = if session.archived_message_count > 0 {
+                format!(
+                    "{} msgs +{} archived",
+                    session.message_count, session.archived_message_count
+                )
+            } else {
+                format!("{} msgs", session.message_count)
+            };
+            let thinking = session.thinking.as_deref().unwrap_or("off");
+            let diff_mode = session.diff_mode.as_deref().unwrap_or("unified");
+            let mut details = vec![age, message_label, format!("{provider}/{model}")];
+            if thinking != "off" {
+                details.push(format!("think={thinking}"));
+            }
+            if diff_mode != "unified" {
+                details.push(format!("diff={diff_mode}"));
+            }
+            if let Some(timestamp) = session.last_compaction_timestamp_ms {
+                details.push(format!("compacted={}", format_timestamp_ms(timestamp)));
+            }
+            let search_terms = vec![
+                session.short_id.clone(),
+                provider.to_string(),
+                model.to_string(),
+                thinking.to_string(),
+                diff_mode.to_string(),
+                session.goal.clone().unwrap_or_default(),
+            ];
+            let description = details.join(" ");
+            PickerItem::new(index, &session.title)
+                .with_description(description)
+                .with_search_terms(search_terms)
+                .current(session.path == current_path)
+        })
+        .collect()
 }
 
 fn list_palette_names(config_dir: &Path) -> Result<Vec<String>> {
@@ -445,24 +723,9 @@ fn palette_file_path(config_dir: &Path, name: &str) -> Result<PathBuf> {
         .join(format!("{name}.toml")))
 }
 
-fn print_palette_list(config_dir: &Path) -> Result<()> {
-    let names = list_palette_names(config_dir)?;
-    if names.is_empty() {
-        println!(
-            "no palettes found in {}",
-            terminal_text::sanitize(&config_dir.join("color-palettes").display().to_string())
-        );
-    } else {
-        for name in names {
-            println!("{}", terminal_text::sanitize(&name));
-        }
-    }
-    Ok(())
-}
-
 fn current_palette_name(config_dir: &Path, colors: &ColorPalette) -> Result<String> {
     let colors_path = config_dir.join("colors.toml");
-    if !colors_path.exists() {
+    if !colors_path.exists() || colors == &ColorPalette::default() {
         return Ok("default".to_string());
     }
     for name in list_palette_names(config_dir)? {
@@ -478,13 +741,27 @@ fn current_palette_name(config_dir: &Path, colors: &ColorPalette) -> Result<Stri
 }
 
 fn apply_palette(name: &str, config: &mut Config, state: &mut AgentSession) -> Result<()> {
-    let path = palette_file_path(&config.config_dir, name)?;
-    if !path.exists() {
-        anyhow::bail!("unknown palette: {name}. Use /palettes to list available palettes");
-    }
-    let palette = ColorPalette::load_palette_file(&path)?;
-    let text =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let name = name.trim().strip_suffix(".toml").unwrap_or(name.trim());
+    let (palette, text, displayed_name) = if name == "default" {
+        let palette = ColorPalette::default();
+        let text =
+            toml::to_string_pretty(&palette).context("failed to serialize default palette")?;
+        (palette, text, "default".to_string())
+    } else {
+        let path = palette_file_path(&config.config_dir, name)?;
+        if !path.exists() {
+            anyhow::bail!("unknown palette: {name}. Use /palettes to choose an available palette");
+        }
+        let palette = ColorPalette::load_palette_file(&path)?;
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let displayed_name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(name)
+            .to_string();
+        (palette, text, displayed_name)
+    };
     fs::create_dir_all(&config.config_dir)
         .with_context(|| format!("failed to create {}", config.config_dir.display()))?;
     let colors_path = config.config_dir.join("colors.toml");
@@ -493,14 +770,7 @@ fn apply_palette(name: &str, config: &mut Config, state: &mut AgentSession) -> R
         .with_context(|| format!("failed to write {}", colors_path.display()))?;
     config.colors = palette.clone();
     state.colors = palette;
-    println!(
-        "palette: {}",
-        terminal_text::sanitize(
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or(name)
-        )
-    );
+    println!("palette: {}", terminal_text::sanitize(&displayed_name));
     Ok(())
 }
 
@@ -721,16 +991,49 @@ pub async fn run_interactive(
                             models,
                             notices,
                         })) => {
+                            let models = cacheable_provider_model_names(&models);
                             if let Some(helper) = rl.helper_mut() {
                                 helper.cache_model_names(config, &models);
                             }
                             for notice in notices {
                                 println!("{}", terminal_text::sanitize(&notice));
                             }
-                            println!("models from {}:", terminal_text::sanitize(&source));
-                            for model in models {
-                                let marker = if model == config.model { "*" } else { " " };
-                                println!("{marker} {}", terminal_text::sanitize(&model));
+                            let items = model_picker_items(config, &models);
+                            if items.is_empty() {
+                                println!(
+                                    "no models found from {}",
+                                    terminal_text::sanitize(&source)
+                                );
+                                continue;
+                            }
+                            let title = format!("Select model for {}", config.provider_name);
+                            match picker::pick(&title, &items) {
+                                Ok(Some(model)) => {
+                                    let previous_provider = config.provider_name.clone();
+                                    if model != config.model {
+                                        let mut candidate = config.clone();
+                                        if let Err(error) =
+                                            candidate.set_model(&model).and_then(|()| {
+                                                state.commit_provider_model_transition(
+                                                    config, candidate,
+                                                )
+                                            })
+                                        {
+                                            render_error(&error);
+                                            continue;
+                                        }
+                                    }
+                                    if let Some(helper) = rl.helper_mut() {
+                                        if config.provider_name != previous_provider {
+                                            helper.clear_cached_provider_model_names(config);
+                                        } else {
+                                            helper.rebuild_model_names(config);
+                                        }
+                                    }
+                                    print_model_selection(config);
+                                }
+                                Ok(None) => {}
+                                Err(error) => render_error(&error),
                             }
                         }
                         Ok(Err(error)) => render_error(&error),
@@ -925,7 +1228,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions pick\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -3775,22 +4078,9 @@ impl AgentSession {
         )
     }
 
-    fn list_sessions(&mut self, config: &Config) -> Result<()> {
-        let sessions = self.visible_sessions(config)?;
-        self.last_session_list = sessions.clone();
-        if sessions.is_empty() {
-            println!("No sessions found in {}", self.cwd.display());
-            return Ok(());
-        }
-        println!("Recent sessions in {}\n", self.cwd.display());
-        print_session_list(&sessions, self.session.path());
-        println!("\nUse /sessions pick, /sessions del, or /sessions new");
-        Ok(())
-    }
-
     fn open_session_by_index(&mut self, config: &mut Config, index: usize) -> Result<()> {
         if self.last_session_list.is_empty() {
-            anyhow::bail!("no session list is active. Run /sessions or /sessions pick first")
+            anyhow::bail!("no session list is active. Run /sessions first")
         }
         let Some(session) = self.last_session_list.get(index.saturating_sub(1)) else {
             anyhow::bail!("no session [{index}] in the active session list")
@@ -3840,74 +4130,31 @@ impl AgentSession {
     }
 
     fn pick_session(&mut self, config: &mut Config) -> Result<()> {
-        let mut query = String::new();
-        loop {
-            let all = self.visible_sessions(config)?;
-            let filtered = filter_sessions(&all, &query);
-            self.last_session_list = filtered.clone();
-            if query.is_empty() {
-                println!("Recent sessions in {}\n", self.cwd.display());
-            } else {
-                println!(
-                    "Recent sessions matching '{}'\n",
-                    terminal_text::sanitize(&query)
-                );
-            }
-            if filtered.is_empty() {
-                println!("No matching sessions");
-            } else {
-                print_session_list(&filtered, self.session.path());
-            }
-            print!("\nOpen number, search text, or blank to cancel: ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim();
-            if input.is_empty() {
-                println!("cancelled");
-                return Ok(());
-            }
-            if input.chars().all(|ch| ch.is_ascii_digit()) {
-                return self.open_session_by_index(config, input.parse()?);
-            }
-            query = input.to_string();
+        let sessions = self.visible_sessions(config)?;
+        if sessions.is_empty() {
+            println!("No sessions found in {}", self.cwd.display());
+            return Ok(());
         }
+        let items = session_picker_items(&sessions, self.session.path());
+        self.last_session_list = sessions;
+        if let Some(index) = picker::pick("Select session", &items)? {
+            self.open_session_by_index(config, index + 1)?;
+        }
+        Ok(())
     }
 
     fn delete_session_picker(&mut self, config: &Config) -> Result<()> {
-        let mut query = String::new();
-        loop {
-            let all = self.visible_sessions(config)?;
-            let filtered = filter_sessions(&all, &query);
-            self.last_session_list = filtered.clone();
-            if query.is_empty() {
-                println!("Recent sessions in {}\n", self.cwd.display());
-            } else {
-                println!(
-                    "Recent sessions matching '{}'\n",
-                    terminal_text::sanitize(&query)
-                );
-            }
-            if filtered.is_empty() {
-                println!("No matching sessions");
-            } else {
-                print_session_list(&filtered, self.session.path());
-            }
-            print!("\nDelete number, search text, or blank to cancel: ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            let input = input.trim();
-            if input.is_empty() {
-                println!("cancelled");
-                return Ok(());
-            }
-            if input.chars().all(|ch| ch.is_ascii_digit()) {
-                let index: usize = input.parse()?;
-                return self.delete_session_by_index(index);
-            }
-            query = input.to_string();
+        let sessions = self.visible_sessions(config)?;
+        if sessions.is_empty() {
+            println!("No sessions found in {}", self.cwd.display());
+            return Ok(());
         }
+        let items = session_picker_items(&sessions, self.session.path());
+        self.last_session_list = sessions;
+        if let Some(index) = picker::pick("Delete session", &items)? {
+            self.delete_session_by_index(index + 1)?;
+        }
+        Ok(())
     }
 
     fn expand_skill_prompt(&self, name: &str, args: Option<&str>) -> Result<String> {
@@ -4662,52 +4909,6 @@ fn print_current_session_header(state: &AgentSession) -> Result<()> {
     Ok(())
 }
 
-fn print_session_list(sessions: &[session::jsonl::SessionInfo], current_path: &Path) {
-    for (index, session) in sessions.iter().enumerate() {
-        let marker = if session.path == current_path {
-            "*"
-        } else {
-            " "
-        };
-        let age = format_age(session.modified);
-        let model = session.model.as_deref().unwrap_or("unknown-model");
-        let provider = session.provider.as_deref().unwrap_or("unknown-provider");
-        let thinking = session.thinking.as_deref().unwrap_or("off");
-        let diff_mode = session.diff_mode.as_deref().unwrap_or("unified");
-        let mut provider_model = if thinking == "off" {
-            format!("{provider}/{model}")
-        } else {
-            format!("{provider}/{model} think={thinking}")
-        };
-        if diff_mode != "unified" {
-            provider_model.push_str(&format!(" diff={diff_mode}"));
-        }
-        let message_label = if session.archived_message_count > 0 {
-            format!(
-                "{} msgs +{} archived",
-                session.message_count, session.archived_message_count
-            )
-        } else {
-            format!("{} msgs", session.message_count)
-        };
-        let compaction_label = session
-            .last_compaction_timestamp_ms
-            .map(|timestamp| format!(" compacted={}", format_timestamp_ms(timestamp)))
-            .unwrap_or_default();
-        let provider_model = terminal_text::sanitize(&provider_model);
-        let title = terminal_text::sanitize(&session.title);
-        println!(
-            "[{}] {marker} {:>4} {:<22} {:<28} {}{}",
-            index + 1,
-            age,
-            truncate_chars(&message_label, 22).replace('\n', " "),
-            truncate_chars(&provider_model, 28).replace('\n', " "),
-            title,
-            compaction_label
-        );
-    }
-}
-
 fn format_timestamp_ms(timestamp_ms: u64) -> String {
     let seconds = (timestamp_ms / 1000).min(i64::MAX as u64) as i64;
     let Ok(datetime) = time::OffsetDateTime::from_unix_timestamp(seconds) else {
@@ -4933,30 +5134,6 @@ fn session_preview_lines(messages: &[messages::Message], limit: usize) -> Vec<St
     lines
 }
 
-fn filter_sessions(
-    sessions: &[session::jsonl::SessionInfo],
-    query: &str,
-) -> Vec<session::jsonl::SessionInfo> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return sessions.to_vec();
-    }
-    sessions
-        .iter()
-        .filter(|session| {
-            session.title.to_lowercase().contains(&query)
-                || session.short_id.to_lowercase().contains(&query)
-                || session
-                    .model
-                    .as_deref()
-                    .unwrap_or_default()
-                    .to_lowercase()
-                    .contains(&query)
-        })
-        .cloned()
-        .collect()
-}
-
 fn format_age(modified: SystemTime) -> String {
     let elapsed = SystemTime::now()
         .duration_since(modified)
@@ -5111,14 +5288,14 @@ mod context_pressure_tests {
         let history = DefaultHistory::default();
         let ctx = rustyline::Context::new(&history);
 
-        let command = "/sessions p";
+        let command = "/sessions d";
         let (start, candidates) = helper.complete(command, command.len(), &ctx).unwrap();
 
         assert_eq!(start, command.len() - 1);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].replacement, "pick");
+        assert_eq!(candidates[0].replacement, "del");
 
-        let escaped = " /sessions p";
+        let escaped = " /sessions d";
         let (start, candidates) = helper.complete(escaped, escaped.len(), &ctx).unwrap();
         assert_eq!(start, escaped.len());
         assert!(candidates.is_empty());
@@ -5138,6 +5315,7 @@ mod context_pressure_tests {
 
         assert_completion(&helper, &ctx, "/colors a", "auto");
         assert_completion(&helper, &ctx, "/palette cat", "catppuccin");
+        assert_completion(&helper, &ctx, "/palette def", "default");
         let (_start, candidates) = helper
             .complete("/palette ", "/palette ".len(), &ctx)
             .unwrap();
@@ -5281,7 +5459,7 @@ mod context_pressure_tests {
 
         assert_eq!(
             helper.hint("/sessions", "/sessions".len(), &ctx),
-            Some(" pick | del | new".to_string())
+            Some(" del | new".to_string())
         );
         assert_eq!(helper.hint("/sessions ", "/sessions ".len(), &ctx), None);
         assert_eq!(
@@ -7077,6 +7255,152 @@ mod context_pressure_tests {
         assert!(oversized.to_string().contains("exceeded 4 bytes"));
     }
 
+    #[test]
+    fn setting_picker_items_mark_current_values_and_respect_safety_floor() {
+        let thinking = thinking_picker_items(ThinkingLevel::High);
+        assert_eq!(thinking.len(), 6);
+        assert_eq!(thinking.iter().filter(|item| item.current).count(), 1);
+        assert_eq!(
+            thinking.iter().find(|item| item.current).unwrap().label,
+            "high"
+        );
+        assert!(thinking.iter().all(|item| {
+            item.description
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        }));
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.safety = SafetyLevel::High;
+        config.project_safety_floor = Some(SafetyLevel::Medium);
+        let safety = safety_picker_items(&config);
+        assert_eq!(
+            safety
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["medium", "high"]
+        );
+        assert!(safety[1].current);
+        assert_eq!(
+            safety
+                .iter()
+                .map(|item| item.description.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "normal development; direct commands and in-root changes allowed",
+                "inspection only; writes, builds, interpreters, and network denied",
+            ]
+        );
+
+        assert_eq!(diff_picker_items(DiffMode::Unified).len(), 5);
+        assert_eq!(color_picker_items(ColorMode::Auto).len(), 3);
+    }
+
+    #[test]
+    fn model_picker_items_are_scoped_to_current_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.models.insert(
+            "same-provider".to_string(),
+            crate::config::ModelDefinition {
+                provider: Some("fake".to_string()),
+                actual_model: Some("upstream-model".to_string()),
+                max_context_tokens: Some(8192),
+            },
+        );
+        config.models.insert(
+            "live-alias".to_string(),
+            crate::config::ModelDefinition {
+                provider: None,
+                actual_model: Some("live-model".to_string()),
+                max_context_tokens: None,
+            },
+        );
+        config.models.insert(
+            "unscoped-local-alias".to_string(),
+            crate::config::ModelDefinition {
+                provider: None,
+                actual_model: Some("local-only-model".to_string()),
+                max_context_tokens: None,
+            },
+        );
+        config.models.insert(
+            "other-provider".to_string(),
+            crate::config::ModelDefinition {
+                provider: Some("openai-codex".to_string()),
+                actual_model: Some("other-model".to_string()),
+                max_context_tokens: None,
+            },
+        );
+
+        let items = model_picker_items(
+            &config,
+            &["live-model".to_string(), "other-provider".to_string()],
+        );
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alias", "live-alias", "live-model", "same-provider"]
+        );
+        let configured = items
+            .iter()
+            .find(|item| item.label == "same-provider")
+            .unwrap();
+        assert_eq!(
+            configured.description.as_deref(),
+            Some("provider=fake model=upstream-model context=8192")
+        );
+        assert!(configured.search_terms.iter().any(|term| term == "fake"));
+        assert!(
+            items
+                .iter()
+                .find(|item| item.label == "alias")
+                .unwrap()
+                .current
+        );
+
+        let providerless = providerless_model_picker_items(&config);
+        assert_eq!(
+            providerless
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live-alias", "unscoped-local-alias"]
+        );
+        let providers = provider_picker_items(&config);
+        assert_eq!(providers.last().unwrap().label, "providerless");
+        assert_eq!(
+            providers.last().unwrap().value,
+            ProviderPickerSelection::Providerless
+        );
+    }
+
+    #[test]
+    fn default_palette_can_be_selected_and_persisted() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentSession::new(&config).unwrap();
+        state.colors.prompt = "red".to_string();
+        config.colors = state.colors.clone();
+
+        apply_palette("default", &mut config, &mut state).unwrap();
+
+        assert_eq!(state.colors, ColorPalette::default());
+        assert_eq!(config.colors, ColorPalette::default());
+        assert_eq!(
+            current_palette_name(&config.config_dir, &state.colors).unwrap(),
+            "default"
+        );
+        assert_eq!(
+            ColorPalette::load_palette_file(&config.config_dir.join("colors.toml")).unwrap(),
+            ColorPalette::default()
+        );
+    }
+
     fn test_config(config_dir: std::path::PathBuf) -> Config {
         Config {
             data_dir: config_dir.clone(),
@@ -8335,29 +8659,28 @@ fn handle_command(
             println!("  /title [text]         show or set session title");
             println!("  /goal [text|clear]    show, set, or clear the session goal note");
             println!("  /new                  start a new session");
-            println!("  /sessions             list recent sessions for current directory");
-            println!("  /sessions pick        open session picker");
+            println!("  /sessions             choose a recent session for current directory");
             println!("  /sessions del         delete session via picker");
             println!("  /sessions new         start a new session");
             println!("  /skills               list available skills");
             println!("  /skill <name> [args]  load a skill into context");
             println!("  /skill:<name> [args]  load a skill into context");
-            println!("  /model [name]         show or set model");
-            println!("  /models               list known models for current provider");
+            println!("  /model [name]         show or set model directly");
+            println!("  /models               choose model for current provider");
             println!("  /login <provider>     authenticate: openai|openai-codex");
             println!("  /usage [period]       show token usage: day|week|month");
-            println!("  /provider [name]      show or set provider");
-            println!("  /providers            list configured providers");
+            println!("  /provider [name]      show or set provider directly");
+            println!("  /providers            choose configured provider");
             println!("  /mcp [on|off|status|list] show or toggle MCP tools");
-            println!("  /colors [mode]        show or set colors: auto|on|off");
+            println!("  /colors [mode]        choose or set colors: auto|on|off");
             println!("  /palette [name]       show current palette or apply a palette");
-            println!("  /palettes             list palettes from color-palettes/");
+            println!("  /palettes             choose palette from color-palettes/");
             println!(
-                "  /thinking [level]     show or set thinking: off|minimal|low|medium|high|xhigh"
+                "  /thinking [level]     choose or set thinking: off|minimal|low|medium|high|xhigh"
             );
-            println!("  /safety [level]       show or set execution policy: low|medium|high");
+            println!("  /safety [level]       choose or set execution policy: low|medium|high");
             println!(
-                "  /diff [mode]          show or set edit diff: unified|compact|full|words|side_by_side"
+                "  /diff [mode]          choose or set edit diff: unified|compact|full|words|side_by_side"
             );
             println!("  /image <path>         attach image to next message");
             println!("  /image-paste          attach image from clipboard");
@@ -8474,18 +8797,12 @@ fn handle_command(
         }
         "/sessions" => {
             match parts.next() {
-                None => state.list_sessions(config)?,
-                Some("pick") => state.pick_session(config)?,
+                None | Some("pick") => state.pick_session(config)?,
                 Some("del") => state.delete_session_picker(config)?,
                 Some("new") => state.new_session(config)?,
-                Some(reference) if reference.chars().all(|ch| ch.is_ascii_digit()) => {
-                    anyhow::bail!(
-                        "numeric session shortcuts were removed; use /sessions pick or /sessions del"
-                    )
-                }
                 Some(reference) => {
                     anyhow::bail!(
-                        "unknown /sessions subcommand: {reference}. Use /sessions, /sessions pick, /sessions del, or /sessions new"
+                        "unknown /sessions subcommand: {reference}. Use /sessions, /sessions del, or /sessions new"
                     )
                 }
             }
@@ -8565,26 +8882,39 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/providers" => {
-            if config.providers.is_empty() {
+            if let Some(extra) = parts.next() {
+                anyhow::bail!("usage: /providers, got extra argument: {extra}");
+            }
+            let items = provider_picker_items(config);
+            if items.is_empty() {
                 println!("no configured providers in config.toml");
-            } else {
-                for (name, definition) in &config.providers {
-                    let marker = if name == &config.provider_name {
-                        "*"
-                    } else {
-                        " "
-                    };
-                    let default_model = definition
-                        .default_model
-                        .as_deref()
-                        .map(|model| format!(" default_model={model}"))
-                        .unwrap_or_default();
-                    println!(
-                        "{marker} {} type={}{}",
-                        terminal_text::sanitize(name),
-                        terminal_text::sanitize(&definition.kind),
-                        terminal_text::sanitize(&default_model)
-                    );
+                return Ok(CommandAction::Continue);
+            }
+            if let Some(selection) = picker::pick("Select provider", &items)? {
+                match selection {
+                    ProviderPickerSelection::Provider(provider) => {
+                        if provider != config.provider_name {
+                            let mut candidate = config.clone();
+                            candidate.set_provider(&provider)?;
+                            state.commit_provider_model_transition(config, candidate)?;
+                        }
+                        println!(
+                            "provider: {}",
+                            terminal_text::sanitize(&config.provider_name)
+                        );
+                        print_model_selection(config);
+                    }
+                    ProviderPickerSelection::Providerless => {
+                        let models = providerless_model_picker_items(config);
+                        if let Some(model) = picker::pick("Select providerless model", &models)? {
+                            if model != config.model {
+                                let mut candidate = config.clone();
+                                candidate.set_model(&model)?;
+                                state.commit_provider_model_transition(config, candidate)?;
+                            }
+                            print_model_selection(config);
+                        }
+                    }
                 }
             }
             Ok(CommandAction::Continue)
@@ -8610,8 +8940,15 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/colors" => {
-            if let Some(mode) = parts.next() {
-                let parsed = ColorMode::parse(mode)?;
+            let selected = match parts.next() {
+                Some(mode) => Some(mode.to_string()),
+                None => picker::pick("Select colors", &color_picker_items(config.color_mode))?,
+            };
+            let Some(mode) = selected else {
+                return Ok(CommandAction::Continue);
+            };
+            let parsed = ColorMode::parse(&mode)?;
+            if parsed != config.color_mode {
                 config.color_mode = parsed;
                 state.color_mode = parsed;
                 state.session.append_color_mode(parsed.as_str())?;
@@ -8641,12 +8978,41 @@ fn handle_command(
             if let Some(extra) = parts.next() {
                 anyhow::bail!("usage: /palettes, got extra argument: {extra}");
             }
-            print_palette_list(&config.config_dir)?;
+            let items = palette_picker_items(config, state)?;
+            if items.is_empty() {
+                println!(
+                    "no palettes found in {}",
+                    terminal_text::sanitize(
+                        &config
+                            .config_dir
+                            .join("color-palettes")
+                            .display()
+                            .to_string()
+                    )
+                );
+                return Ok(CommandAction::Continue);
+            }
+            if let Some(name) = picker::pick("Select palette", &items)? {
+                let current = current_palette_name(&config.config_dir, &state.colors)?;
+                if name == current {
+                    println!("palette: {}", terminal_text::sanitize(&name));
+                } else {
+                    apply_palette(&name, config, state)?;
+                }
+            }
             Ok(CommandAction::Continue)
         }
         "/thinking" => {
-            if let Some(thinking) = parts.next() {
-                config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
+            let selected = match parts.next() {
+                Some(thinking) => Some(thinking.to_string()),
+                None => picker::pick("Select thinking", &thinking_picker_items(config.thinking))?,
+            };
+            let Some(thinking) = selected else {
+                return Ok(CommandAction::Continue);
+            };
+            let parsed = ThinkingLevel::parse(&thinking)?;
+            if parsed != config.thinking {
+                config.thinking = parsed;
                 state.session.append_thinking(config.thinking.as_str())?;
                 state.refresh_runtime_context(config)?;
             }
@@ -8654,16 +9020,23 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/safety" => {
-            if let Some(level) = parts.next() {
-                let parsed = SafetyLevel::parse(level)?;
-                let constrained = config.constrained_safety(parsed);
-                if constrained != parsed {
-                    anyhow::bail!(
-                        "safety {} is below the project policy minimum {}",
-                        parsed.as_str(),
-                        constrained.as_str()
-                    );
-                }
+            let selected = match parts.next() {
+                Some(level) => Some(level.to_string()),
+                None => picker::pick("Select safety", &safety_picker_items(config))?,
+            };
+            let Some(level) = selected else {
+                return Ok(CommandAction::Continue);
+            };
+            let parsed = SafetyLevel::parse(&level)?;
+            let constrained = config.constrained_safety(parsed);
+            if constrained != parsed {
+                anyhow::bail!(
+                    "safety {} is below the project policy minimum {}",
+                    parsed.as_str(),
+                    constrained.as_str()
+                );
+            }
+            if parsed != config.safety {
                 config.safety = parsed;
                 state.safety = parsed;
                 state.session.append_safety(parsed.as_str())?;
@@ -8687,8 +9060,15 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/diff" => {
-            if let Some(mode) = parts.next() {
-                let parsed = DiffMode::parse(mode)?;
+            let selected = match parts.next() {
+                Some(mode) => Some(mode.to_string()),
+                None => picker::pick("Select diff", &diff_picker_items(state.diff_mode))?,
+            };
+            let Some(mode) = selected else {
+                return Ok(CommandAction::Continue);
+            };
+            let parsed = DiffMode::parse(&mode)?;
+            if parsed != config.diff_mode {
                 config.diff_mode = parsed;
                 state.diff_mode = parsed;
                 state.session.append_diff_mode(parsed.as_str())?;

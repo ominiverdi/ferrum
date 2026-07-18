@@ -175,6 +175,8 @@ For authless local servers, omit `api_key_env`.
 - OpenAI-compatible providers: `GET /models`.
 - Fake provider: local `fake` model.
 
+The picker combines this live result with configured aliases scoped to the selected provider. An alias without `provider` appears when its `actual_model` is present in the live result. `/providers` exposes the complete set of aliases without `provider` under the `providerless` entry.
+
 Ferrum does not silently guess static model lists.
 
 ## Tool support

@@ -31,6 +31,8 @@ Interactive command:
 /colors auto
 ```
 
+`/colors` opens the color-mode picker. Supplying a mode selects it directly.
+
 ## Custom palette
 
 Create `~/.config/ferrum/colors.toml` to override any palette entry:
@@ -78,9 +80,10 @@ are never overwritten.
 ```
 
 `/palette` shows the current palette, or `default`/`custom` if it does not match
-a named palette. `/palettes` lists available palette files. `/palette <name>`
-validates `color-palettes/<name>.toml`, applies it to the running session, and
-atomically replaces `~/.config/ferrum/colors.toml`.
+a named palette. `/palettes` opens the numbered, searchable palette picker.
+`/palette <name>` validates `color-palettes/<name>.toml`, applies it to the
+running session, and atomically replaces `~/.config/ferrum/colors.toml`.
+`/palette default` restores Ferrum's built-in colors.
 
 Missing entries use defaults. Unknown palette keys or invalid color values are
 ignored with a warning when Ferrum starts from `colors.toml`; `/palette <name>`
