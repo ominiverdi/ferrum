@@ -308,7 +308,7 @@ Authenticated non-loopback `http://` base URLs are rejected unless the provider 
 - Model listing: live `GET /codex/models?client_version=<version>`.
 - Supports reasoning effort mapping and tool calls.
 - Supports image input for compatible models.
-- Retries explicit 408, 429, and 5xx rejections and connection failures up to three times, honoring bounded `Retry-After`; ambiguous initial timeouts and failures after streaming starts are not replayed.
+- Retries explicit 408, 429, and 5xx rejections and connection failures up to three times, honoring bounded `Retry-After`. Transient Codex terminal stream events are also retried when no text or reasoning output was emitted; ambiguous initial timeouts and failures after visible streaming are not replayed.
 
 ### OpenAI-compatible
 

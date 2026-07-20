@@ -103,6 +103,47 @@ fn provider_stream_error(error: anyhow::Error, label: &str) -> anyhow::Error {
     ))
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct RetryableCodexStreamError {
+    message: String,
+}
+
+fn is_retryable_codex_stream_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<RetryableCodexStreamError>().is_some())
+}
+
+fn should_retry_codex_stream(error: &anyhow::Error, visible_output: bool, retries: usize) -> bool {
+    !visible_output && retries < CODEX_MAX_RETRIES && is_retryable_codex_stream_error(error)
+}
+
+fn final_codex_stream_error(
+    error: anyhow::Error,
+    visible_output: bool,
+    retries: usize,
+) -> anyhow::Error {
+    if error.to_string() == "aborted" {
+        return error;
+    }
+    let context = if visible_output {
+        let earlier = if retries == 0 {
+            String::new()
+        } else {
+            format!(" after {retries} earlier safe retries")
+        };
+        format!(
+            "OpenAI Codex stream failed{earlier}; Ferrum did not retry the final attempt to avoid replaying partial output"
+        )
+    } else if retries == 0 {
+        "OpenAI Codex stream failed after the provider accepted the request".to_string()
+    } else {
+        format!("OpenAI Codex stream failed after {retries} retries before any output was emitted")
+    };
+    error.context(context)
+}
+
 fn utf8_body<'a>(body: &'a [u8], label: &str) -> Result<&'a str> {
     std::str::from_utf8(body).with_context(|| format!("{label} was not valid UTF-8"))
 }
@@ -138,6 +179,66 @@ fn is_structured_context_overflow(status: StatusCode, body: &[u8]) -> bool {
         return false;
     };
     structured_context_overflow_value(&value)
+}
+
+fn terminal_failure_code(event: &serde_json::Value) -> Option<&str> {
+    [
+        "/code",
+        "/error/code",
+        "/error/type",
+        "/response/error/code",
+        "/response/error/type",
+    ]
+    .into_iter()
+    .find_map(|pointer| event.pointer(pointer).and_then(|value| value.as_str()))
+    .filter(|value| !value.trim().is_empty())
+}
+
+fn is_retryable_codex_terminal_failure(event: &serde_json::Value) -> bool {
+    matches!(
+        terminal_failure_code(event),
+        Some(
+            "server_error"
+                | "server_is_overloaded"
+                | "slow_down"
+                | "rate_limit_exceeded"
+                | "temporarily_unavailable"
+        )
+    )
+}
+
+fn terminal_failure_message(event_type: &str, event: &serde_json::Value) -> String {
+    let code = terminal_failure_code(event);
+    let detail = [
+        "/message",
+        "/error/message",
+        "/response/error/message",
+        "/response/incomplete_details/reason",
+    ]
+    .into_iter()
+    .find_map(|pointer| event.pointer(pointer).and_then(|value| value.as_str()))
+    .filter(|value| !value.trim().is_empty());
+
+    let message = match (code, detail) {
+        (Some(code), Some(detail)) => {
+            format!("OpenAI Codex terminal failure event `{event_type}` ({code}): {detail}")
+        }
+        (Some(code), None) => {
+            format!("OpenAI Codex terminal failure event `{event_type}` ({code})")
+        }
+        (None, Some(detail)) => {
+            format!("OpenAI Codex terminal failure event `{event_type}`: {detail}")
+        }
+        (None, None) => format!("OpenAI Codex terminal failure event `{event_type}`"),
+    };
+    if message.len() > MAX_PROVIDER_ERROR_DISPLAY_BYTES {
+        format!(
+            "{} [truncated]",
+            truncate_to_max_bytes(&message, MAX_PROVIDER_ERROR_DISPLAY_BYTES)
+        )
+    } else {
+        message
+    }
 }
 
 fn structured_context_overflow_value(value: &serde_json::Value) -> bool {
@@ -700,34 +801,55 @@ impl Provider for OpenAiCodexProvider {
                 parallel_tool_calls: !_tools.is_empty(),
             };
 
-            let response = send_codex_authenticated_request(
-                &self.client,
-                &self.responses_url(),
-                &self.auth_path,
-                &request,
-                cancelled.as_ref(),
-            )
-            .await?;
+            let mut stream_retries = 0usize;
+            loop {
+                let response = send_codex_authenticated_request(
+                    &self.client,
+                    &self.responses_url(),
+                    &self.auth_path,
+                    &request,
+                    cancelled.as_ref(),
+                )
+                .await?;
 
-            let mut parser = ResponsesSseParser::default();
-            consume_sse_response(
-                response,
-                cancelled.as_ref(),
-                PROVIDER_STREAM_IDLE_TIMEOUT,
-                "OpenAI Codex stream",
-                |data| {
-                    if parser.process_data(data, Some(on_event))? {
-                        Ok(SseControl::Stop)
-                    } else {
-                        Ok(SseControl::Continue)
+                let mut parser = ResponsesSseParser::default();
+                let stream_result = consume_sse_response(
+                    response,
+                    cancelled.as_ref(),
+                    PROVIDER_STREAM_IDLE_TIMEOUT,
+                    "OpenAI Codex stream",
+                    |data| {
+                        if parser.process_data(data, Some(on_event))? {
+                            Ok(SseControl::Stop)
+                        } else {
+                            Ok(SseControl::Continue)
+                        }
+                    },
+                )
+                .await;
+                let visible_output = parser.has_visible_output();
+                if let Err(error) = stream_result {
+                    if should_retry_codex_stream(&error, visible_output, stream_retries) {
+                        stream_retries += 1;
+                        sleep_before_codex_retry(
+                            stream_retries,
+                            &error.to_string(),
+                            None,
+                            cancelled.as_ref(),
+                        )
+                        .await?;
+                        continue;
                     }
-                },
-            )
-            .await
-            .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))?;
-            parser
-                .finish()
-                .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))
+                    return Err(final_codex_stream_error(
+                        error,
+                        visible_output,
+                        stream_retries,
+                    ));
+                }
+                return parser.finish().map_err(|error| {
+                    final_codex_stream_error(error, visible_output, stream_retries)
+                });
+            }
         })
     }
 }
@@ -1676,6 +1798,10 @@ struct ResponsesSseParser {
 }
 
 impl ResponsesSseParser {
+    fn has_visible_output(&self) -> bool {
+        !self.output.is_empty() || !self.thinking.is_empty()
+    }
+
     #[cfg(test)]
     fn process_line(
         &mut self,
@@ -1717,9 +1843,12 @@ impl ResponsesSseParser {
             event_type,
             "response.failed" | "response.incomplete" | "error"
         ) {
-            let message = format!("OpenAI Codex terminal failure event `{event_type}`");
+            let message = terminal_failure_message(event_type, &event);
             if structured_context_overflow_value(&event) {
                 return Err(ProviderFailure::ContextOverflow { message }.into());
+            }
+            if is_retryable_codex_terminal_failure(&event) {
+                return Err(RetryableCodexStreamError { message }.into());
             }
             anyhow::bail!(message);
         }
@@ -2459,6 +2588,7 @@ fn extract_responses_text(body: &serde_json::Value) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -2506,6 +2636,68 @@ mod tests {
             1
         });
         (format!("http://{address}"), handle)
+    }
+
+    fn spawn_codex_stream_sequence_server(
+        bodies: Vec<&'static [u8]>,
+    ) -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut requests = 0usize;
+            while requests < bodies.len() && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("stream sequence server accept failed: {error}"),
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut request = [0u8; 16 * 1024];
+                let _ = stream.read(&mut request);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+                    )
+                    .unwrap();
+                stream.write_all(bodies[requests]).unwrap();
+                stream.flush().unwrap();
+                requests += 1;
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn test_codex_auth() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        let payload = URL_SAFE_NO_PAD.encode(
+            serde_json::json!({
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": "test-account"
+                }
+            })
+            .to_string(),
+        );
+        openai_codex::save(
+            path.clone(),
+            &openai_codex::OpenAiCodexCredential {
+                r#type: "oauth".to_string(),
+                access: format!("header.{payload}.signature"),
+                refresh: "test-refresh".to_string(),
+                expires: u128::from(u64::MAX),
+                account_id: "test-account".to_string(),
+            },
+        )
+        .unwrap();
+        (directory, path)
     }
 
     fn spawn_retry_server() -> (String, thread::JoinHandle<usize>) {
@@ -2584,6 +2776,83 @@ mod tests {
     }
 
     #[test]
+    fn terminal_failure_events_report_top_level_and_nested_provider_details() {
+        let mut parser = ResponsesSseParser::default();
+        let top_level = parser
+            .process_data(
+                r#"{"type":"error","code":"server_error","message":"backend unavailable"}"#,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(
+            top_level.to_string(),
+            "OpenAI Codex terminal failure event `error` (server_error): backend unavailable"
+        );
+        assert!(is_retryable_codex_stream_error(&top_level));
+
+        let mut parser = ResponsesSseParser::default();
+        let nested = parser
+            .process_data(
+                r#"{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"try later"}}}"#,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(
+            nested.to_string(),
+            "OpenAI Codex terminal failure event `response.failed` (rate_limit_exceeded): try later"
+        );
+        assert!(is_retryable_codex_stream_error(&nested));
+
+        let mut parser = ResponsesSseParser::default();
+        let invalid = parser
+            .process_data(
+                r#"{"type":"error","error":{"code":"invalid_request_error","message":"bad input"}}"#,
+                None,
+            )
+            .unwrap_err();
+        assert!(!is_retryable_codex_stream_error(&invalid));
+    }
+
+    #[test]
+    fn codex_stream_retry_policy_requires_transient_failure_without_visible_output() {
+        let mut parser = ResponsesSseParser::default();
+        let transient = parser
+            .process_data(
+                r#"{"type":"error","error":{"code":"server_error","message":"retry"}}"#,
+                None,
+            )
+            .unwrap_err();
+        assert!(should_retry_codex_stream(&transient, false, 0));
+        assert!(!should_retry_codex_stream(
+            &transient,
+            false,
+            CODEX_MAX_RETRIES
+        ));
+        assert!(!should_retry_codex_stream(&transient, true, 0));
+
+        let mut parser = ResponsesSseParser::default();
+        let permanent = parser
+            .process_data(
+                r#"{"type":"error","error":{"code":"invalid_request_error","message":"bad input"}}"#,
+                None,
+            )
+            .unwrap_err();
+        assert!(!should_retry_codex_stream(&permanent, false, 0));
+    }
+
+    #[test]
+    fn terminal_failure_event_details_are_bounded() {
+        let event = serde_json::json!({
+            "type": "error",
+            "code": "server_error",
+            "message": "x".repeat(MAX_PROVIDER_ERROR_DISPLAY_BYTES * 2),
+        });
+        let message = terminal_failure_message("error", &event);
+        assert!(message.ends_with(" [truncated]"));
+        assert!(message.len() <= MAX_PROVIDER_ERROR_DISPLAY_BYTES + " [truncated]".len());
+    }
+
+    #[test]
     fn typed_context_overflow_requires_structured_provider_signal() {
         let structured = provider_status_error(
             "test provider",
@@ -2620,6 +2889,41 @@ mod tests {
             header::HeaderValue::from_static("invalid"),
         );
         assert_eq!(retry_after_delay(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn codex_retries_transient_terminal_error_before_visible_output() {
+        const TRANSIENT_ERROR: &[u8] = br#"data: {"type":"error","error":{"type":"server_error","code":"server_error","message":"retry me"}}
+
+"#;
+        const SUCCESS: &[u8] = br#"data: {"type":"response.output_text.delta","delta":"recovered"}
+
+data: {"type":"response.completed","response":{"output":[]}}
+
+"#;
+        let (base_url, server) = spawn_codex_stream_sequence_server(vec![TRANSIENT_ERROR, SUCCESS]);
+        let (_auth_directory, auth_path) = test_codex_auth();
+        let provider = OpenAiCodexProvider::new(base_url, auth_path).unwrap();
+        let mut events = Vec::new();
+
+        let response = provider
+            .complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::Off,
+                &mut |event| events.push(event),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(response.message.display_text(), "recovered");
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::TextDelta(text)] if text == "recovered"
+        ));
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ use rustyline::{
 use similar::{ChangeTag, TextDiff};
 use std::{
     collections::{HashMap, HashSet},
-    fmt::{Display, Write as FmtWrite},
+    fmt::Write as FmtWrite,
     fs::{self, OpenOptions},
     future::Future,
     io::{self, IsTerminal, Read, Write},
@@ -51,6 +51,7 @@ const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 2_000;
 const LOCAL_COMPACTION_SUMMARY_MAX_CHARS: usize = 16_000;
 const TOOL_PREVIEW_MAX_CHARS: usize = 4_000;
+const ERROR_DISPLAY_MAX_CHARS: usize = 4_000;
 const CONTEXT_ADVISORY_PERCENT: usize = 75;
 const CONTEXT_WARNING_PERCENT: usize = 85;
 const CONTEXT_CRITICAL_PERCENT: usize = 92;
@@ -4869,8 +4870,15 @@ fn blocked_tool_reason<'a>(name: &str, content: &'a str) -> Option<&'a str> {
     }
 }
 
-fn render_error(error: &dyn Display) {
-    eprintln!("Error: {}", terminal_text::sanitize(&error.to_string()));
+fn format_error_for_display(error: &anyhow::Error) -> String {
+    truncate_chars(
+        &terminal_text::sanitize(&format!("{error:#}")),
+        ERROR_DISPLAY_MAX_CHARS,
+    )
+}
+
+fn render_error(error: &anyhow::Error) {
+    eprintln!("Error: {}", format_error_for_display(error));
 }
 
 fn json_str<'a>(input: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -5203,6 +5211,22 @@ fn context_pressure_message(
 #[cfg(test)]
 mod context_pressure_tests {
     use super::*;
+
+    #[test]
+    fn displayed_errors_include_the_bounded_sanitized_cause_chain() {
+        let cause = anyhow::anyhow!("transport reset\x1b]52;c;Y2xpcA==\x07{}", "x".repeat(5_000));
+        let error = cause.context("OpenAI Codex stream failed");
+
+        let displayed = format_error_for_display(&error);
+
+        assert!(displayed.starts_with("OpenAI Codex stream failed: transport reset"));
+        assert!(!displayed.contains('\x1b'));
+        assert!(displayed.ends_with("\n[truncated]"));
+        assert_eq!(
+            displayed.trim_end_matches("\n[truncated]").chars().count(),
+            ERROR_DISPLAY_MAX_CHARS
+        );
+    }
 
     #[derive(Default)]
     struct RecordingSink {
