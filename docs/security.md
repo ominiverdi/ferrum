@@ -10,7 +10,7 @@ Ferrum separates robustness and trust invariants from execution authority:
 - `/safety low|medium|high` controls native mutation and shell execution authority. It does not enable or expose tools; use `--tools`, `--no-tools`, and `[tools]` policy for exposure.
 - Safety does not make repository text, skills, MCP output, provider output, or compaction summaries trusted authority.
 
-The policy is a deterministic rejection layer, not an approval prompt or sandbox. Full contract and regression matrix: [tool-authority.md](tool-authority.md). Resource limits: [resource-boundaries.md](resource-boundaries.md).
+The policy is a deterministic rejection layer, not an approval prompt or sandbox. Full contract and regression matrix: [tool-authority.md](tool-authority.md). Resource limits: [resource-boundaries.md](resource-boundaries.md). A possible kernel-enforced process boundary is explored in [containment.md](containment.md); it is a design note, not a description of current behavior.
 
 ## Current baseline
 

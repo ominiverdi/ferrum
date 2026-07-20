@@ -298,6 +298,7 @@ Shell shortcuts:
 - Tools: [`docs/tools.md`](docs/tools.md)
 - Resource-boundary design: [`docs/resource-boundaries.md`](docs/resource-boundaries.md)
 - Safety notes: [`docs/security.md`](docs/security.md) for execution tiers, writable roots, MCP caveats, host-filesystem risk, and higher-risk workflow guidance
+- Process-containment design note: [`docs/containment.md`](docs/containment.md)
 - Sessions: [`docs/sessions.md`](docs/sessions.md)
 - Usage accounting: [`docs/usage.md`](docs/usage.md)
 - Context accounting and compaction boundaries: [`docs/context-accounting.md`](docs/context-accounting.md)
