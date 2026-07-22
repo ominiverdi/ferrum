@@ -23,13 +23,15 @@ impl Provider for FakeProvider {
         &'a self,
         _model: &'a str,
         messages: &'a [Message],
-        _tools: &'a [ToolDefinition],
+        tools: &'a [ToolDefinition],
         _thinking: ThinkingLevel,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             if let Ok(script) = std::env::var("FERRUM_FAKE_SCRIPT") {
                 return Ok(ProviderResponse::message(scripted_response(
-                    &script, messages,
+                    &script,
+                    messages,
+                    tools.is_empty(),
                 )));
             }
             if messages.iter().any(|message| {
@@ -67,7 +69,10 @@ impl Provider for FakeProvider {
             }
             #[cfg(test)]
             if last_user == "__ferrum_test_repeat_read__" {
-                return Ok(ProviderResponse::message(repeat_read_response(messages)));
+                return Ok(ProviderResponse::message(repeat_read_response(
+                    messages,
+                    tools.is_empty(),
+                )));
             }
             #[cfg(test)]
             if last_user == "__ferrum_test_single_read__" {
@@ -150,9 +155,9 @@ impl Provider for FakeProvider {
     }
 }
 
-fn scripted_response(script: &str, messages: &[Message]) -> Message {
+fn scripted_response(script: &str, messages: &[Message], final_response: bool) -> Message {
     match script {
-        "repeat_read" => repeat_read_response(messages),
+        "repeat_read" => repeat_read_response(messages, final_response),
         "single_read" => single_read_response(messages),
         "cancel_bash" => cancel_bash_response(messages),
         "thought" => Message {
@@ -168,7 +173,7 @@ fn scripted_response(script: &str, messages: &[Message]) -> Message {
             ],
             usage: None,
         },
-        "missing_read" => missing_read_response(messages),
+        "missing_read" => missing_read_response(messages, final_response),
         "mixed_write_read" => mixed_write_read_response(messages),
         "edit_preview" => edit_preview_response(messages),
         "history_search_read" => history_search_read_response(messages),
@@ -373,20 +378,14 @@ fn mixed_write_read_response(messages: &[Message]) -> Message {
     }
 }
 
-fn missing_read_response(messages: &[Message]) -> Message {
+fn missing_read_response(messages: &[Message], final_response: bool) -> Message {
     let tool_results = messages
         .iter()
         .flat_map(|message| &message.content)
         .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
         .count();
 
-    if tool_results >= 8
-        || messages.iter().any(|message| {
-            message
-                .text_content()
-                .contains("Adaptive loop guard stopped tool use")
-        })
-    {
+    if tool_results >= 8 || final_response {
         return Message::text(Role::Assistant, "final after missing read loop guard\n");
     }
 
@@ -446,20 +445,14 @@ fn single_read_response(messages: &[Message]) -> Message {
     }
 }
 
-fn repeat_read_response(messages: &[Message]) -> Message {
+fn repeat_read_response(messages: &[Message], final_response: bool) -> Message {
     let tool_results = messages
         .iter()
         .flat_map(|message| &message.content)
         .filter(|block| matches!(block, ContentBlock::ToolResult { .. }))
         .count();
 
-    if tool_results >= 7
-        || messages.iter().any(|message| {
-            message
-                .text_content()
-                .contains("Adaptive loop guard stopped tool use")
-        })
-    {
+    if tool_results >= 7 || final_response {
         return Message::text(Role::Assistant, "final after repeated read loop guard\n");
     }
 
@@ -480,7 +473,7 @@ mod tests {
 
     #[test]
     fn repeat_read_script_emits_tool_call() {
-        let message = repeat_read_response(&[]);
+        let message = repeat_read_response(&[], false);
         assert!(matches!(
             message.content.first(),
             Some(ContentBlock::ToolUse { name, .. }) if name == "read"
@@ -489,12 +482,27 @@ mod tests {
 
     #[test]
     fn missing_read_script_emits_tool_call() {
-        let message = missing_read_response(&[]);
+        let message = missing_read_response(&[], false);
         assert!(matches!(
             message.content.first(),
             Some(ContentBlock::ToolUse { name, input, .. })
                 if name == "read" && input["path"] == "missing-0.txt"
         ));
+    }
+
+    #[test]
+    fn loop_scripts_use_tool_exposure_for_final_response() {
+        let repeated = repeat_read_response(&[], true);
+        let missing = missing_read_response(&[], true);
+
+        assert_eq!(
+            repeated.text_content(),
+            "final after repeated read loop guard\n"
+        );
+        assert_eq!(
+            missing.text_content(),
+            "final after missing read loop guard\n"
+        );
     }
 
     #[test]

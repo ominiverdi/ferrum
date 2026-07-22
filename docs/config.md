@@ -155,7 +155,7 @@ Supported placeholders:
 {{project_config}}
 ```
 
-When `max_tool_rounds = 0`, `{{max_tool_rounds}}` renders as `0 (adaptive; no fixed cap; does not disable tools)` instead of an ambiguous bare zero. Positive limits continue to render as their numeric value.
+`{{max_tool_rounds}}` remains available to custom system prompts, but Ferrum's default prompt omits harness loop policy. When `max_tool_rounds = 0`, the placeholder renders as `0 (adaptive; no fixed cap; does not disable tools)`; positive limits render as their numeric value.
 
 Unknown placeholders are left unchanged. If the file exists but cannot be read, Ferrum fails clearly.
 

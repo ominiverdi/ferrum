@@ -300,7 +300,7 @@ Ferrum defaults to an adaptive loop guard instead of a low fixed tool-round cap.
 - many consecutive tool errors
 - an internal hard safety limit
 
-When the guard sees suspicious behavior, Ferrum first injects a corrective system nudge. If the behavior continues, Ferrum makes one final no-tools model call asking the assistant to summarize findings and next steps. Guard events are printed to stderr as `[loop-guard] ...`.
+When the guard sees suspicious behavior, Ferrum adds guidance to the next model request only; it does not store that guidance in conversation history. If the behavior continues, Ferrum makes one final no-tools model call asking for findings and next steps. Guard events and their reasons are printed to stderr as `[loop-guard] ...`.
 
 Set `max_tool_rounds` to a positive value to restore an explicit fixed cap for debugging or benchmarks.
 

@@ -32,7 +32,7 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 - Current-directory session picker/switching with `/sessions`.
 - Model-generated compaction with recent-context retention.
 - Plain multiline tool rendering, bounded tool-result previews, session-aware colors, and unified diff-style `edit` rendering.
-- Final no-tools synthesis when the adaptive loop guard or an explicit tool-round cap stops tool use.
+- Final no-tools synthesis when the adaptive loop guard or an explicit tool-round cap ends a tool phase.
 - Lowercase `agents.md` context loading alongside `AGENTS.md`.
 - Core tool hardening for `find`, `grep`, `ls`, `bash`, and `wait`:
   - `find`: glob patterns, limits, hidden config directories, ignore files, relative paths, noisy-directory skips.

@@ -1229,7 +1229,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- max_tool_rounds: {{max_tool_rounds}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n- If the adaptive loop guard stops tool use, summarize findings from available evidence instead of continuing to search.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -2811,16 +2811,26 @@ impl AgentSession {
         let mut turn_tool_calls = 0usize;
         let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
         let mut overflow_recovery_attempted = false;
+        let mut request_guidance = None;
         let force_final_reason = loop {
+            let request_extras = request_guidance
+                .as_ref()
+                .map_or(&[][..], std::slice::from_ref);
             self.ensure_provider_request_budget(
                 config,
                 &tools,
-                &[],
+                request_extras,
                 "model request",
                 Some(Arc::clone(&turn_cancel)),
                 sink,
             )
             .await?;
+            let request_messages = request_guidance.as_ref().map(|guidance| {
+                let mut messages = self.messages.clone();
+                messages.push(guidance.clone());
+                messages
+            });
+            let provider_messages = request_messages.as_deref().unwrap_or(&self.messages);
             model_request_index += 1;
             sink.emit(AgentEvent::ModelRequestStarted {
                 request: model_request_index,
@@ -2831,7 +2841,7 @@ impl AgentSession {
                 Arc::clone(&turn_cancel),
             );
             if metrics_enabled {
-                emit_model_metrics_start(model_request_index, &self.messages, &tools);
+                emit_model_metrics_start(model_request_index, provider_messages, &tools);
             }
             let started = Instant::now();
             let mut event_error = None;
@@ -2857,7 +2867,7 @@ impl AgentSession {
                     match cancel::race_with_cancel_grace(
                         provider.complete_streaming(
                             &config.provider_model,
-                            &self.messages,
+                            provider_messages,
                             &tools,
                             config.thinking,
                             &mut on_event,
@@ -2875,7 +2885,7 @@ impl AgentSession {
                     match cancel::race_with_cancel_grace(
                         provider.complete(
                             &config.provider_model,
-                            &self.messages,
+                            provider_messages,
                             &tools,
                             config.thinking,
                         ),
@@ -2931,11 +2941,12 @@ impl AgentSession {
                 }
                 Err(error) => return Err(error),
             };
+            request_guidance = None;
             let provider_usage = response.usage;
             let mut response = response.message;
             let token_usage = usage_for_response(
                 provider_usage.or_else(|| response.usage.clone()),
-                &self.messages,
+                provider_messages,
                 &tools,
                 &response,
             );
@@ -3037,18 +3048,16 @@ impl AgentSession {
             match loop_guard.observe_round(&observations) {
                 LoopGuardAction::Continue => {}
                 LoopGuardAction::Nudge(reason) => {
-                    let message = messages::Message::text(
+                    request_guidance = Some(messages::Message::text(
                         messages::Role::System,
                         format!(
-                            "Adaptive loop guard: {reason}. Do not repeat the same failed or redundant action. Use existing tool results, choose a different concrete action, or finish with a concise summary if enough evidence is available."
+                            "Recent tool activity: {reason}. Use the available results to choose a materially different action or provide a concise result."
                         ),
-                    );
+                    ));
                     sink.emit(AgentEvent::Notice {
                         kind: NoticeKind::Diagnostic,
                         message: format!("[loop-guard] {reason}"),
                     })?;
-                    self.session.append_message(&message)?;
-                    self.messages.push(message);
                 }
                 LoopGuardAction::ForceFinal(reason) => break reason,
             }
@@ -3056,13 +3065,11 @@ impl AgentSession {
 
         sink.emit(AgentEvent::Notice {
             kind: NoticeKind::Diagnostic,
-            message: format!("[loop-guard] stopped tool use: {force_final_reason}"),
+            message: format!("[loop-guard] {force_final_reason}; requesting final response"),
         })?;
         let final_instruction = messages::Message::text(
             messages::Role::System,
-            format!(
-                "Adaptive loop guard stopped tool use: {force_final_reason}. Do not call tools. Summarize the findings from the available tool results, identify likely conclusions, and propose the next concrete step."
-            ),
+            "Return a concise response using the completed work and available results. State the findings, remaining uncertainty, and the next concrete step.",
         );
         self.ensure_provider_request_budget(
             config,
@@ -5713,6 +5720,8 @@ mod context_pressure_tests {
             assert!(prompt.contains(command), "missing {command}");
         }
         assert!(!prompt.contains("/sessions <number|id-prefix|path>"));
+        assert!(!prompt.contains("max_tool_rounds"));
+        assert!(!prompt.to_ascii_lowercase().contains("loop guard"));
     }
 
     #[test]
@@ -5820,6 +5829,15 @@ mod context_pressure_tests {
         assert!(loaded.iter().any(|message| {
             matches!(message.role, messages::Role::User)
                 && message.text_content() == "__ferrum_test_repeat_read__"
+        }));
+        assert!(!loaded.iter().any(|message| {
+            message
+                .text_content()
+                .contains("Recent tool activity: same tool call repeated")
+        }));
+        assert!(loaded.iter().any(|message| {
+            matches!(message.role, messages::Role::Assistant)
+                && message.text_content() == "final after repeated read loop guard\n"
         }));
         assert!(!loaded.first().is_some_and(message_has_tool_result));
     }

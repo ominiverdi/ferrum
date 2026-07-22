@@ -232,7 +232,7 @@ Supported placeholders:
 {{diff_mode}}
 ```
 
-When `max_tool_rounds = 0`, `{{max_tool_rounds}}` renders as an annotated adaptive mode rather than a bare zero, so the prompt cannot mistake it for disabled tool use.
+`{{max_tool_rounds}}` remains available to custom system prompts. Ferrum's default prompt leaves harness loop policy out of model context.
 
 Do not put secrets in `system.md`. If you override the prompt, keep any runtime metadata and tool guidance you want Ferrum to preserve.
 
