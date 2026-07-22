@@ -13,6 +13,7 @@ use crate::{
     auth::openai_codex,
     cancel::{self, WaitError},
     config::ThinkingLevel,
+    terminal_text,
     text_truncate::truncate_to_max_bytes,
 };
 use anyhow::{Context, Result};
@@ -998,10 +999,10 @@ fn final_codex_error(error: anyhow::Error, retries: usize) -> anyhow::Error {
         return error;
     }
     let summary = truncate_to_max_bytes(&error.to_string(), 1_000);
-    eprintln!(
+    terminal_text::write_stderr_diagnostic(&format!(
         "[provider] OpenAI Codex request failed after {retries} retries ({} total attempts); no retries remain: {summary}",
         retries + 1
-    );
+    ));
     error.context(format!(
         "OpenAI Codex request failed after {retries} retries ({} total attempts); no retries remain",
         retries + 1
@@ -1017,10 +1018,10 @@ async fn sleep_before_codex_retry(
     let exponential = CODEX_RETRY_BASE_DELAY * (1 << (retry - 1));
     let delay = retry_after.unwrap_or(exponential);
     let reason = truncate_to_max_bytes(reason, 1_000);
-    eprintln!(
+    terminal_text::write_stderr_diagnostic(&format!(
         "[provider] {reason}; retrying in {:.1}s ({retry}/{CODEX_MAX_RETRIES})",
         delay.as_secs_f64()
-    );
+    ));
     match cancel::race(tokio::time::sleep(delay), cancelled).await {
         Ok(()) => Ok(()),
         Err(WaitError::Cancelled) => anyhow::bail!("aborted"),

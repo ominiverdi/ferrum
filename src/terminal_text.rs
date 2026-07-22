@@ -1,3 +1,6 @@
+use crossterm::terminal;
+use std::io::{self, IsTerminal, Write};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum State {
     #[default]
@@ -82,6 +85,20 @@ pub fn sanitize_title(input: &str) -> String {
         .collect()
 }
 
+pub fn write_stderr_diagnostic(input: &str) {
+    let stderr = io::stderr();
+    let raw_mode = stderr.is_terminal() && terminal::is_raw_mode_enabled().unwrap_or(false);
+    let mut stderr = stderr.lock();
+    let _ = write_diagnostic_line(&mut stderr, input, raw_mode);
+    let _ = stderr.flush();
+}
+
+fn write_diagnostic_line(output: &mut impl Write, input: &str, raw_mode: bool) -> io::Result<()> {
+    let line = sanitize(input).replace(['\r', '\n'], " ");
+    output.write_all(line.as_bytes())?;
+    output.write_all(if raw_mode { b"\r\n" } else { b"\n" })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +133,20 @@ mod tests {
         assert!(!sanitized.contains('\n'));
         assert!(!sanitized.contains("bad"));
         assert_eq!(sanitized.chars().count(), 200);
+    }
+
+    #[test]
+    fn raw_mode_diagnostics_return_to_column_zero() {
+        let mut output = Vec::new();
+        write_diagnostic_line(&mut output, "first", true).unwrap();
+        write_diagnostic_line(&mut output, "second", true).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "first\r\nsecond\r\n");
+    }
+
+    #[test]
+    fn normal_diagnostics_use_lf_and_stay_on_one_sanitized_line() {
+        let mut output = Vec::new();
+        write_diagnostic_line(&mut output, "safe\n\x1b]0;bad\x07next", false).unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "safe next\n");
     }
 }
