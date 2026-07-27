@@ -740,33 +740,45 @@ impl Provider for OpenAiCodexProvider {
                 parallel_tool_calls: !_tools.is_empty(),
             };
 
-            let response = send_codex_authenticated_request(
-                &self.client,
-                &self.responses_url(),
-                &self.auth_path,
-                &request,
-                None,
-            )
-            .await?;
-            let mut parser = ResponsesSseParser::default();
-            consume_sse_response(
-                response,
-                None,
-                PROVIDER_STREAM_IDLE_TIMEOUT,
-                "OpenAI Codex stream",
-                |data| {
-                    if parser.process_data(data, None)? {
-                        Ok(SseControl::Stop)
-                    } else {
-                        Ok(SseControl::Continue)
+            let mut stream_retries = 0usize;
+            loop {
+                let response = send_codex_authenticated_request(
+                    &self.client,
+                    &self.responses_url(),
+                    &self.auth_path,
+                    &request,
+                    None,
+                )
+                .await?;
+
+                let mut parser = ResponsesSseParser::default();
+                let stream_result = consume_sse_response(
+                    response,
+                    None,
+                    PROVIDER_STREAM_IDLE_TIMEOUT,
+                    "OpenAI Codex stream",
+                    |data| {
+                        if parser.process_data(data, None)? {
+                            Ok(SseControl::Stop)
+                        } else {
+                            Ok(SseControl::Continue)
+                        }
+                    },
+                )
+                .await;
+                if let Err(error) = stream_result {
+                    if should_retry_codex_stream(&error, false, stream_retries) {
+                        stream_retries += 1;
+                        sleep_before_codex_retry(stream_retries, &error.to_string(), None, None)
+                            .await?;
+                        continue;
                     }
-                },
-            )
-            .await
-            .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))?;
-            parser
-                .finish()
-                .map_err(|error| provider_stream_error(error, "OpenAI Codex stream"))
+                    return Err(final_codex_stream_error(error, false, stream_retries));
+                }
+                return parser
+                    .finish()
+                    .map_err(|error| final_codex_stream_error(error, false, stream_retries));
+            }
         })
     }
 
@@ -2925,6 +2937,33 @@ data: {"type":"response.completed","response":{"output":[]}}
             events.as_slice(),
             [StreamEvent::TextDelta(text)] if text == "recovered"
         ));
+    }
+
+    #[tokio::test]
+    async fn buffered_codex_completion_retries_after_partial_attempt_output() {
+        const PARTIAL_TRANSIENT_ERROR: &[u8] =
+            br#"data: {"type":"response.output_text.delta","delta":"discarded partial"}
+
+data: {"type":"error","error":{"type":"server_error","code":"server_error","message":"retry me"}}
+
+"#;
+        const SUCCESS: &[u8] = br#"data: {"type":"response.output_text.delta","delta":"recovered"}
+
+data: {"type":"response.completed","response":{"output":[]}}
+
+"#;
+        let (base_url, server) =
+            spawn_codex_stream_sequence_server(vec![PARTIAL_TRANSIENT_ERROR, SUCCESS]);
+        let (_auth_directory, auth_path) = test_codex_auth();
+        let provider = OpenAiCodexProvider::new(base_url, auth_path).unwrap();
+
+        let response = provider
+            .complete("test-model", &[], &[], ThinkingLevel::Off)
+            .await
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(response.message.display_text(), "recovered");
     }
 
     #[tokio::test]
