@@ -116,31 +116,37 @@ fn is_retryable_codex_stream_error(error: &anyhow::Error) -> bool {
         .any(|cause| cause.downcast_ref::<RetryableCodexStreamError>().is_some())
 }
 
-fn should_retry_codex_stream(error: &anyhow::Error, visible_output: bool, retries: usize) -> bool {
-    !visible_output && retries < CODEX_MAX_RETRIES && is_retryable_codex_stream_error(error)
+fn should_retry_codex_stream(
+    error: &anyhow::Error,
+    answer_output_emitted: bool,
+    retries: usize,
+) -> bool {
+    !answer_output_emitted && retries < CODEX_MAX_RETRIES && is_retryable_codex_stream_error(error)
 }
 
 fn final_codex_stream_error(
     error: anyhow::Error,
-    visible_output: bool,
+    answer_output_emitted: bool,
     retries: usize,
 ) -> anyhow::Error {
     if error.to_string() == "aborted" {
         return error;
     }
-    let context = if visible_output {
+    let context = if answer_output_emitted {
         let earlier = if retries == 0 {
             String::new()
         } else {
             format!(" after {retries} earlier safe retries")
         };
         format!(
-            "OpenAI Codex stream failed{earlier}; Ferrum did not retry the final attempt to avoid replaying partial output"
+            "OpenAI Codex stream failed{earlier}; Ferrum did not retry the final attempt to avoid replaying partial answer output"
         )
     } else if retries == 0 {
         "OpenAI Codex stream failed after the provider accepted the request".to_string()
     } else {
-        format!("OpenAI Codex stream failed after {retries} retries before any output was emitted")
+        format!(
+            "OpenAI Codex stream failed after {retries} retries before any answer text was emitted"
+        )
     };
     error.context(context)
 }
@@ -840,9 +846,9 @@ impl Provider for OpenAiCodexProvider {
                     },
                 )
                 .await;
-                let visible_output = parser.has_visible_output();
+                let answer_output_emitted = parser.has_answer_output();
                 if let Err(error) = stream_result {
-                    if should_retry_codex_stream(&error, visible_output, stream_retries) {
+                    if should_retry_codex_stream(&error, answer_output_emitted, stream_retries) {
                         stream_retries += 1;
                         sleep_before_codex_retry(
                             stream_retries,
@@ -855,12 +861,12 @@ impl Provider for OpenAiCodexProvider {
                     }
                     return Err(final_codex_stream_error(
                         error,
-                        visible_output,
+                        answer_output_emitted,
                         stream_retries,
                     ));
                 }
                 return parser.finish().map_err(|error| {
-                    final_codex_stream_error(error, visible_output, stream_retries)
+                    final_codex_stream_error(error, answer_output_emitted, stream_retries)
                 });
             }
         })
@@ -1811,8 +1817,8 @@ struct ResponsesSseParser {
 }
 
 impl ResponsesSseParser {
-    fn has_visible_output(&self) -> bool {
-        !self.output.is_empty() || !self.thinking.is_empty()
+    fn has_answer_output(&self) -> bool {
+        !self.output.is_empty()
     }
 
     #[cfg(test)]
@@ -2827,21 +2833,49 @@ mod tests {
     }
 
     #[test]
-    fn codex_stream_retry_policy_requires_transient_failure_without_visible_output() {
-        let mut parser = ResponsesSseParser::default();
-        let transient = parser
+    fn codex_stream_retry_policy_requires_transient_failure_without_answer_output() {
+        let mut thinking_only = ResponsesSseParser::default();
+        thinking_only
+            .process_data(
+                r#"{"type":"response.reasoning_summary_text.delta","delta":"planning"}"#,
+                None,
+            )
+            .unwrap();
+        let transient = thinking_only
             .process_data(
                 r#"{"type":"error","error":{"code":"server_error","message":"retry"}}"#,
                 None,
             )
             .unwrap_err();
-        assert!(should_retry_codex_stream(&transient, false, 0));
+        assert!(should_retry_codex_stream(
+            &transient,
+            thinking_only.has_answer_output(),
+            0
+        ));
         assert!(!should_retry_codex_stream(
             &transient,
-            false,
+            thinking_only.has_answer_output(),
             CODEX_MAX_RETRIES
         ));
-        assert!(!should_retry_codex_stream(&transient, true, 0));
+
+        let mut with_answer = ResponsesSseParser::default();
+        with_answer
+            .process_data(
+                r#"{"type":"response.output_text.delta","delta":"partial"}"#,
+                None,
+            )
+            .unwrap();
+        let transient = with_answer
+            .process_data(
+                r#"{"type":"error","error":{"code":"server_error","message":"retry"}}"#,
+                None,
+            )
+            .unwrap_err();
+        assert!(!should_retry_codex_stream(
+            &transient,
+            with_answer.has_answer_output(),
+            0
+        ));
 
         let mut parser = ResponsesSseParser::default();
         let permanent = parser
@@ -2905,7 +2939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_retries_transient_terminal_error_before_visible_output() {
+    async fn codex_retries_transient_terminal_error_before_answer_output() {
         const TRANSIENT_ERROR: &[u8] = br#"data: {"type":"error","error":{"type":"server_error","code":"server_error","message":"retry me"}}
 
 "#;
@@ -2936,6 +2970,47 @@ data: {"type":"response.completed","response":{"output":[]}}
         assert!(matches!(
             events.as_slice(),
             [StreamEvent::TextDelta(text)] if text == "recovered"
+        ));
+    }
+
+    #[tokio::test]
+    async fn codex_retries_transient_terminal_error_after_thinking_only() {
+        const THINKING_THEN_TRANSIENT_ERROR: &[u8] =
+            br#"data: {"type":"response.reasoning_summary_text.delta","delta":"**Planning retry**"}
+
+data: {"type":"error","error":{"type":"server_error","code":"server_error","message":"retry me"}}
+
+"#;
+        const SUCCESS: &[u8] = br#"data: {"type":"response.output_text.delta","delta":"recovered"}
+
+data: {"type":"response.completed","response":{"output":[]}}
+
+"#;
+        let (base_url, server) =
+            spawn_codex_stream_sequence_server(vec![THINKING_THEN_TRANSIENT_ERROR, SUCCESS]);
+        let (_auth_directory, auth_path) = test_codex_auth();
+        let provider = OpenAiCodexProvider::new(base_url, auth_path).unwrap();
+        let mut events = Vec::new();
+
+        let response = provider
+            .complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::High,
+                &mut |event| events.push(event),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(response.message.display_text(), "recovered");
+        assert_eq!(response.message.thinking_text(), "");
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::ThinkingDelta(thinking), StreamEvent::TextDelta(text)]
+                if thinking == "**Planning retry**" && text == "recovered"
         ));
     }
 
