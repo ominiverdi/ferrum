@@ -2813,9 +2813,7 @@ impl AgentSession {
         let mut overflow_recovery_attempted = false;
         let mut request_guidance = None;
         let force_final_reason = loop {
-            let request_extras = request_guidance
-                .as_ref()
-                .map_or(&[][..], std::slice::from_ref);
+            let request_extras = request_guidance.as_slice();
             self.ensure_provider_request_budget(
                 config,
                 &tools,
