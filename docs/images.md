@@ -36,13 +36,15 @@ Ferrum validates actual PNG, JPEG, or WebP decodability under decoder dimension 
 
 ## Interactive mode
 
-Attach an image to the next message:
+While editing a prompt, press `Alt+I` to attach the current clipboard image immediately. Ferrum previews the image, reports the pending attachment count, then restores the exact draft and cursor position. Each press attaches one image; pressing Ctrl+C before submission discards images added to that draft.
+
+You can also attach an image to the next message with a command:
 
 ```text
 /image ./screenshot.png
 ```
 
-Attach the current clipboard image:
+Or attach the current clipboard image before writing the prompt:
 
 ```text
 /paste-image

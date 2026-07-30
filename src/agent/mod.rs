@@ -18,7 +18,8 @@ use crossterm::{
 use events::{AgentEvent, AgentEventSink, ModelRequestKind, NoticeKind, TurnOptions, TurnOutcome};
 use futures_util::{StreamExt, stream};
 use rustyline::{
-    Editor, Helper,
+    Cmd, ConditionalEventHandler, Editor, Event as ReadlineEvent, EventContext, EventHandler,
+    Helper, KeyEvent as ReadlineKeyEvent, RepeatCount,
     completion::{Completer, Pair},
     error::ReadlineError,
     highlight::Highlighter,
@@ -77,6 +78,45 @@ const MAX_PREVIEW_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CACHED_PROVIDER_MODEL_NAMES: usize = 512;
 const MAX_CACHED_PROVIDER_MODEL_NAME_BYTES: usize = 256;
 const MAX_CACHED_PROVIDER_MODEL_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct SuspendedDraft {
+    left: String,
+    right: String,
+}
+
+#[derive(Clone)]
+struct AttachClipboardImageHandler {
+    suspended_draft: Arc<Mutex<Option<SuspendedDraft>>>,
+}
+
+impl ConditionalEventHandler for AttachClipboardImageHandler {
+    fn handle(
+        &self,
+        _event: &ReadlineEvent,
+        _repeat: RepeatCount,
+        _positive: bool,
+        context: &EventContext<'_>,
+    ) -> Option<Cmd> {
+        let draft = suspend_draft_at_cursor(context.line(), context.pos())?;
+        let Ok(mut suspended) = self.suspended_draft.lock() else {
+            return Some(Cmd::Noop);
+        };
+        *suspended = Some(draft);
+        Some(Cmd::Interrupt)
+    }
+}
+
+fn suspend_draft_at_cursor(line: &str, cursor: usize) -> Option<SuspendedDraft> {
+    if !line.is_char_boundary(cursor) {
+        return None;
+    }
+    let (left, right) = line.split_at(cursor);
+    Some(SuspendedDraft {
+        left: left.to_string(),
+        right: right.to_string(),
+    })
+}
 
 #[derive(Default)]
 struct FerrumLineHelper {
@@ -928,20 +968,34 @@ pub async fn run_interactive(
 
     let mut rl = Editor::<FerrumLineHelper, DefaultHistory>::new()?;
     rl.set_helper(Some(FerrumLineHelper::new(&state.skills, config)));
+    let suspended_draft = Arc::new(Mutex::new(None));
+    rl.bind_sequence(
+        ReadlineKeyEvent::alt('i'),
+        EventHandler::Conditional(Box::new(AttachClipboardImageHandler {
+            suspended_draft: Arc::clone(&suspended_draft),
+        })),
+    );
     let history = config.history_path();
     let _ = prepare_history_file(&history);
     let _ = rl.load_history(&history);
 
     let mut last_ctrl_c: Option<Instant> = None;
+    let mut initial_draft: Option<SuspendedDraft> = None;
+    let mut draft_image_start: Option<usize> = None;
     loop {
+        if draft_image_start.is_some_and(|start| start > state.pending_images.len()) {
+            draft_image_start = None;
+        }
         let prompt = state
             .colors
             .paint_stdout(ColorToken::Prompt, state.color_mode, "ferrum> ");
         let pending_input = take_pending_terminal_input();
-        let readline = if pending_input.is_empty() {
+        let mut draft = initial_draft.take().unwrap_or_default();
+        draft.left.push_str(&pending_input);
+        let readline = if draft.left.is_empty() && draft.right.is_empty() {
             rl.readline(&prompt)
         } else {
-            rl.readline_with_initial(&prompt, (&pending_input, ""))
+            rl.readline_with_initial(&prompt, (&draft.left, &draft.right))
         };
         match readline {
             Ok(line) => {
@@ -956,8 +1010,14 @@ pub async fn run_interactive(
                 let history_input = sanitize_interactive_history_input(input, slash_escaped);
                 let _ = rl.add_history_entry(history_input.as_str());
                 if input.starts_with('!') {
+                    let sends_to_model = !input.starts_with("!!");
                     match handle_bang_command(input, config, &mut state).await {
-                        Ok(CommandAction::Continue) => continue,
+                        Ok(CommandAction::Continue) => {
+                            if sends_to_model && state.pending_images.is_empty() {
+                                draft_image_start = None;
+                            }
+                            continue;
+                        }
                         Ok(CommandAction::Quit) => {
                             state.checkpoint_session()?;
                             save_history_private(&mut rl, &history);
@@ -971,10 +1031,16 @@ pub async fn run_interactive(
                 }
                 if !slash_escaped && let Some((name, args)) = parse_skill_invocation(input) {
                     match state.expand_skill_prompt(name, args.as_deref()) {
-                        Ok(prompt) => match state.run_turn(prompt, config, true).await {
-                            Ok(()) => render_prompt_separator(state.color_mode, &state.colors),
-                            Err(error) => render_error(&error),
-                        },
+                        Ok(prompt) => {
+                            let result = state.run_turn(prompt, config, true).await;
+                            if state.pending_images.is_empty() {
+                                draft_image_start = None;
+                            }
+                            match result {
+                                Ok(()) => render_prompt_separator(state.color_mode, &state.colors),
+                                Err(error) => render_error(&error),
+                            }
+                        }
                         Err(error) => render_error(&error),
                     }
                     continue;
@@ -1135,7 +1201,11 @@ pub async fn run_interactive(
                         }
                     }
                 }
-                match state.run_turn(prompt, config, true).await {
+                let result = state.run_turn(prompt, config, true).await;
+                if state.pending_images.is_empty() {
+                    draft_image_start = None;
+                }
+                match result {
                     Ok(()) => render_prompt_separator(state.color_mode, &state.colors),
                     Err(error) => {
                         render_error(&error);
@@ -1144,6 +1214,23 @@ pub async fn run_interactive(
                 }
             }
             Err(ReadlineError::Interrupted) => {
+                let suspended = suspended_draft
+                    .lock()
+                    .ok()
+                    .and_then(|mut draft| draft.take());
+                if let Some(draft) = suspended {
+                    last_ctrl_c = None;
+                    initial_draft = Some(draft);
+                    let attachment_start = state.pending_images.len();
+                    match state.attach_clipboard_image() {
+                        Ok(()) => {
+                            draft_image_start.get_or_insert(attachment_start);
+                        }
+                        Err(error) => render_error(&error),
+                    }
+                    continue;
+                }
+
                 let now = Instant::now();
                 if last_ctrl_c
                     .is_some_and(|last| now.duration_since(last) <= Duration::from_millis(900))
@@ -1154,7 +1241,19 @@ pub async fn run_interactive(
                     return Ok(());
                 }
                 last_ctrl_c = Some(now);
-                println!("^C (press Ctrl+C again to quit)");
+                let discarded_images = draft_image_start.take().map_or(0, |start| {
+                    let start = start.min(state.pending_images.len());
+                    let discarded = state.pending_images.len() - start;
+                    state.pending_images.truncate(start);
+                    discarded
+                });
+                if discarded_images == 0 {
+                    println!("^C (press Ctrl+C again to quit)");
+                } else {
+                    println!(
+                        "^C (discarded {discarded_images} draft image(s); press Ctrl+C again to quit)"
+                    );
+                }
                 continue;
             }
             Err(ReadlineError::Eof) => {
@@ -3273,7 +3372,10 @@ impl AgentSession {
         )?;
         preview_attached_image(&image);
         self.pending_images.push(image);
-        eprintln!("[image] attached clipboard image");
+        eprintln!(
+            "[image] attached clipboard image ({} pending)",
+            self.pending_images.len()
+        );
         Ok(())
     }
 
@@ -5216,6 +5318,19 @@ fn context_pressure_message(
 #[cfg(test)]
 mod context_pressure_tests {
     use super::*;
+
+    #[test]
+    fn image_shortcut_suspends_draft_at_exact_cursor_position() {
+        let line = "describe café image";
+        let cursor = "describe café".len();
+
+        let draft = suspend_draft_at_cursor(line, cursor).unwrap();
+
+        assert_eq!(draft.left, "describe café");
+        assert_eq!(draft.right, " image");
+        assert!(suspend_draft_at_cursor(line, cursor - 1).is_none());
+        assert_ne!(ReadlineKeyEvent::alt('i'), ReadlineKeyEvent::from('\t'));
+    }
 
     #[test]
     fn displayed_errors_include_the_bounded_sanitized_cause_chain() {
@@ -8722,6 +8837,7 @@ fn handle_command(
             println!(
                 "  /diff [mode]          choose or set edit diff: unified|compact|full|words|side_by_side"
             );
+            println!("  Alt+I                 attach clipboard image to current draft");
             println!("  /image <path>         attach image to next message");
             println!("  /image-paste          attach image from clipboard");
             println!("  /paste-image          attach image from clipboard");

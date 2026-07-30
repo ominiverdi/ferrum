@@ -59,6 +59,7 @@ Behavior:
 - Provider errors are reported without exiting the REPL.
 - Ctrl+D exits.
 - Ctrl+C once clears/returns to prompt; double Ctrl+C exits.
+- Alt+I attaches one clipboard image while preserving the current draft and cursor position.
 - Input beginning with `/` in column zero is always handled locally. Unknown slash commands never reach the provider. Leading whitespace escapes slash-command handling and is removed before the prompt is sent.
 
 Slash commands:
