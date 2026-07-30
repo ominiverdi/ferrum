@@ -85,12 +85,25 @@ struct SuspendedDraft {
     right: String,
 }
 
-#[derive(Clone)]
-struct AttachClipboardImageHandler {
-    suspended_draft: Arc<Mutex<Option<SuspendedDraft>>>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptShortcutAction {
+    AttachClipboardImage,
+    RunCommand(&'static str),
 }
 
-impl ConditionalEventHandler for AttachClipboardImageHandler {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SuspendedPromptShortcut {
+    action: PromptShortcutAction,
+    draft: SuspendedDraft,
+}
+
+#[derive(Clone)]
+struct PromptShortcutHandler {
+    action: PromptShortcutAction,
+    suspended_shortcut: Arc<Mutex<Option<SuspendedPromptShortcut>>>,
+}
+
+impl ConditionalEventHandler for PromptShortcutHandler {
     fn handle(
         &self,
         _event: &ReadlineEvent,
@@ -99,10 +112,13 @@ impl ConditionalEventHandler for AttachClipboardImageHandler {
         context: &EventContext<'_>,
     ) -> Option<Cmd> {
         let draft = suspend_draft_at_cursor(context.line(), context.pos())?;
-        let Ok(mut suspended) = self.suspended_draft.lock() else {
+        let Ok(mut suspended) = self.suspended_shortcut.lock() else {
             return Some(Cmd::Noop);
         };
-        *suspended = Some(draft);
+        *suspended = Some(SuspendedPromptShortcut {
+            action: self.action,
+            draft,
+        });
         Some(Cmd::Interrupt)
     }
 }
@@ -266,7 +282,6 @@ impl FerrumLineHelper {
     fn new(skills: &[skills::Skill], config: &Config) -> Self {
         let mut command_hints = HashMap::new();
         command_hints.insert("/image", " <path>");
-        command_hints.insert("/image-paste", "");
         command_hints.insert("/paste-image", "");
         command_hints.insert("/session", "");
         command_hints.insert("/goal", " <text>|clear");
@@ -337,13 +352,12 @@ fn slash_command_words() -> &'static [&'static str] {
         "/safety",
         "/mcp",
         "/colors",
+        "/paste-image",
         "/palette",
         "/palettes",
         "/diff",
         "/image",
-        "/image-paste",
         "/usage",
-        "/paste-image",
         "/compact",
     ]
 }
@@ -968,13 +982,25 @@ pub async fn run_interactive(
 
     let mut rl = Editor::<FerrumLineHelper, DefaultHistory>::new()?;
     rl.set_helper(Some(FerrumLineHelper::new(&state.skills, config)));
-    let suspended_draft = Arc::new(Mutex::new(None));
-    rl.bind_sequence(
-        ReadlineKeyEvent::alt('i'),
-        EventHandler::Conditional(Box::new(AttachClipboardImageHandler {
-            suspended_draft: Arc::clone(&suspended_draft),
-        })),
-    );
+    let suspended_shortcut = Arc::new(Mutex::new(None));
+    for (key, action) in [
+        ('i', PromptShortcutAction::AttachClipboardImage),
+        ('s', PromptShortcutAction::RunCommand("/sessions")),
+        ('p', PromptShortcutAction::RunCommand("/providers")),
+        ('m', PromptShortcutAction::RunCommand("/models")),
+        ('c', PromptShortcutAction::RunCommand("/compact")),
+        ('t', PromptShortcutAction::RunCommand("/thinking")),
+        ('d', PromptShortcutAction::RunCommand("/diff")),
+        ('g', PromptShortcutAction::RunCommand("/goal")),
+    ] {
+        rl.bind_sequence(
+            ReadlineKeyEvent::alt(key),
+            EventHandler::Conditional(Box::new(PromptShortcutHandler {
+                action,
+                suspended_shortcut: Arc::clone(&suspended_shortcut),
+            })),
+        );
+    }
     let history = config.history_path();
     let _ = prepare_history_file(&history);
     let _ = rl.load_history(&history);
@@ -1214,19 +1240,26 @@ pub async fn run_interactive(
                 }
             }
             Err(ReadlineError::Interrupted) => {
-                let suspended = suspended_draft
+                let suspended = suspended_shortcut
                     .lock()
                     .ok()
-                    .and_then(|mut draft| draft.take());
-                if let Some(draft) = suspended {
+                    .and_then(|mut shortcut| shortcut.take());
+                if let Some(shortcut) = suspended {
                     last_ctrl_c = None;
-                    initial_draft = Some(draft);
-                    let attachment_start = state.pending_images.len();
-                    match state.attach_clipboard_image() {
-                        Ok(()) => {
-                            draft_image_start.get_or_insert(attachment_start);
+                    initial_draft = Some(shortcut.draft);
+                    match shortcut.action {
+                        PromptShortcutAction::AttachClipboardImage => {
+                            let attachment_start = state.pending_images.len();
+                            match state.attach_clipboard_image() {
+                                Ok(()) => {
+                                    draft_image_start.get_or_insert(attachment_start);
+                                }
+                                Err(error) => render_error(&error),
+                            }
                         }
-                        Err(error) => render_error(&error),
+                        PromptShortcutAction::RunCommand(command) => {
+                            run_prompt_shortcut_command(command, config, &mut state, &mut rl).await;
+                        }
                     }
                     continue;
                 }
@@ -1263,6 +1296,111 @@ pub async fn run_interactive(
                 return Ok(());
             }
             Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+async fn run_prompt_shortcut_command(
+    command: &'static str,
+    config: &mut Config,
+    state: &mut AgentSession,
+    rl: &mut Editor<FerrumLineHelper, DefaultHistory>,
+) {
+    match command {
+        "/compact" => {
+            let mut abort = ActiveTurnAbort::start(true);
+            let result = state
+                .compact(config, None, false, Some(abort.token()))
+                .await;
+            abort.stop();
+            match result {
+                Ok(CompactionOutcome::Compacted {
+                    before_tokens,
+                    after_tokens,
+                }) => println!(
+                    "conversation compacted: {before_tokens} -> {after_tokens} estimated tokens"
+                ),
+                Ok(CompactionOutcome::Skipped {
+                    before_tokens,
+                    after_tokens,
+                    reason,
+                }) => println!(
+                    "compaction skipped: {reason} ({before_tokens} -> {after_tokens} estimated tokens)"
+                ),
+                Err(error) if error.to_string() == "aborted" => println!("aborted"),
+                Err(error) => render_error(&error),
+            }
+        }
+        "/models" => {
+            let mut abort = ActiveTurnAbort::start(true);
+            let token = abort.token();
+            let model_list =
+                cancel::race(providers::list_models(&config.provider), Some(&token)).await;
+            abort.stop();
+            match model_list {
+                Err(_) => println!("aborted"),
+                Ok(Ok(providers::ModelList::Live {
+                    source,
+                    models,
+                    notices,
+                })) => {
+                    let models = cacheable_provider_model_names(&models);
+                    if let Some(helper) = rl.helper_mut() {
+                        helper.cache_model_names(config, &models);
+                    }
+                    for notice in notices {
+                        println!("{}", terminal_text::sanitize(&notice));
+                    }
+                    let items = model_picker_items(config, &models);
+                    if items.is_empty() {
+                        println!("no models found from {}", terminal_text::sanitize(&source));
+                        return;
+                    }
+                    let title = format!("Select model for {}", config.provider_name);
+                    match picker::pick(&title, &items) {
+                        Ok(Some(model)) => {
+                            let previous_provider = config.provider_name.clone();
+                            if model != config.model {
+                                let mut candidate = config.clone();
+                                if let Err(error) = candidate.set_model(&model).and_then(|()| {
+                                    state.commit_provider_model_transition(config, candidate)
+                                }) {
+                                    render_error(&error);
+                                    return;
+                                }
+                            }
+                            if let Some(helper) = rl.helper_mut() {
+                                if config.provider_name != previous_provider {
+                                    helper.clear_cached_provider_model_names(config);
+                                } else {
+                                    helper.rebuild_model_names(config);
+                                }
+                            }
+                            print_model_selection(config);
+                        }
+                        Ok(None) => {}
+                        Err(error) => render_error(&error),
+                    }
+                }
+                Ok(Err(error)) => render_error(&error),
+            }
+        }
+        _ => {
+            let previous_provider = config.provider_name.clone();
+            let previous_model = config.model.clone();
+            match handle_command(command, config, state) {
+                Ok(CommandAction::Continue) => {
+                    if let Some(helper) = rl.helper_mut() {
+                        if config.provider_name != previous_provider {
+                            helper.clear_cached_provider_model_names(config);
+                        } else if config.model != previous_model {
+                            helper.rebuild_model_names(config);
+                        }
+                    }
+                }
+                Ok(CommandAction::Quit) => {}
+                Err(error) => render_error(&error),
+            }
         }
     }
 }
@@ -1328,7 +1466,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /image-paste\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -5473,6 +5611,33 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn paste_image_precedes_palette_for_pa_slash_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
+        let history = DefaultHistory::default();
+        let ctx = rustyline::Context::new(&history);
+
+        let (_start, candidates) = helper.complete("/pa", "/pa".len(), &ctx).unwrap();
+
+        assert_eq!(
+            candidates
+                .first()
+                .map(|candidate| candidate.replacement.as_str()),
+            Some("/paste-image")
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.replacement == "/palette")
+        );
+        assert!(
+            !candidates
+                .iter()
+                .any(|candidate| candidate.replacement == "/image-paste")
+        );
+    }
+
+    #[test]
     fn login_command_accepts_only_documented_provider_names() {
         assert_eq!(parse_login_provider("/login openai").unwrap(), "openai");
         assert_eq!(
@@ -5826,7 +5991,6 @@ mod context_pressure_tests {
             "/colors [auto|on|off]",
             "/palette [name]",
             "/palettes",
-            "/image-paste",
             "/paste-image",
             "/exit",
         ] {
@@ -5916,6 +6080,206 @@ mod context_pressure_tests {
             matches!(message.role, messages::Role::User)
                 && message.text_content() == "x".repeat(40_000)
         }));
+    }
+
+    #[test]
+    fn compaction_prompt_omits_thinking_blocks() {
+        let message = messages::Message {
+            role: messages::Role::Assistant,
+            content: vec![
+                messages::ContentBlock::Thinking {
+                    text: "private reasoning should not be summarized".to_string(),
+                    signature: None,
+                },
+                messages::ContentBlock::Text {
+                    text: "visible answer should be summarized".to_string(),
+                },
+            ],
+            usage: None,
+        };
+
+        let prompt = compaction_prompt(&[message], None);
+
+        assert!(prompt.contains("visible answer should be summarized"));
+        assert!(!prompt.contains("private reasoning should not be summarized"));
+        assert!(!prompt.contains("thinking:"));
+    }
+
+    #[test]
+    fn local_compaction_summary_omits_thinking_blocks() {
+        let message = messages::Message {
+            role: messages::Role::Assistant,
+            content: vec![
+                messages::ContentBlock::Thinking {
+                    text: "private fallback reasoning should not be summarized".to_string(),
+                    signature: None,
+                },
+                messages::ContentBlock::Text {
+                    text: "visible fallback answer".to_string(),
+                },
+            ],
+            usage: None,
+        };
+
+        let summary = local_compaction_summary(&[message], None);
+
+        assert!(summary.contains("visible fallback answer"));
+        assert!(!summary.contains("private fallback reasoning should not be summarized"));
+        assert!(!summary.contains("thinking:"));
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_provider_failure_does_not_append_compaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 50_000;
+        config.base_max_context_tokens = 50_000;
+        let mut state = AgentSession::new(&config).unwrap();
+
+        append_test_message(
+            &mut state,
+            messages::Message::text(
+                messages::Role::User,
+                "__ferrum_test_fail_compaction__ protected marker",
+            ),
+        );
+        append_test_message(
+            &mut state,
+            messages::Message::text(messages::Role::Assistant, "y".repeat(100_000)),
+        );
+        append_test_message(
+            &mut state,
+            messages::Message::text(messages::Role::User, "recent marker"),
+        );
+
+        let error = state.compact(&config, None, false, None).await.unwrap_err();
+        assert!(format!("{error:#}").contains("model compaction failed"));
+        assert!(format!("{error:#}").contains("fake compaction failure"));
+
+        let info = session::jsonl::session_info(state.session.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.compaction_count, 0);
+        assert_eq!(info.archived_message_count, 0);
+        assert_eq!(info.message_count, 3);
+        let loaded = session::jsonl::load_messages(state.session.path()).unwrap();
+        assert_eq!(loaded.len(), 3);
+        assert!(!loaded.iter().any(|message| {
+            message
+                .text_content()
+                .contains(messages::COMPACTION_SUMMARY_PREFIX)
+        }));
+    }
+
+    #[tokio::test]
+    async fn forced_compaction_provider_failure_uses_local_fallback_and_persists() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 50_000;
+        config.base_max_context_tokens = 50_000;
+        let mut state = AgentSession::new(&config).unwrap();
+
+        append_test_message(
+            &mut state,
+            messages::Message::text(
+                messages::Role::User,
+                "__ferrum_test_fail_compaction__ protected marker",
+            ),
+        );
+        append_test_message(
+            &mut state,
+            messages::Message::text(messages::Role::Assistant, "y".repeat(100_000)),
+        );
+        append_test_message(
+            &mut state,
+            messages::Message::text(messages::Role::User, "recent marker"),
+        );
+
+        let outcome = state.compact(&config, None, true, None).await.unwrap();
+        assert!(matches!(outcome, CompactionOutcome::Compacted { .. }));
+
+        let info = session::jsonl::session_info(state.session.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(info.compaction_count, 1);
+        assert_eq!(info.archived_message_count, 3);
+        assert_eq!(info.message_count, 2);
+        assert!(info.last_compaction_timestamp_ms.is_some());
+        let loaded = session::jsonl::load_messages(state.session.path()).unwrap();
+        assert_eq!(loaded.len(), info.message_count);
+        assert!(
+            loaded[0]
+                .text_content()
+                .contains(messages::COMPACTION_SUMMARY_PREFIX)
+        );
+        assert!(
+            loaded[0]
+                .text_content()
+                .contains("model summarization failed")
+        );
+        assert!(
+            loaded[0]
+                .text_content()
+                .contains("__ferrum_test_fail_compaction__ protected marker")
+        );
+        assert!(
+            loaded
+                .iter()
+                .any(|message| message.text_content().contains("recent marker"))
+        );
+    }
+
+    #[tokio::test]
+    async fn forced_compaction_retained_duplicates_are_active_and_originals_archived() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 50_000;
+        config.base_max_context_tokens = 50_000;
+        let mut state = AgentSession::new(&config).unwrap();
+
+        append_test_message(
+            &mut state,
+            messages::Message::text(
+                messages::Role::User,
+                "__ferrum_test_fail_compaction__ protected marker",
+            ),
+        );
+        append_test_message(
+            &mut state,
+            messages::Message::text(messages::Role::Assistant, "y".repeat(100_000)),
+        );
+        append_test_message(
+            &mut state,
+            messages::Message::text(messages::Role::User, "recent marker"),
+        );
+
+        state.compact(&config, None, true, None).await.unwrap();
+
+        let old_history = session::jsonl::search_history(
+            state.session.path(),
+            session::jsonl::HistorySearchOptions {
+                query: "__ferrum_test_fail_compaction__".to_string(),
+                literal: true,
+                ignore_case: false,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        assert!(old_history.contains("archived user"), "{old_history}");
+        assert!(old_history.contains("active compaction"), "{old_history}");
+
+        let recent_history = session::jsonl::search_history(
+            state.session.path(),
+            session::jsonl::HistorySearchOptions {
+                query: "recent marker".to_string(),
+                literal: true,
+                ignore_case: false,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        assert!(recent_history.contains("archived user"), "{recent_history}");
+        assert!(recent_history.contains("active user"), "{recent_history}");
     }
 
     #[tokio::test]
@@ -7556,6 +7920,11 @@ mod context_pressure_tests {
         );
     }
 
+    fn append_test_message(state: &mut AgentSession, message: messages::Message) {
+        state.session.append_message(&message).unwrap();
+        state.messages.push(message);
+    }
+
     fn test_config(config_dir: std::path::PathBuf) -> Config {
         Config {
             data_dir: config_dir.clone(),
@@ -7852,9 +8221,6 @@ fn message_text_for_compaction(message: &messages::Message) -> String {
         match block {
             messages::ContentBlock::Text { text } if !text.trim().is_empty() => {
                 let _ = writeln!(output, "{}", text.trim());
-            }
-            messages::ContentBlock::Thinking { text, .. } if !text.trim().is_empty() => {
-                let _ = writeln!(output, "thinking: {}", text.trim());
             }
             messages::ContentBlock::ToolUse { name, input, .. } => {
                 let _ = writeln!(output, "tool_call: {name} {input}");
@@ -8838,8 +9204,14 @@ fn handle_command(
                 "  /diff [mode]          choose or set edit diff: unified|compact|full|words|side_by_side"
             );
             println!("  Alt+I                 attach clipboard image to current draft");
+            println!("  Alt+S                 open /sessions picker");
+            println!("  Alt+P                 open /providers picker");
+            println!("  Alt+M                 open /models picker");
+            println!("  Alt+C                 compact current conversation context");
+            println!("  Alt+T                 open /thinking picker");
+            println!("  Alt+D                 open /diff picker");
+            println!("  Alt+G                 show current /goal");
             println!("  /image <path>         attach image to next message");
-            println!("  /image-paste          attach image from clipboard");
             println!("  /paste-image          attach image from clipboard");
             println!("  !<cmd>                run shell command and send output to model");
             println!("  !!<cmd>               run shell command and print output only");
@@ -9244,7 +9616,7 @@ fn handle_command(
             println!("attached image: {}", terminal_text::sanitize(path));
             Ok(CommandAction::Continue)
         }
-        "/image-paste" | "/paste-image" => {
+        "/paste-image" => {
             state.attach_clipboard_image()?;
             println!("attached clipboard image");
             Ok(CommandAction::Continue)

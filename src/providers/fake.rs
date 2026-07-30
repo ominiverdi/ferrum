@@ -34,12 +34,24 @@ impl Provider for FakeProvider {
                     tools.is_empty(),
                 )));
             }
-            if messages.iter().any(|message| {
+            let is_compaction_request = messages.iter().any(|message| {
                 matches!(message.role, Role::System)
                     && message
                         .text_content()
                         .contains("You are a context summarization assistant")
-            }) {
+            });
+            #[cfg(test)]
+            if is_compaction_request
+                && messages.iter().any(|message| {
+                    matches!(message.role, Role::User)
+                        && message
+                            .text_content()
+                            .contains("__ferrum_test_fail_compaction__")
+                })
+            {
+                anyhow::bail!("fake compaction failure");
+            }
+            if is_compaction_request {
                 return Ok(ProviderResponse::message(Message::text(
                     Role::Assistant,
                     "fake compaction summary\n",

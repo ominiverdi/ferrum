@@ -263,7 +263,6 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /palette [name]
 /palettes
 /image <path>
-/image-paste
 /paste-image
 /skills
 /skill <name> [args]
