@@ -116,6 +116,7 @@ max_context_tokens = 6000
 provider = "example-compat"
 actual_model = "example-model"
 max_context_tokens = 100000
+supports_images = false
 
 [[mcp.servers]]
 name = "example"
@@ -215,6 +216,7 @@ max_context_tokens = 6000
 provider = "example-compat"
 actual_model = "example-model"
 max_context_tokens = 100000
+supports_images = false
 ```
 
 Fields:
@@ -222,6 +224,7 @@ Fields:
 - `provider`: optional provider switch when this alias is selected
 - `actual_model`: model id sent to the provider; defaults to the alias name
 - `max_context_tokens`: model-specific operating context budget
+- `supports_images`: set to `false` for a model that cannot accept image input; defaults to `true`
 
 This lets each model or alias use a tuned context budget while preserving friendly names for interactive `/model` selection. The `/models` picker is scoped to the active provider: aliases with an explicit `provider` appear for that provider, while aliases without one appear only when their `actual_model` is returned by the active provider's live model query. The `/providers` picker adds a `providerless` entry when such aliases exist; selecting it opens their complete configured list. `/model <Tab>` starts with configured aliases and the current model; after a successful `/models` call it also completes bounded, command-safe single-token model ids returned by the active provider. The cache is process-local and cleared when the active provider changes.
 

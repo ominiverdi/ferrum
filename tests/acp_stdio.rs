@@ -1,11 +1,29 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Cursor, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
 };
 use tempfile::TempDir;
+
+fn generated_image_base64(format: image::ImageFormat) -> String {
+    let mut image = image::RgbImage::new(4, 3);
+    for (index, pixel) in image.pixels_mut().enumerate() {
+        let index = u8::try_from(index).unwrap();
+        *pixel = image::Rgb([
+            index.wrapping_mul(83).wrapping_add(29),
+            index.wrapping_mul(47).wrapping_add(173),
+            index.wrapping_mul(131).wrapping_add(61),
+        ]);
+    }
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(&mut bytes, format)
+        .unwrap();
+    STANDARD.encode(bytes.into_inner())
+}
 
 struct AcpProcess {
     child: Child,
@@ -1075,30 +1093,230 @@ fn acp_stdio_can_resume_a_print_mode_session() {
 }
 
 #[test]
-fn acp_stdio_accepts_validated_image_prompt() {
+fn acp_stdio_preserves_image_prompts_through_provider_session_and_resume() {
     let cwd = tempfile::tempdir().unwrap();
-    let mut acp = AcpProcess::spawn(cwd.path(), None);
-    acp.initialize();
-    let session_id = acp.new_session(cwd.path());
-    acp.send(json!({
-        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
-        "params": {"sessionId": session_id, "prompt": [
-            {"type": "text", "text": "image"},
-            {
-                "type": "image",
-                "mimeType": "image/png",
-                "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    let storage = tempfile::tempdir().unwrap();
+    let png = generated_image_base64(image::ImageFormat::Png);
+    let jpeg = generated_image_base64(image::ImageFormat::Jpeg);
+    let session_id = {
+        let mut acp = AcpProcess::spawn_in(cwd.path(), Some("inspect_images"), storage.path());
+        acp.initialize();
+        let session_id = acp.new_session(cwd.path());
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+            "params": {"sessionId": session_id, "prompt": [
+                {"type": "text", "text": "Describe this unpredictable image."},
+                {"type": "image", "mimeType": "image/png", "data": png.clone()}
+            ]}
+        }));
+        let mut first_response = String::new();
+        loop {
+            let message = acp.recv();
+            if message["id"] == 3 {
+                assert_eq!(message["result"]["stopReason"], "end_turn");
+                break;
             }
+            if message["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+                first_response.push_str(
+                    message["params"]["update"]["content"]["text"]
+                        .as_str()
+                        .unwrap(),
+                );
+            }
+        }
+        assert!(first_response.contains("provider image blocks=1"));
+        assert!(first_response.contains("mime=image/png"));
+
+        acp.send(json!({
+            "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+            "params": {"sessionId": session_id, "prompt": [
+                {"type": "image", "mimeType": "image/jpeg", "data": jpeg.clone()}
+            ]}
+        }));
+        let mut second_response = String::new();
+        loop {
+            let message = acp.recv();
+            if message["id"] == 4 {
+                assert_eq!(message["result"]["stopReason"], "end_turn");
+                break;
+            }
+            if message["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+                second_response.push_str(
+                    message["params"]["update"]["content"]["text"]
+                        .as_str()
+                        .unwrap(),
+                );
+            }
+        }
+        assert!(second_response.contains("provider image blocks=2"));
+        assert!(second_response.contains("mime=image/jpeg"));
+
+        let stderr = acp.finish();
+        assert!(!stderr.contains(&png));
+        assert!(!stderr.contains(&jpeg));
+        session_id
+    };
+
+    let session_files = std::fs::read_dir(storage.path().join("data/sessions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(session_files.len(), 1);
+    let messages = std::fs::read_to_string(&session_files[0])
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter_map(|entry| entry.get("message").cloned())
+        .filter(|message| message["role"] == "user")
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["content"][0]["type"], "text");
+    assert_eq!(messages[0]["content"][1]["type"], "image");
+    assert_eq!(messages[0]["content"][1]["mime_type"], "image/png");
+    assert_eq!(messages[0]["content"][1]["data_base64"], png);
+    assert_eq!(messages[1]["content"].as_array().unwrap().len(), 1);
+    assert_eq!(messages[1]["content"][0]["type"], "image");
+    assert_eq!(messages[1]["content"][0]["mime_type"], "image/jpeg");
+    assert_eq!(messages[1]["content"][0]["data_base64"], jpeg);
+
+    let mut resumed = AcpProcess::spawn_in(cwd.path(), Some("inspect_images"), storage.path());
+    resumed.initialize();
+    resumed.send(json!({
+        "jsonrpc": "2.0", "id": 5, "method": "session/load",
+        "params": {"sessionId": session_id, "cwd": cwd.path(), "mcpServers": []}
+    }));
+    let mut replayed_mime_types = Vec::new();
+    loop {
+        let message = resumed.recv();
+        if message["id"] == 5 {
+            assert_eq!(message["result"], json!({}));
+            break;
+        }
+        if let Some(mime_type) = message["params"]["update"]["content"]["mimeType"].as_str() {
+            replayed_mime_types.push(mime_type.to_string());
+        }
+    }
+    assert_eq!(replayed_mime_types, ["image/png", "image/jpeg"]);
+    resumed.assert_available_commands_update(&session_id);
+    resumed.send(json!({
+        "jsonrpc": "2.0", "id": 6, "method": "session/prompt",
+        "params": {"sessionId": session_id, "prompt": [
+            {"type": "text", "text": "Confirm retained image context."}
         ]}
     }));
+    let mut resumed_response = String::new();
     loop {
-        let message = acp.recv();
-        if message["id"] == 3 {
+        let message = resumed.recv();
+        if message["id"] == 6 {
             assert_eq!(message["result"]["stopReason"], "end_turn");
             break;
         }
+        if message["params"]["update"]["sessionUpdate"] == "agent_message_chunk" {
+            resumed_response.push_str(
+                message["params"]["update"]["content"]["text"]
+                    .as_str()
+                    .unwrap(),
+            );
+        }
     }
-    acp.finish();
+    assert!(resumed_response.contains("provider image blocks=2"));
+    let stderr = resumed.finish();
+    assert!(!stderr.contains(&png));
+    assert!(!stderr.contains(&jpeg));
+}
+
+#[test]
+fn acp_stdio_rejects_invalid_images_and_text_only_models_explicitly() {
+    let cwd = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let config_dir = storage.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("config.toml"),
+        r#"
+provider = "fake"
+model = "text-only"
+
+[models.text-only]
+provider = "fake"
+supports_images = false
+"#,
+    )
+    .unwrap();
+    let png = generated_image_base64(image::ImageFormat::Png);
+    let malformed = "malformed-base64-image-marker";
+    let mut acp = AcpProcess::spawn_in(cwd.path(), None, storage.path());
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": 1, "clientCapabilities": {}}
+    }));
+    let initialized = acp.recv();
+    assert_eq!(
+        initialized["result"]["agentCapabilities"]["promptCapabilities"]["image"],
+        false
+    );
+    let session_id = acp.new_session(cwd.path());
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": {"sessionId": session_id, "prompt": [
+            {"type": "image", "mimeType": "image/png", "data": malformed}
+        ]}
+    }));
+    let invalid = acp.recv();
+    assert_eq!(invalid["id"], 3);
+    assert_eq!(invalid["error"]["code"], -32602);
+    assert!(invalid.to_string().contains("invalid image prompt content"));
+    assert!(!invalid.to_string().contains(malformed));
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+        "params": {"sessionId": session_id, "prompt": [
+            {"type": "image", "mimeType": "image/gif", "data": png.clone()}
+        ]}
+    }));
+    let unsupported = acp.recv();
+    assert_eq!(unsupported["id"], 4);
+    assert_eq!(unsupported["error"]["code"], -32602);
+    assert!(unsupported.to_string().contains("unsupported image type"));
+    assert!(!unsupported.to_string().contains(&png));
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 5, "method": "session/prompt",
+        "params": {"sessionId": session_id, "prompt": [
+            {"type": "text", "text": "Describe this image."},
+            {"type": "image", "mimeType": "image/png", "data": png.clone()}
+        ]}
+    }));
+    let unsupported_model = loop {
+        let message = acp.recv();
+        if message["id"] == 5 {
+            break message;
+        }
+    };
+    assert_eq!(unsupported_model["error"]["code"], -32602);
+    assert!(
+        unsupported_model
+            .to_string()
+            .contains("does not support image input")
+    );
+    assert!(!unsupported_model.to_string().contains(&png));
+
+    let stderr = acp.finish();
+    assert!(!stderr.contains(malformed));
+    assert!(!stderr.contains(&png));
+    let session_file = std::fs::read_dir(storage.path().join("data/sessions"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let records = std::fs::read_to_string(session_file).unwrap();
+    assert!(!records.lines().any(|line| {
+        serde_json::from_str::<Value>(line)
+            .ok()
+            .is_some_and(|entry| entry.get("message").is_some())
+    }));
 }
 
 #[test]

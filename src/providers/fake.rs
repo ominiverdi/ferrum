@@ -28,11 +28,12 @@ impl Provider for FakeProvider {
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             if let Ok(script) = std::env::var("FERRUM_FAKE_SCRIPT") {
-                return Ok(ProviderResponse::message(scripted_response(
-                    &script,
-                    messages,
-                    tools.is_empty(),
-                )));
+                let response = if script == "inspect_images" {
+                    image_inspection_response(messages)
+                } else {
+                    scripted_response(&script, messages, tools.is_empty())
+                };
+                return Ok(ProviderResponse::message(response));
             }
             let is_compaction_request = messages.iter().any(|message| {
                 matches!(message.role, Role::System)
@@ -165,6 +166,33 @@ impl Provider for FakeProvider {
             Ok(response)
         })
     }
+}
+
+fn image_inspection_response(messages: &[Message]) -> Message {
+    let images = messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::Image {
+                mime_type,
+                sha256,
+                data_base64,
+                ..
+            } => Some(format!(
+                "mime={mime_type},sha256={sha256},encoded_bytes={}",
+                data_base64.len()
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    Message::text(
+        Role::Assistant,
+        format!(
+            "provider image blocks={}: {}\n",
+            images.len(),
+            images.join("; ")
+        ),
+    )
 }
 
 fn scripted_response(script: &str, messages: &[Message], final_response: bool) -> Message {

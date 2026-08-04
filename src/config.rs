@@ -246,6 +246,7 @@ pub struct ModelDefinition {
     pub provider: Option<String>,
     pub actual_model: Option<String>,
     pub max_context_tokens: Option<usize>,
+    pub supports_images: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -740,6 +741,13 @@ impl Config {
             .unwrap_or(self.base_max_context_tokens);
         self.model = model;
         Ok(())
+    }
+
+    pub fn supports_image_input(&self) -> bool {
+        self.models
+            .get(&self.model)
+            .and_then(|definition| definition.supports_images)
+            .unwrap_or(true)
     }
 
     pub fn sessions_dir(&self) -> PathBuf {
@@ -1683,6 +1691,36 @@ max_context_tokens = 400
         assert_eq!(config.max_context_tokens, 400);
         config.set_model("plain").unwrap();
         assert_eq!(config.max_context_tokens, 1000);
+    }
+
+    #[test]
+    fn model_image_support_defaults_true_and_can_be_disabled() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "openai-codex"
+model = "text-only"
+
+[providers.openai-codex]
+type = "openai-codex"
+default_model = "vision"
+
+[models.text-only]
+actual_model = "text-model"
+supports_images = false
+
+[models.vision]
+actual_model = "vision-model"
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!config.supports_image_input());
+        config.set_model("vision").unwrap();
+        assert!(config.supports_image_input());
+        config.set_model("unconfigured-live-model").unwrap();
+        assert!(config.supports_image_input());
     }
 
     #[test]

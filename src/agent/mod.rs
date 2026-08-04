@@ -2989,6 +2989,34 @@ impl AgentSession {
         options: TurnOptions,
         sink: &mut dyn AgentEventSink,
     ) -> Result<TurnOutcome> {
+        self.run_turn_with_events_and_images(prompt, Vec::new(), config, options, sink)
+            .await
+    }
+
+    pub(crate) async fn run_turn_with_events_and_images(
+        &mut self,
+        prompt: String,
+        images: Vec<messages::ContentBlock>,
+        config: &Config,
+        options: TurnOptions,
+        sink: &mut dyn AgentEventSink,
+    ) -> Result<TurnOutcome> {
+        let retained_images = self.messages.iter().any(|message| {
+            message
+                .content
+                .iter()
+                .any(|block| matches!(block, messages::ContentBlock::Image { .. }))
+        });
+        if (!images.is_empty() || !self.pending_images.is_empty() || retained_images)
+            && !config.supports_image_input()
+        {
+            anyhow::bail!(
+                "selected provider/model does not support image input: {}/{}",
+                config.provider_name,
+                config.provider_model
+            );
+        }
+        validate_image_attachment_budget(&self.messages, &self.pending_images, &images)?;
         sink.emit(AgentEvent::TurnStarted {
             cwd: self.cwd.clone(),
         })?;
@@ -2996,7 +3024,12 @@ impl AgentSession {
             sink.emit(AgentEvent::TurnCancelled)?;
             return Ok(TurnOutcome::Cancelled);
         }
-        match self.run_turn_inner(prompt, config, options, sink).await {
+        let mut turn_images = std::mem::take(&mut self.pending_images);
+        turn_images.extend(images);
+        match self
+            .run_turn_inner(prompt, turn_images, config, options, sink)
+            .await
+        {
             Err(error) if error.to_string() == "aborted" => {
                 sink.emit(AgentEvent::TurnCancelled)?;
                 Ok(TurnOutcome::Cancelled)
@@ -3008,12 +3041,11 @@ impl AgentSession {
     async fn run_turn_inner(
         &mut self,
         prompt: String,
+        images: Vec<messages::ContentBlock>,
         config: &Config,
         options: TurnOptions,
         sink: &mut dyn AgentEventSink,
     ) -> Result<TurnOutcome> {
-        validate_image_attachment_budget(&self.messages, &self.pending_images, &[])?;
-        let images = std::mem::take(&mut self.pending_images);
         let user = if images.is_empty() {
             messages::Message::text(messages::Role::User, prompt)
         } else {
@@ -3514,18 +3546,6 @@ impl AgentSession {
             "[image] attached clipboard image ({} pending)",
             self.pending_images.len()
         );
-        Ok(())
-    }
-
-    pub(crate) fn attach_data_images(&mut self, images: Vec<(String, String)>) -> Result<()> {
-        let mut loaded = Vec::with_capacity(images.len());
-        for (mime_type, data) in images {
-            loaded.push(messages::image_from_data_uri(&format!(
-                "data:{mime_type};base64,{data}"
-            ))?);
-        }
-        validate_image_attachment_budget(&self.messages, &self.pending_images, &loaded)?;
-        self.pending_images.extend(loaded);
         Ok(())
     }
 
@@ -6617,6 +6637,45 @@ mod context_pressure_tests {
         assert!(should_auto_compact(projected, config.max_context_tokens));
     }
 
+    #[tokio::test]
+    async fn text_only_model_rejects_images_before_session_persistence() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.models.insert(
+            config.model.clone(),
+            crate::config::ModelDefinition {
+                provider: Some(config.provider_name.clone()),
+                actual_model: Some(config.provider_model.clone()),
+                max_context_tokens: None,
+                supports_images: Some(false),
+            },
+        );
+        let mut state = AgentSession::new(&config).unwrap();
+        let path = state.session.path().clone();
+        let image = messages::ContentBlock::Image {
+            mime_type: "image/png".to_string(),
+            data_base64: "AA==".to_string(),
+            sha256: "test-hash".to_string(),
+            source: "test".to_string(),
+        };
+        let mut sink = RecordingSink::default();
+
+        let error = state
+            .run_turn_with_events_and_images(
+                "describe".to_string(),
+                vec![image],
+                &config,
+                TurnOptions::headless(events::TurnCancellation::new()),
+                &mut sink,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("does not support image input"));
+        assert!(session::jsonl::load_messages(&path).unwrap().is_empty());
+        assert!(sink.events.is_empty());
+    }
+
     #[test]
     fn loaded_compaction_summary_is_context_boundary() {
         let messages = vec![
@@ -7827,6 +7886,7 @@ mod context_pressure_tests {
                 provider: Some("fake".to_string()),
                 actual_model: Some("upstream-model".to_string()),
                 max_context_tokens: Some(8192),
+                supports_images: None,
             },
         );
         config.models.insert(
@@ -7835,6 +7895,7 @@ mod context_pressure_tests {
                 provider: None,
                 actual_model: Some("live-model".to_string()),
                 max_context_tokens: None,
+                supports_images: None,
             },
         );
         config.models.insert(
@@ -7843,6 +7904,7 @@ mod context_pressure_tests {
                 provider: None,
                 actual_model: Some("local-only-model".to_string()),
                 max_context_tokens: None,
+                supports_images: None,
             },
         );
         config.models.insert(
@@ -7851,6 +7913,7 @@ mod context_pressure_tests {
                 provider: Some("openai-codex".to_string()),
                 actual_model: Some("other-model".to_string()),
                 max_context_tokens: None,
+                supports_images: None,
             },
         );
 

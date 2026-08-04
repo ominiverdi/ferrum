@@ -100,7 +100,11 @@ impl Message {
     }
 
     pub fn with_images(role: Role, text: impl Into<String>, images: Vec<ContentBlock>) -> Self {
-        let mut content = vec![ContentBlock::Text { text: text.into() }];
+        let text = text.into();
+        let mut content = Vec::with_capacity(images.len() + usize::from(!text.is_empty()));
+        if !text.is_empty() {
+            content.push(ContentBlock::Text { text });
+        }
         content.extend(images);
         Self {
             role,
@@ -226,14 +230,31 @@ pub fn image_from_data_uri(data_uri: &str) -> Result<ContentBlock> {
             MAX_IMAGE_BASE64_BYTES
         );
     }
+    image_from_base64(
+        mime_type.to_string(),
+        encoded,
+        "pasted data URI".to_string(),
+    )
+}
+
+pub fn image_from_base64(mime_type: String, encoded: &str, source: String) -> Result<ContentBlock> {
+    if !matches!(
+        mime_type.as_str(),
+        "image/png" | "image/jpeg" | "image/webp"
+    ) {
+        anyhow::bail!("unsupported image type: {mime_type}");
+    }
+    if encoded.len() > MAX_IMAGE_BASE64_BYTES {
+        anyhow::bail!(
+            "image is too large: encoded payload is {} bytes > {} bytes",
+            encoded.len(),
+            MAX_IMAGE_BASE64_BYTES
+        );
+    }
     let data = STANDARD
         .decode(encoded)
-        .context("failed to decode image data URI")?;
-    let detected = detect_image_mime(&data)?;
-    if detected != mime_type {
-        anyhow::bail!("image data URI declared {mime_type} but bytes are {detected}");
-    }
-    image_from_bytes(mime_type.to_string(), data, "pasted data URI".to_string())
+        .context("failed to decode base64 image data")?;
+    image_from_bytes(mime_type, data, source)
 }
 
 pub fn image_from_path(path: &Path) -> Result<ContentBlock> {

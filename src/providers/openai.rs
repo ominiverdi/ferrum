@@ -2608,6 +2608,7 @@ fn extract_responses_text(body: &serde_json::Value) -> Result<Option<String>> {
 mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use serde_json::json;
     use std::{
         io::{Read, Write},
         net::TcpListener,
@@ -3190,6 +3191,63 @@ data: {"type":"response.completed","response":{"output":[]}}
         let chat = ChatMessage::from_message(&message);
         assert_eq!(chat.role, "user");
         assert_eq!(chat.content, "hello");
+    }
+
+    #[test]
+    fn provider_requests_preserve_text_images_and_mime_types() {
+        for (index, mime_type) in ["image/png", "image/jpeg", "image/webp"]
+            .into_iter()
+            .enumerate()
+        {
+            let encoded = format!("provider-image-{index}");
+            let image = ContentBlock::Image {
+                mime_type: mime_type.to_string(),
+                data_base64: encoded.clone(),
+                sha256: format!("hash-{index}"),
+                source: "ACP prompt".to_string(),
+            };
+            let message = Message::with_images(Role::User, "Describe this image.", vec![image]);
+
+            let chat = ChatMessage::from_message(&message);
+            assert_eq!(
+                chat.content[0],
+                json!({"type": "text", "text": "Describe this image."})
+            );
+            assert_eq!(chat.content[1]["type"], "image_url");
+            assert_eq!(
+                chat.content[1]["image_url"]["url"],
+                format!("data:{mime_type};base64,{encoded}")
+            );
+
+            let codex = codex_message_content(&message);
+            assert_eq!(
+                codex[0],
+                json!({"type": "input_text", "text": "Describe this image."})
+            );
+            assert_eq!(codex[1]["type"], "input_image");
+            assert_eq!(
+                codex[1]["image_url"],
+                format!("data:{mime_type};base64,{encoded}")
+            );
+        }
+    }
+
+    #[test]
+    fn provider_requests_preserve_image_only_messages() {
+        let image = ContentBlock::Image {
+            mime_type: "image/png".to_string(),
+            data_base64: "image-only-data".to_string(),
+            sha256: "image-only-hash".to_string(),
+            source: "ACP prompt".to_string(),
+        };
+        let message = Message::with_images(Role::User, "", vec![image]);
+
+        let chat = ChatMessage::from_message(&message);
+        assert_eq!(chat.content.as_array().unwrap().len(), 1);
+        assert_eq!(chat.content[0]["type"], "image_url");
+        let codex = codex_message_content(&message);
+        assert_eq!(codex.as_array().unwrap().len(), 1);
+        assert_eq!(codex[0]["type"], "input_image");
     }
 
     #[test]

@@ -6,7 +6,7 @@ use crate::{
             ToolPermissionRequest, TurnCancellation, TurnOptions, TurnOutcome,
         },
         headless_commands,
-        messages::{ContentBlock as FerrumContentBlock, Role as FerrumRole},
+        messages::{self, ContentBlock as FerrumContentBlock, Role as FerrumRole},
         parse_headless_command, restore_session_preferences,
     },
     cli::AcpPermissionPolicy,
@@ -422,7 +422,8 @@ async fn replay_session_history(
                     if data_base64.len() > MAX_REPLAY_IMAGE_BASE64_BYTES
                         || mime_type.len() > MAX_REPLAY_IMAGE_MIME_BYTES
                     {
-                        continue;
+                        return Err(AcpError::internal_error()
+                            .data("persisted image exceeds ACP replay limits"));
                     }
                     let content = ContentBlock::Image(
                         agent_client_protocol_schema::v1::ImageContent::new(data_base64, mime_type),
@@ -560,11 +561,21 @@ impl AgentEventSink for AcpEventSink {
     }
 }
 
-#[derive(Debug)]
 struct PreparedPrompt {
     text: String,
-    images: Vec<(String, String)>,
+    images: Vec<FerrumContentBlock>,
     command: Option<HeadlessCommandInvocation>,
+}
+
+impl std::fmt::Debug for PreparedPrompt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedPrompt")
+            .field("text", &self.text)
+            .field("image_count", &self.images.len())
+            .field("command", &self.command)
+            .finish()
+    }
 }
 
 enum BoundedLine {
@@ -763,7 +774,7 @@ async fn handle_line(
                 .close(SessionCloseCapabilities::new());
             let capabilities = AgentCapabilities::new()
                 .load_session(true)
-                .prompt_capabilities(PromptCapabilities::new().image(true))
+                .prompt_capabilities(PromptCapabilities::new().image(config.supports_image_input()))
                 .mcp_capabilities(McpCapabilities::new().http(false).sse(false))
                 .session_capabilities(session_capabilities);
             let response = InitializeResponse::new(version)
@@ -1394,10 +1405,11 @@ async fn run_prompt(
             HeadlessCommandOutcome::Cancelled => Ok(TurnOutcome::Cancelled),
         };
     }
-    if !prompt.images.is_empty() {
-        agent
-            .attach_data_images(prompt.images)
-            .map_err(|_| AcpError::invalid_params().data("invalid image prompt content"))?;
+    if !prompt.images.is_empty() && !entry.config.supports_image_input() {
+        return Err(AcpError::invalid_params().data(format!(
+            "selected provider/model does not support image input: {}/{}",
+            entry.config.provider_name, entry.config.provider_model
+        )));
     }
     let mut sink = AcpEventSink::new(
         session_id.to_string(),
@@ -1413,7 +1425,13 @@ async fn run_prompt(
         }));
     }
     agent
-        .run_turn_with_events(prompt.text, &entry.config, options, &mut sink)
+        .run_turn_with_events_and_images(
+            prompt.text,
+            prompt.images,
+            &entry.config,
+            options,
+            &mut sink,
+        )
         .await
         .map_err(|_| AcpError::internal_error())
 }
@@ -1592,7 +1610,15 @@ fn prepare_prompt(blocks: Vec<ContentBlock>) -> std::result::Result<PreparedProm
     for block in blocks {
         match block {
             ContentBlock::Text(content) => append_prompt_text(&mut text, &content.text)?,
-            ContentBlock::Image(image) => images.push((image.mime_type, image.data)),
+            ContentBlock::Image(image) => images.push(
+                messages::image_from_base64(image.mime_type, &image.data, "ACP prompt".to_string())
+                    .map_err(|error| {
+                        AcpError::invalid_params().data(format!(
+                            "invalid image prompt content: {}",
+                            terminal_text::sanitize(&error.to_string())
+                        ))
+                    })?,
+            ),
             ContentBlock::ResourceLink(resource) => {
                 resource_count += 1;
                 if resource_count > MAX_RESOURCE_LINKS
@@ -1621,12 +1647,13 @@ fn prepare_prompt(blocks: Vec<ContentBlock>) -> std::result::Result<PreparedProm
     if text.is_empty() && images.is_empty() {
         return Err(AcpError::invalid_params().data("prompt has no usable content"));
     }
-    if text.is_empty() {
-        text.push_str("User attached image content.");
-    }
-    let command = parse_headless_command(&text).map_err(|error| {
-        AcpError::invalid_params().data(terminal_text::sanitize(&error.to_string()))
-    })?;
+    let command = if text.is_empty() {
+        None
+    } else {
+        parse_headless_command(&text).map_err(|error| {
+            AcpError::invalid_params().data(terminal_text::sanitize(&error.to_string()))
+        })?
+    };
     Ok(PreparedPrompt {
         text,
         images,
@@ -2167,7 +2194,26 @@ fn sanitize_json(value: Value, depth: usize) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
     use serde_json::json;
+    use std::io::Cursor;
+
+    fn encoded_test_image(format: image::ImageFormat) -> String {
+        let mut image = image::RgbImage::new(3, 2);
+        for (index, pixel) in image.pixels_mut().enumerate() {
+            let index = u8::try_from(index).unwrap();
+            *pixel = image::Rgb([
+                index.wrapping_mul(71).wrapping_add(19),
+                index.wrapping_mul(43).wrapping_add(137),
+                index.wrapping_mul(109).wrapping_add(53),
+            ]);
+        }
+        let mut bytes = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut bytes, format)
+            .unwrap();
+        STANDARD.encode(bytes.into_inner())
+    }
 
     #[tokio::test]
     async fn bounded_reader_recovers_after_oversized_line() {
@@ -2224,7 +2270,7 @@ mod tests {
                 "file:///tmp/README.md",
             )),
             ContentBlock::Image(agent_client_protocol_schema::v1::ImageContent::new(
-                "AA==",
+                encoded_test_image(image::ImageFormat::Png),
                 "image/png",
             )),
         ])
@@ -2232,6 +2278,63 @@ mod tests {
         assert!(prompt.text.contains("hello"));
         assert!(prompt.text.contains("Untrusted resource link"));
         assert_eq!(prompt.images.len(), 1);
+        assert!(matches!(
+            &prompt.images[0],
+            FerrumContentBlock::Image { mime_type, source, .. }
+                if mime_type == "image/png" && source == "ACP prompt"
+        ));
+    }
+
+    #[test]
+    fn image_only_prompt_preserves_supported_mime_types() {
+        for (format, mime_type) in [
+            (image::ImageFormat::Png, "image/png"),
+            (image::ImageFormat::Jpeg, "image/jpeg"),
+            (image::ImageFormat::WebP, "image/webp"),
+        ] {
+            let encoded = encoded_test_image(format);
+            let prompt = prepare_prompt(vec![ContentBlock::Image(
+                agent_client_protocol_schema::v1::ImageContent::new(&encoded, mime_type),
+            )])
+            .unwrap();
+
+            assert!(prompt.text.is_empty());
+            assert_eq!(prompt.images.len(), 1);
+            let debug = format!("{prompt:?}");
+            assert!(debug.contains("image_count: 1"));
+            assert!(!debug.contains(&encoded));
+            assert!(matches!(
+                &prompt.images[0],
+                FerrumContentBlock::Image {
+                    mime_type: preserved,
+                    data_base64,
+                    ..
+                } if preserved == mime_type && data_base64 == &encoded
+            ));
+        }
+    }
+
+    #[test]
+    fn prompt_rejects_malformed_or_unsupported_images_without_echoing_data() {
+        let malformed = "not-base64-image-data";
+        let error = prepare_prompt(vec![ContentBlock::Image(
+            agent_client_protocol_schema::v1::ImageContent::new(malformed, "image/png"),
+        )])
+        .unwrap_err();
+        assert_eq!(i32::from(error.code), -32602);
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert!(serialized.contains("invalid image prompt content"));
+        assert!(!serialized.contains(malformed));
+
+        let encoded = encoded_test_image(image::ImageFormat::Png);
+        let error = prepare_prompt(vec![ContentBlock::Image(
+            agent_client_protocol_schema::v1::ImageContent::new(&encoded, "image/gif"),
+        )])
+        .unwrap_err();
+        assert_eq!(i32::from(error.code), -32602);
+        let serialized = serde_json::to_string(&error).unwrap();
+        assert!(serialized.contains("unsupported image type"));
+        assert!(!serialized.contains(&encoded));
     }
 
     #[test]

@@ -30,7 +30,7 @@ Supported:
   - `available_commands_update`
   - `usage_update`
 
-Prompt responses use the official `stopReason` values. Text, resource-link, and validated image prompt blocks are accepted. Audio and embedded-resource prompt blocks are not advertised or accepted.
+Prompt responses use the official `stopReason` values. Text, resource-link, and validated PNG, JPEG, and WebP image prompt blocks are accepted. Images are decoded and validated in memory, preserved in Ferrum session history, and forwarded as native provider image content. Malformed images and models configured with `supports_images = false` return `invalid params`; Ferrum does not silently discard image blocks. Audio and embedded-resource prompt blocks are not advertised or accepted.
 
 Session IDs are Ferrum's durable JSONL session IDs. Listing is newest-first, supports absolute `cwd` filtering and opaque cursor pagination, and returns bounded pages. Loading replays persisted user, agent, thought, and tool updates before returning; resuming activates the same history without replay. The request `cwd` must match the persisted canonical directory. Session provider, model, thinking, safety, and tool metadata follows the normal Ferrum restoration rules; explicit ACP-process CLI overrides remain authoritative unless a restrictive project policy narrows them. Active sessions must be idle before close and must be closed before deletion.
 
