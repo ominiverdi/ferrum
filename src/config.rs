@@ -1,4 +1,4 @@
-use crate::ui_colors::ColorPalette;
+use crate::{atomic_file, ui_colors::ColorPalette};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -7,6 +7,10 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
 };
+use toml_edit::{DocumentMut, InlineTable, Item, Table, Value, value};
+
+pub const OPENAI_CODEX_PROVIDER_NAME: &str = "openai-codex";
+pub(crate) const MAX_LOGIN_MODEL_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -361,7 +365,7 @@ impl Config {
     }
 
     #[cfg(test)]
-    fn load_from_dir(config_dir: PathBuf) -> Result<Self> {
+    pub(crate) fn load_from_dir(config_dir: PathBuf) -> Result<Self> {
         Self::load_from_dirs(config_dir.clone(), config_dir)
     }
 
@@ -750,6 +754,117 @@ impl Config {
             .unwrap_or(true)
     }
 
+    pub fn should_configure_provider_after_login(&self) -> bool {
+        self.provider_is_implicit_fake
+    }
+
+    pub fn openai_codex_provider_for_login(&self) -> Result<ProviderConfig> {
+        if let Some(definition) = self.providers.get(OPENAI_CODEX_PROVIDER_NAME)
+            && definition.kind != "openai-codex"
+        {
+            anyhow::bail!(
+                "providers.{OPENAI_CODEX_PROVIDER_NAME} has type `{}` instead of `openai-codex`",
+                definition.kind
+            );
+        }
+        let provider = resolve_provider(
+            OPENAI_CODEX_PROVIDER_NAME,
+            &self.providers,
+            &self.config_dir,
+        )?;
+        if !matches!(provider, ProviderConfig::OpenAiCodex { .. }) {
+            anyhow::bail!("{OPENAI_CODEX_PROVIDER_NAME} is not an OpenAI Codex provider");
+        }
+        Ok(provider)
+    }
+
+    pub fn configure_openai_codex_after_login(&mut self, model: &str) -> Result<PathBuf> {
+        validate_login_model(model)?;
+        if !self.should_configure_provider_after_login() {
+            anyhow::bail!(
+                "provider setup was not changed because `{}` is already selected",
+                self.provider_name
+            );
+        }
+
+        let path = self.config_dir.join("config.toml");
+        let (text, expected) = match atomic_file::target_identity(&path)? {
+            Some(_) => {
+                let (text, identity) = atomic_file::read_text_with_identity(&path)?;
+                (text, Some(identity))
+            }
+            None => (String::new(), None),
+        };
+        let fresh = Self::load_from_dirs(self.config_dir.clone(), self.data_dir.clone())?;
+        if !fresh.should_configure_provider_after_login() {
+            anyhow::bail!(
+                "provider setup was not changed because `{}` is now selected",
+                fresh.provider_name
+            );
+        }
+        let mut candidate = self.clone();
+        candidate.providers = fresh.providers;
+        candidate.models = fresh.models;
+        {
+            let definition = candidate
+                .providers
+                .entry(OPENAI_CODEX_PROVIDER_NAME.to_string())
+                .or_insert_with(default_openai_codex_definition);
+            if definition.kind != "openai-codex" {
+                anyhow::bail!(
+                    "providers.{OPENAI_CODEX_PROVIDER_NAME} has type `{}` instead of `openai-codex`",
+                    definition.kind
+                );
+            }
+            if definition.default_model.is_none() {
+                definition.default_model = Some(model.to_string());
+            }
+        }
+        let model_max_context_tokens = match candidate.models.get(model) {
+            Some(definition)
+                if definition
+                    .provider
+                    .as_deref()
+                    .is_some_and(|provider| provider != OPENAI_CODEX_PROVIDER_NAME)
+                    || definition
+                        .actual_model
+                        .as_deref()
+                        .is_some_and(|actual| actual != model) =>
+            {
+                anyhow::bail!(
+                    "model `{model}` conflicts with an existing model alias; choose another Codex model"
+                );
+            }
+            Some(definition) => definition.max_context_tokens,
+            None => None,
+        };
+        candidate.provider = resolve_provider(
+            OPENAI_CODEX_PROVIDER_NAME,
+            &candidate.providers,
+            &candidate.config_dir,
+        )?;
+        candidate.provider_name = OPENAI_CODEX_PROVIDER_NAME.to_string();
+        candidate.provider_model = model.to_string();
+        candidate.model = model.to_string();
+        candidate.max_context_tokens =
+            model_max_context_tokens.unwrap_or(candidate.base_max_context_tokens);
+        candidate.provider_is_implicit_fake = false;
+
+        let rendered = configure_openai_codex_document(&text, model)
+            .with_context(|| format!("failed to update {}", path.display()))?;
+        toml::from_str::<FileConfig>(&rendered).with_context(|| {
+            format!(
+                "automatic provider setup produced invalid {}",
+                path.display()
+            )
+        })?;
+        atomic_file::replace(&path, rendered.as_bytes(), expected)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+
+        *self = candidate;
+        Ok(path)
+    }
+
     pub fn sessions_dir(&self) -> PathBuf {
         self.data_dir.join("sessions")
     }
@@ -924,6 +1039,92 @@ fn validate_tool_name_list(values: Vec<String>) -> Result<Vec<String>> {
 
 fn default_true() -> bool {
     true
+}
+
+pub(crate) fn validate_login_model(model: &str) -> Result<()> {
+    if model.is_empty()
+        || model.len() > MAX_LOGIN_MODEL_BYTES
+        || model
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        anyhow::bail!("invalid model selected during provider setup");
+    }
+    Ok(())
+}
+
+fn default_openai_codex_definition() -> ProviderDefinition {
+    ProviderDefinition {
+        kind: "openai-codex".to_string(),
+        base_url: None,
+        api_key_env: None,
+        default_model: None,
+        streaming: None,
+        stream_usage: None,
+        allow_insecure_http: false,
+    }
+}
+
+fn configure_openai_codex_document(text: &str, model: &str) -> Result<String> {
+    let mut document = if text.trim().is_empty() {
+        DocumentMut::new()
+    } else {
+        text.parse::<DocumentMut>()
+            .context("failed to parse config as editable TOML")?
+    };
+    let root = document.as_table_mut();
+    set_toml_string(root, "provider", OPENAI_CODEX_PROVIDER_NAME);
+    set_toml_string(root, "model", model);
+
+    let providers = root
+        .entry("providers")
+        .or_insert_with(|| Item::Table(Table::new()));
+    let provider = table_like_child(
+        providers,
+        OPENAI_CODEX_PROVIDER_NAME,
+        "providers.openai-codex",
+    )?;
+    let provider = provider
+        .as_table_like_mut()
+        .context("providers.openai-codex must be a table")?;
+    if let Some(kind) = provider.get("type") {
+        let kind = kind
+            .as_str()
+            .context("providers.openai-codex.type must be a string")?;
+        if kind != "openai-codex" {
+            anyhow::bail!("providers.openai-codex has type `{kind}` instead of `openai-codex`");
+        }
+    } else {
+        set_toml_string(provider, "type", "openai-codex");
+    }
+    if !provider.contains_key("default_model") {
+        set_toml_string(provider, "default_model", model);
+    }
+    Ok(document.to_string())
+}
+
+fn table_like_child<'a>(parent: &'a mut Item, key: &str, path: &str) -> Result<&'a mut Item> {
+    match parent {
+        Item::Table(table) => Ok(table
+            .entry(key)
+            .or_insert_with(|| Item::Table(Table::new()))),
+        Item::Value(Value::InlineTable(table)) => Ok(toml_edit::TableLike::entry(table, key)
+            .or_insert_with(|| Item::Value(Value::InlineTable(InlineTable::new())))),
+        _ => anyhow::bail!("{path} parent must be a table"),
+    }
+}
+
+fn set_toml_string(table: &mut dyn toml_edit::TableLike, key: &str, value_text: &str) {
+    let replacement = value(value_text);
+    if let Some(existing) = table.get_mut(key) {
+        let decor = existing.as_value().map(|value| value.decor().clone());
+        *existing = replacement;
+        if let (Some(decor), Some(value)) = (decor, existing.as_value_mut()) {
+            *value.decor_mut() = decor;
+        }
+    } else {
+        table.insert(key, replacement);
+    }
 }
 
 fn resolve_provider(
@@ -1266,6 +1467,130 @@ deny = ["chrome"]
         .unwrap();
         let explicit = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
         assert!(!explicit.provider_is_implicit_fake);
+    }
+
+    #[test]
+    fn login_setup_configures_implicit_provider_and_preserves_comments() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "# keep this comment\nthinking = \"high\" # and this one\n",
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(config.should_configure_provider_after_login());
+
+        let written = config
+            .configure_openai_codex_after_login("gpt-selected")
+            .unwrap();
+        assert_eq!(written, path);
+        assert_eq!(config.provider_name, "openai-codex");
+        assert_eq!(config.model, "gpt-selected");
+        assert_eq!(config.provider_model, "gpt-selected");
+        assert!(!config.provider_is_implicit_fake);
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# keep this comment"));
+        assert!(text.contains("# and this one"));
+        assert!(text.contains("[providers.openai-codex]"));
+        let reloaded = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reloaded.provider_name, "openai-codex");
+        assert_eq!(reloaded.model, "gpt-selected");
+    }
+
+    #[test]
+    fn login_setup_preserves_existing_codex_provider_customization() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"# custom endpoint
+[providers.openai-codex]
+type = "openai-codex"
+base_url = "https://example.test/backend-api"
+default_model = "old-default"
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+
+        config
+            .configure_openai_codex_after_login("new-selection")
+            .unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# custom endpoint"));
+        assert!(text.contains("https://example.test/backend-api"));
+        assert!(text.contains("default_model = \"old-default\""));
+        let reloaded = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert_eq!(reloaded.provider_name, "openai-codex");
+        assert_eq!(reloaded.model, "new-selection");
+        assert!(matches!(
+            reloaded.provider,
+            ProviderConfig::OpenAiCodex { ref base_url, .. }
+                if base_url == "https://example.test/backend-api"
+        ));
+    }
+
+    #[test]
+    fn login_setup_does_not_override_explicit_or_conflicting_provider_config() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "provider = \"fake\"\n").unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        let mut explicit = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let error = explicit
+            .configure_openai_codex_after_login("gpt-selected")
+            .unwrap_err();
+        assert!(error.to_string().contains("already selected"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+        fs::write(
+            &path,
+            "[providers.openai-codex]\ntype = \"openai-compatible\"\nbase_url = \"https://example.test/v1\"\n",
+        )
+        .unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        let mut conflicting = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let error = conflicting
+            .configure_openai_codex_after_login("gpt-selected")
+            .unwrap_err();
+        assert!(error.to_string().contains("instead of `openai-codex`"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+        fs::write(
+            &path,
+            "[models.gpt-selected]\nprovider = \"another-provider\"\n",
+        )
+        .unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        let mut conflicting = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let error = conflicting
+            .configure_openai_codex_after_login("gpt-selected")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with an existing model alias")
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn login_setup_updates_inline_provider_tables() {
+        let rendered = configure_openai_codex_document(
+            "providers = { openai-codex = { type = \"openai-codex\" } }\n",
+            "gpt-selected",
+        )
+        .unwrap();
+        let parsed = toml::from_str::<FileConfig>(&rendered).unwrap();
+        assert_eq!(parsed.provider.as_deref(), Some("openai-codex"));
+        assert_eq!(parsed.model.as_deref(), Some("gpt-selected"));
+        assert_eq!(
+            parsed.providers["openai-codex"].default_model.as_deref(),
+            Some("gpt-selected")
+        );
     }
 
     #[test]

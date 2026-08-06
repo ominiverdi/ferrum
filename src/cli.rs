@@ -87,6 +87,14 @@ pub enum Command {
         /// OAuth provider to authenticate
         #[arg(value_parser = ["openai", "openai-codex"])]
         provider: String,
+
+        /// Authenticate without selecting or configuring the provider
+        #[arg(long)]
+        auth_only: bool,
+
+        /// Model to select during automatic provider setup
+        #[arg(long, value_name = "MODEL", conflicts_with = "auth_only")]
+        model: Option<String>,
     },
 }
 
@@ -218,7 +226,11 @@ mod tests {
             let args = Args::try_parse_from(["ferrum", "login", provider]).unwrap();
             assert!(matches!(
                 args.command,
-                Some(Command::Login { provider: parsed }) if parsed == provider
+                Some(Command::Login {
+                    provider: parsed,
+                    auth_only: false,
+                    model: None,
+                }) if parsed == provider
             ));
         }
 
@@ -227,6 +239,28 @@ mod tests {
         assert!(rendered.contains("possible values"));
         assert!(rendered.contains("openai"));
         assert!(rendered.contains("openai-codex"));
+
+        let configured =
+            Args::try_parse_from(["ferrum", "login", "openai", "--model", "gpt-test"]).unwrap();
+        assert!(matches!(
+            configured.command,
+            Some(Command::Login {
+                auth_only: false,
+                model: Some(model),
+                ..
+            }) if model == "gpt-test"
+        ));
+        assert!(
+            Args::try_parse_from([
+                "ferrum",
+                "login",
+                "openai",
+                "--auth-only",
+                "--model",
+                "gpt-test",
+            ])
+            .is_err()
+        );
 
         let missing = Args::try_parse_from(["ferrum", "login"])
             .unwrap_err()

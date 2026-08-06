@@ -5,7 +5,7 @@ pub mod tools;
 use crate::{
     atomic_file, auth, cancel,
     config::{ColorMode, Config, DiffMode, SafetyLevel, ThinkingLevel, ToolSelection},
-    context, mcp,
+    context, login_setup, mcp,
     picker::{self, PickerItem},
     providers, session, skills, terminal_text, tools as builtin_tools, ui_colors, usage,
 };
@@ -1145,16 +1145,50 @@ pub async fn run_interactive(
                             abort.stop();
                             match result {
                                 Err(_) => println!("aborted"),
-                                Ok(Ok(())) => println!(
-                                    "Use /provider openai-codex for this session, and set provider = \"openai-codex\" in {} to make it the default.",
-                                    terminal_text::sanitize(
-                                        &config
-                                            .config_dir
-                                            .join("config.toml")
-                                            .display()
-                                            .to_string()
-                                    )
-                                ),
+                                Ok(Ok(())) => {
+                                    match login_setup::setup_after_login(config, false, None).await
+                                    {
+                                        Ok(login_setup::LoginSetupOutcome::Configured {
+                                            config: candidate,
+                                            model,
+                                            path,
+                                        }) => {
+                                            if let Err(error) = state
+                                                .commit_provider_model_transition(
+                                                    config, *candidate,
+                                                )
+                                            {
+                                                render_error(&error.context(format!(
+                                                    "provider was configured in {}, but the current session was not switched",
+                                                    path.display()
+                                                )));
+                                                continue;
+                                            }
+                                            if let Some(helper) = rl.helper_mut() {
+                                                helper.clear_cached_provider_model_names(config);
+                                            }
+                                            println!(
+                                                "Configured and selected openai-codex/{}; saved to {}.",
+                                                terminal_text::sanitize(&model),
+                                                terminal_text::sanitize(
+                                                    &path.display().to_string()
+                                                )
+                                            );
+                                        }
+                                        Ok(login_setup::LoginSetupOutcome::ProviderUnchanged {
+                                            provider,
+                                            model,
+                                        }) => println!(
+                                            "Authentication saved; current provider/model remains {}/{}. Use /provider openai-codex and /model <MODEL> to switch this session.",
+                                            terminal_text::sanitize(&provider),
+                                            terminal_text::sanitize(&model)
+                                        ),
+                                        Ok(login_setup::LoginSetupOutcome::AuthenticationOnly) => {
+                                            println!("Authentication saved.")
+                                        }
+                                        Err(error) => render_error(&error),
+                                    }
+                                }
                                 Ok(Err(error)) => render_error(&error),
                             }
                         }

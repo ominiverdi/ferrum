@@ -25,7 +25,14 @@ Login:
 ferrum login openai
 ```
 
-Run `ferrum login --help` to list supported login provider names. `openai-codex` is accepted as an alias. In an interactive session, `/login openai` runs the same OAuth flow; after it succeeds, `/provider openai-codex` selects the authenticated provider for that session.
+Run `ferrum login --help` to list supported login provider names. `openai-codex` is accepted as an alias. If Ferrum is still using its implicit fake provider, successful login fetches the account's available Codex models, asks for a default, and atomically updates `config.toml` while preserving existing comments and unrelated settings. Interactive `/login openai` also switches the current session immediately. Existing explicit provider selections are left unchanged.
+
+For login without a terminal, select an available model explicitly. To store authentication without changing configuration, use `--auth-only`:
+
+```bash
+ferrum login openai --model gpt-5.5
+ferrum login openai --auth-only
+```
 
 Config:
 

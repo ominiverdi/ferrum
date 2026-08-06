@@ -6,6 +6,7 @@ mod cancel;
 mod cli;
 mod config;
 mod context;
+mod login_setup;
 mod mcp;
 mod persistence;
 mod picker;
@@ -83,13 +84,37 @@ async fn run() -> Result<()> {
                 .await?;
                 return Ok(());
             }
-            cli::Command::Login { provider }
-                if provider == "openai" || provider == "openai-codex" =>
-            {
+            cli::Command::Login {
+                provider,
+                auth_only,
+                model,
+            } if provider == "openai" || provider == "openai-codex" => {
+                if let Some(model) = model.as_deref() {
+                    config::validate_login_model(model)?;
+                }
                 auth::openai_codex::login(&config).await?;
+                match login_setup::setup_after_login(&config, *auth_only, model.as_deref()).await? {
+                    login_setup::LoginSetupOutcome::AuthenticationOnly => {
+                        println!("Authentication saved; provider configuration was not changed.");
+                    }
+                    login_setup::LoginSetupOutcome::ProviderUnchanged { provider, model } => {
+                        println!(
+                            "Authentication saved; current provider/model remains {}/{}. Use `ferrum --provider openai-codex --model <MODEL>` to select Codex for one run.",
+                            terminal_text::sanitize(&provider),
+                            terminal_text::sanitize(&model)
+                        );
+                    }
+                    login_setup::LoginSetupOutcome::Configured { model, path, .. } => {
+                        println!(
+                            "Configured provider openai-codex with model {} in {}.",
+                            terminal_text::sanitize(&model),
+                            terminal_text::sanitize(&path.display().to_string())
+                        );
+                    }
+                }
                 return Ok(());
             }
-            cli::Command::Login { provider } => {
+            cli::Command::Login { provider, .. } => {
                 anyhow::bail!("unsupported login provider: {provider}")
             }
         }
