@@ -19,7 +19,7 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 - MCP stdio tool bridge.
 - Image input via CLI, `/image`, and `/paste-image`.
 - Terminal image previews when supported.
-- Release and CI workflows.
+- Local release and validation workflows.
 
 ### v0.4: Providers, live models, skills
 - Config-backed provider registry with `[providers.<name>]`.

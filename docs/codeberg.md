@@ -93,7 +93,9 @@ plain_version=${version#v}
 target=x86_64-unknown-linux-gnu
 package="ferrum-${version}-${target}"
 
-tea releases create "$version" \
+tea releases create \
+  --tag "$version" \
+  --target main \
   --title "Ferrum $version" \
   --note-file "/tmp/ferrum-${version}-notes.md" \
   --asset "dist/${package}.tar.gz" \
@@ -133,11 +135,31 @@ tea releases assets ls "$version" --repo ominiverdi/ferrum
 
 ## Mirrors
 
-Normal source pushes go to both remotes:
+GitHub is a passive source and binary-release mirror. GitHub Actions are disabled; validation and publishing are performed locally.
+
+Normal source pushes go to Codeberg first and then GitHub:
 
 ```bash
 git push origin main
 git push github main
 ```
 
-Tagged releases go to both remotes too, but Codeberg remains the primary release host.
+For tagged releases, complete and verify the Codeberg release before pushing the GitHub mirror. Then create the backup GitHub release from the same locally built six-file asset set:
+
+```bash
+version=vX.Y.Z
+git push github main "$version"
+
+gh release create "$version" \
+  --repo ominiverdi/ferrum \
+  --title "Ferrum $version" \
+  --notes-file "/tmp/ferrum-${version}-notes.md" \
+  "dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+  "dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256" \
+  "dist/ferrum_${version#v}_amd64.deb" \
+  "dist/ferrum_${version#v}_amd64.deb.sha256" \
+  "dist/ferrum-${version#v}-1.x86_64.rpm" \
+  "dist/ferrum-${version#v}-1.x86_64.rpm.sha256"
+```
+
+Use `gh release upload` if the GitHub release already exists and only assets are missing.

@@ -9,10 +9,13 @@ cargo fmt --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked
 cargo build --locked --release
+cargo audit --deny warnings
 bash bench/test.sh
 bash scripts/test-package-linux.sh
 bash scripts/check-release-docs.sh
 ```
+
+If `cargo audit` is unavailable, install the pinned release tool with `cargo install cargo-audit --locked --version 0.22.2`.
 
 Check for accidental files:
 
@@ -39,7 +42,7 @@ scripts/sync-release-version.sh v0.7.5
 scripts/check-release-docs.sh
 ```
 
-The tag, `Cargo.toml`, generated binary, and `release-version.txt` must match exactly. The release workflow rejects non-stable-semver tags and mismatches before building assets.
+The tag, `Cargo.toml`, generated binary, and `release-version.txt` must match exactly. The local packaging script rejects non-stable-semver tags and mismatches before building assets.
 
 ## Prepare release tag
 
@@ -113,18 +116,29 @@ dpkg-deb --info ferrum_0.7.5_amd64.deb
 dpkg-deb --contents ferrum_0.7.5_amd64.deb | head
 ```
 
-The GitHub release workflow repeats the locked validation, performs the two-build reproducibility check, installs the Debian and RPM packages in pinned clean Debian 12 and Fedora 43 images, records GitHub artifact attestations, and publishes the same six-file asset contract as Codeberg.
+Before publishing, install the packages in the same pinned clean images used for compatibility validation:
 
-## Publish tag
+```bash
+podman run --rm \
+  -v "$PWD/dist:/dist:ro" \
+  docker.io/library/debian@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df \
+  sh -euxc 'apt-get update; apt-get install -y /dist/*.deb; ferrum --version'
 
-Only after local validation succeeds, push Codeberg first and then the GitHub mirror:
+podman run --rm \
+  -v "$PWD/dist:/dist:ro" \
+  registry.fedoraproject.org/fedora@sha256:6c11e30de5df4d8bea61f9c522bb4ae7c350f7b2ba9a2978da838fefd2041f02 \
+  sh -euxc 'dnf install -y /dist/*.rpm; ferrum --version'
+```
+
+Use `docker` instead of `podman` when Docker is the selected container runtime.
+
+## Publish Codeberg tag
+
+Only after local validation, reproducible packaging, checksum verification, and clean-image installation succeed, push Codeberg first:
 
 ```bash
 git push origin main "$version"
-git push github main "$version"
 ```
-
-Pushing the `v*` tag to GitHub triggers `.github/workflows/release.yml`.
 
 ## Codeberg release
 
@@ -132,10 +146,13 @@ Create the Codeberg release with `tea` after pushing the tag:
 
 ```bash
 version=v0.7.5
-tea releases create "$version" \
+tea releases create \
+  --tag "$version" \
+  --target main \
   --title "Ferrum $version" \
   --note-file "/tmp/ferrum-${version}-notes.md" \
-  --repo ominiverdi/ferrum
+  --repo ominiverdi/ferrum \
+  --login codeberg.org
 ```
 
 Upload release assets:
@@ -149,7 +166,8 @@ tea releases assets create "$version" \
   dist/ferrum_${version#v}_amd64.deb.sha256 \
   dist/ferrum-${version#v}-1.x86_64.rpm \
   dist/ferrum-${version#v}-1.x86_64.rpm.sha256 \
-  --repo ominiverdi/ferrum
+  --repo ominiverdi/ferrum \
+  --login codeberg.org
 ```
 
 If the release already exists, upload only missing assets.
@@ -179,12 +197,32 @@ tar -tzf "${package}.tar.gz" | head
 dpkg-deb --info "ferrum_${plain_version}_amd64.deb" | head
 ```
 
-## Verify GitHub mirror release
+## GitHub mirror release
 
-After the GitHub workflow completes:
+After the Codeberg release and downloaded assets are verified, push the same commit and tag to the passive GitHub mirror, then create its release locally with `gh` and the same six assets:
+
+```bash
+git push github main "$version"
+
+gh release create "$version" \
+  --repo ominiverdi/ferrum \
+  --title "Ferrum $version" \
+  --notes-file "/tmp/ferrum-${version}-notes.md" \
+  "dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz" \
+  "dist/ferrum-${version}-x86_64-unknown-linux-gnu.tar.gz.sha256" \
+  "dist/ferrum_${version#v}_amd64.deb" \
+  "dist/ferrum_${version#v}_amd64.deb.sha256" \
+  "dist/ferrum-${version#v}-1.x86_64.rpm" \
+  "dist/ferrum-${version#v}-1.x86_64.rpm.sha256"
+```
+
+If the release already exists, upload only missing assets with `gh release upload`.
+
+Verify the GitHub release by downloading it again:
 
 ```bash
 gh release view "$version" --repo ominiverdi/ferrum --json tagName,isDraft,assets,url
+rm -rf /tmp/ferrum-github-release-check
 mkdir -p /tmp/ferrum-github-release-check
 cd /tmp/ferrum-github-release-check
 gh release download "$version" --repo ominiverdi/ferrum --pattern '*.tar.gz' --pattern '*.deb' --pattern '*.rpm' --pattern '*.sha256'
@@ -242,11 +280,11 @@ curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.5/ferrum-
 sha256sum -c ferrum-v0.7.5-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
-## CI
+## Hosted automation
 
-GitHub Actions provides pinned mirror CI through `.github/workflows/ci.yml`. Release actions are pinned by commit, the Rust toolchain is 1.90.0, dependency auditing is required, and the release builder/test images use immutable digests. Codeberg Forgejo Actions is intentionally not configured because hosted runner availability is too inconsistent for the project workflow. Local locked validation remains required before every push and release.
+Ferrum does not use Codeberg Forgejo Actions or GitHub Actions. GitHub is a passive mirror, and GitHub Actions are disabled to avoid unreliable hosted runs and notifications. Local locked validation, dependency auditing, reproducible packaging, and clean-image installation are required before publishing.
 
-Codeberg remains the primary release host; create releases locally with `tea`. GitHub publishes an attested backup release containing the same six assets.
+Codeberg remains the primary release host. Create both releases locally, publishing and verifying Codeberg first, then upload the same six assets to GitHub as a backup binary release.
 
 ## License
 

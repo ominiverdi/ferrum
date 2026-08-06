@@ -73,16 +73,10 @@ grep -Fq 'mv -T -- "$stage" "$root/dist"' "$root/scripts/package-linux.sh"
 grep -Eq '^FROM .+@sha256:[0-9a-f]{64}$' "$root/packaging/linux/Dockerfile"
 grep -Fq 'snapshot.debian.org' "$root/packaging/linux/Dockerfile"
 
-for workflow in "$root/.github/workflows/ci.yml" "$root/.github/workflows/release.yml"; do
-  if grep -Eq 'uses: [^ ]+@(v[0-9]+|stable|main)([[:space:]#]|$)' "$workflow"; then
-    echo "workflow contains a mutable action reference: $workflow" >&2
-    exit 1
-  fi
-  while IFS= read -r command; do
-    [[ "$command" == *'--locked'* ]] || {
-      echo "workflow Cargo validation is missing --locked: $command" >&2
-      exit 1
-    }
-  done < <(grep -E 'run: cargo (test|build|clippy)( |$)' "$workflow" || true)
-done
-grep -Fq 'files: dist/*' "$root/.github/workflows/release.yml"
+if [[ -d "$root/.github/workflows" ]] \
+  && find "$root/.github/workflows" -maxdepth 1 -type f \
+    \( -name '*.yml' -o -name '*.yaml' \) -print -quit | grep -q .; then
+  echo "hosted workflow found; validation and release publishing must remain local" >&2
+  exit 1
+fi
+grep -Fq 'GitHub Actions are disabled' "$root/docs/release.md"
