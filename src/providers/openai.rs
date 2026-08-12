@@ -1,8 +1,8 @@
 use super::{
     Provider, ProviderFailure, ProviderResponse, StreamEvent, TokenUsage,
     transport::{
-        BodyLimits, MAX_PROVIDER_ERROR_BODY_BYTES, MAX_PROVIDER_JSON_BODY_BYTES, SseControl,
-        collect_response_body, consume_sse_response,
+        BodyLimits, MAX_PROVIDER_ERROR_BODY_BYTES, MAX_PROVIDER_JSON_BODY_BYTES, RetryableSseError,
+        SseControl, collect_response_body, consume_sse_response,
     },
 };
 use crate::{
@@ -111,9 +111,10 @@ struct RetryableCodexStreamError {
 }
 
 fn is_retryable_codex_stream_error(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<RetryableCodexStreamError>().is_some())
+    error.chain().any(|cause| {
+        cause.downcast_ref::<RetryableCodexStreamError>().is_some()
+            || cause.downcast_ref::<RetryableSseError>().is_some()
+    })
 }
 
 fn should_retry_codex_stream(
@@ -772,18 +773,18 @@ impl Provider for OpenAiCodexProvider {
                     },
                 )
                 .await;
-                if let Err(error) = stream_result {
-                    if should_retry_codex_stream(&error, false, stream_retries) {
+                let attempt = stream_result.and_then(|()| parser.finish());
+                match attempt {
+                    Ok(response) => return Ok(response),
+                    Err(error) if should_retry_codex_stream(&error, false, stream_retries) => {
                         stream_retries += 1;
                         sleep_before_codex_retry(stream_retries, &error.to_string(), None, None)
                             .await?;
-                        continue;
                     }
-                    return Err(final_codex_stream_error(error, false, stream_retries));
+                    Err(error) => {
+                        return Err(final_codex_stream_error(error, false, stream_retries));
+                    }
                 }
-                return parser
-                    .finish()
-                    .map_err(|error| final_codex_stream_error(error, false, stream_retries));
             }
         })
     }
@@ -847,8 +848,16 @@ impl Provider for OpenAiCodexProvider {
                 )
                 .await;
                 let answer_output_emitted = parser.has_answer_output();
-                if let Err(error) = stream_result {
-                    if should_retry_codex_stream(&error, answer_output_emitted, stream_retries) {
+                let attempt = stream_result.and_then(|()| parser.finish());
+                match attempt {
+                    Ok(response) => return Ok(response),
+                    Err(error)
+                        if should_retry_codex_stream(
+                            &error,
+                            answer_output_emitted,
+                            stream_retries,
+                        ) =>
+                    {
                         stream_retries += 1;
                         sleep_before_codex_retry(
                             stream_retries,
@@ -857,17 +866,15 @@ impl Provider for OpenAiCodexProvider {
                             cancelled.as_ref(),
                         )
                         .await?;
-                        continue;
                     }
-                    return Err(final_codex_stream_error(
-                        error,
-                        answer_output_emitted,
-                        stream_retries,
-                    ));
+                    Err(error) => {
+                        return Err(final_codex_stream_error(
+                            error,
+                            answer_output_emitted,
+                            stream_retries,
+                        ));
+                    }
                 }
-                return parser.finish().map_err(|error| {
-                    final_codex_stream_error(error, answer_output_emitted, stream_retries)
-                });
             }
         })
     }
@@ -2329,7 +2336,10 @@ impl ResponsesSseParser {
             anyhow::bail!(error);
         }
         if !self.completed {
-            anyhow::bail!("OpenAI Codex stream ended without `response.completed`");
+            return Err(RetryableCodexStreamError {
+                message: "OpenAI Codex stream ended without `response.completed`".to_string(),
+            }
+            .into());
         }
         for (_, call) in self.current_calls {
             validate_provider_call(&call)?;
@@ -2661,13 +2671,30 @@ mod tests {
     fn spawn_codex_stream_sequence_server(
         bodies: Vec<&'static [u8]>,
     ) -> (String, thread::JoinHandle<usize>) {
+        spawn_codex_stream_sequence_server_with_headers(
+            bodies
+                .into_iter()
+                .map(|body| {
+                    (
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                            .as_slice(),
+                        body,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn spawn_codex_stream_sequence_server_with_headers(
+        responses: Vec<(&'static [u8], &'static [u8])>,
+    ) -> (String, thread::JoinHandle<usize>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
         let handle = thread::spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut requests = 0usize;
-            while requests < bodies.len() && Instant::now() < deadline {
+            while requests < responses.len() && Instant::now() < deadline {
                 let (mut stream, _) = match listener.accept() {
                     Ok(connection) => connection,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -2681,12 +2708,9 @@ mod tests {
                     .unwrap();
                 let mut request = [0u8; 16 * 1024];
                 let _ = stream.read(&mut request);
-                stream
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
-                    )
-                    .unwrap();
-                stream.write_all(bodies[requests]).unwrap();
+                let (headers, body) = responses[requests];
+                stream.write_all(headers).unwrap();
+                stream.write_all(body).unwrap();
                 stream.flush().unwrap();
                 requests += 1;
             }
@@ -2886,6 +2910,10 @@ mod tests {
             )
             .unwrap_err();
         assert!(!should_retry_codex_stream(&permanent, false, 0));
+
+        let transport = anyhow::Error::new(RetryableSseError::IncompleteEvent);
+        assert!(should_retry_codex_stream(&transport, false, 0));
+        assert!(!should_retry_codex_stream(&transport, true, 0));
     }
 
     #[test]
@@ -2937,6 +2965,101 @@ mod tests {
             header::HeaderValue::from_static("invalid"),
         );
         assert_eq!(retry_after_delay(&headers), None);
+    }
+
+    #[tokio::test]
+    async fn codex_retries_chunked_stream_transport_eof_before_answer_output() {
+        const TRUNCATED_CHUNKED_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        const SUCCESS_HEADERS: &[u8] =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+        const SUCCESS: &[u8] = br#"data: {"type":"response.output_text.delta","delta":"recovered"}
+
+data: {"type":"response.completed","response":{"output":[]}}
+
+"#;
+        let (base_url, server) = spawn_codex_stream_sequence_server_with_headers(vec![
+            (TRUNCATED_CHUNKED_HEADERS, b"a"),
+            (SUCCESS_HEADERS, SUCCESS),
+        ]);
+        let (_auth_directory, auth_path) = test_codex_auth();
+        let provider = OpenAiCodexProvider::new(base_url, auth_path).unwrap();
+        let mut events = Vec::new();
+
+        let response = provider
+            .complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::Off,
+                &mut |event| events.push(event),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(response.message.display_text(), "recovered");
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::TextDelta(text)] if text == "recovered"
+        ));
+    }
+
+    #[tokio::test]
+    async fn codex_does_not_retry_chunked_transport_eof_after_answer_output() {
+        const TRUNCATED_CHUNKED_HEADERS: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+        const PARTIAL_THEN_TRUNCATED_CHUNK: &[u8] =
+            b"3f\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n\r\na";
+        let (base_url, server) = spawn_codex_stream_sequence_server_with_headers(vec![(
+            TRUNCATED_CHUNKED_HEADERS,
+            PARTIAL_THEN_TRUNCATED_CHUNK,
+        )]);
+        let (_auth_directory, auth_path) = test_codex_auth();
+        let provider = OpenAiCodexProvider::new(base_url, auth_path).unwrap();
+        let mut events = Vec::new();
+
+        let error = provider
+            .complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::Off,
+                &mut |event| events.push(event),
+                None,
+            )
+            .await
+            .unwrap_err();
+
+        assert_eq!(server.join().unwrap(), 1);
+        assert!(error.to_string().contains("did not retry"));
+        assert!(matches!(
+            events.as_slice(),
+            [StreamEvent::TextDelta(text)] if text == "partial"
+        ));
+    }
+
+    #[tokio::test]
+    async fn codex_retries_clean_eof_without_response_completed() {
+        const INCOMPLETE: &[u8] =
+            br#"data: {"type":"response.reasoning_summary_text.delta","delta":"planning"}
+
+"#;
+        const SUCCESS: &[u8] = br#"data: {"type":"response.output_text.delta","delta":"recovered"}
+
+data: {"type":"response.completed","response":{"output":[]}}
+
+"#;
+        let (base_url, server) = spawn_codex_stream_sequence_server(vec![INCOMPLETE, SUCCESS]);
+        let (_auth_directory, auth_path) = test_codex_auth();
+        let provider = OpenAiCodexProvider::new(base_url, auth_path).unwrap();
+
+        let response = provider
+            .complete("test-model", &[], &[], ThinkingLevel::Off)
+            .await
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), 2);
+        assert_eq!(response.message.display_text(), "recovered");
     }
 
     #[tokio::test]

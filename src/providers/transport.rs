@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use futures_util::{Stream, StreamExt, pin_mut};
 use reqwest::Response;
 use std::{
+    error::Error,
     pin::Pin,
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
@@ -14,6 +15,20 @@ pub(crate) const MAX_MODEL_LIST_BODY_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_SSE_EVENT_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) const MAX_SSE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RetryableSseError {
+    #[error("failed to read {label}: {source}")]
+    Read {
+        label: String,
+        #[source]
+        source: Box<dyn Error + Send + Sync>,
+    },
+    #[error("{label} was idle for {seconds}s")]
+    Idle { label: String, seconds: f64 },
+    #[error("SSE stream ended before the current event was terminated")]
+    IncompleteEvent,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct BodyLimits {
@@ -121,14 +136,25 @@ where
     loop {
         let next = cancel::race_timeout(stream.next(), cancelled, idle_timeout).await;
         let chunk = match next {
-            Ok(Some(chunk)) => chunk.context(format!("failed to read {label}"))?,
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(Some(Err(source))) => {
+                return Err(RetryableSseError::Read {
+                    label: label.to_string(),
+                    source: Box::new(source),
+                }
+                .into());
+            }
             Ok(None) => {
                 decoder.finish(on_data)?;
                 return Ok(());
             }
             Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
             Err(WaitError::TimedOut) => {
-                anyhow::bail!("{label} was idle for {}s", idle_timeout.as_secs_f64())
+                return Err(RetryableSseError::Idle {
+                    label: label.to_string(),
+                    seconds: idle_timeout.as_secs_f64(),
+                }
+                .into());
             }
         };
         let chunk = chunk.as_ref();
@@ -194,7 +220,7 @@ impl SseDecoder {
             self.process_line(&line, on_data)?;
         }
         if self.saw_data || self.event_bytes > 0 {
-            anyhow::bail!("SSE stream ended before the current event was terminated");
+            return Err(RetryableSseError::IncompleteEvent.into());
         }
         Ok(())
     }
@@ -336,6 +362,46 @@ mod tests {
         decoder.push(b"data: {}\n", &mut ignore).unwrap();
         let error = decoder.finish(&mut ignore).unwrap_err();
         assert!(error.to_string().contains("before the current event"));
+        assert!(error.downcast_ref::<RetryableSseError>().is_some());
+    }
+
+    #[tokio::test]
+    async fn stream_read_errors_and_idle_timeouts_are_typed_retryable() {
+        let source = stream::iter([Err::<Vec<u8>, _>(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected EOF during chunk size line",
+        ))]);
+        pin_mut!(source);
+        let mut ignore = ignore_data;
+        let error = consume_sse_stream(
+            source.as_mut(),
+            None,
+            Duration::from_secs(1),
+            "test stream",
+            &mut ignore,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected EOF during chunk size line")
+        );
+        assert!(error.downcast_ref::<RetryableSseError>().is_some());
+
+        let source = stream::pending::<std::result::Result<Vec<u8>, io::Error>>();
+        pin_mut!(source);
+        let error = consume_sse_stream(
+            source.as_mut(),
+            None,
+            Duration::from_millis(5),
+            "test stream",
+            &mut ignore,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("was idle"));
+        assert!(error.downcast_ref::<RetryableSseError>().is_some());
     }
 
     #[tokio::test]
