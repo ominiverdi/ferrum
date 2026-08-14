@@ -7819,6 +7819,35 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn retained_image_limit_error_recommends_compacting_or_starting_fresh() {
+        let retained = (0..MAX_IMAGES_PER_SESSION)
+            .map(|index| messages::ContentBlock::Image {
+                mime_type: "image/png".to_string(),
+                data_base64: "AA==".to_string(),
+                sha256: format!("retained-{index}"),
+                source: "test".to_string(),
+            })
+            .collect::<Vec<_>>();
+        let messages = vec![messages::Message::with_images(
+            messages::Role::User,
+            "",
+            retained,
+        )];
+        let incoming = vec![messages::ContentBlock::Image {
+            mime_type: "image/png".to_string(),
+            data_base64: "AA==".to_string(),
+            sha256: "incoming".to_string(),
+            source: "test".to_string(),
+        }];
+
+        let error = validate_image_attachment_budget(&messages, &[], &incoming).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("33 > 32"));
+        assert!(message.contains("`/compact`"));
+        assert!(message.contains("`/new`"));
+    }
+
+    #[test]
     fn multi_image_attachment_is_transactional() {
         let temp = tempfile::tempdir().unwrap();
         let config = test_config(temp.path().join("config"));
@@ -8733,12 +8762,12 @@ fn validate_image_attachment_budget_iter<'a>(
     let turn_encoded = pending_encoded.saturating_add(incoming_encoded);
     if turn_count > MAX_IMAGES_PER_TURN {
         anyhow::bail!(
-            "image attachment count exceeds per-turn limit: {turn_count} > {MAX_IMAGES_PER_TURN}"
+            "image attachment count exceeds per-turn limit: {turn_count} > {MAX_IMAGES_PER_TURN}; attach fewer images in this turn"
         );
     }
     if turn_decoded > MAX_IMAGE_BYTES_PER_TURN || turn_encoded > MAX_IMAGE_BASE64_BYTES_PER_TURN {
         anyhow::bail!(
-            "image attachments exceed per-turn byte limit: {turn_decoded} decoded / {turn_encoded} encoded bytes"
+            "image attachments exceed per-turn byte limit: {turn_decoded} decoded / {turn_encoded} encoded bytes; attach fewer or smaller images in this turn"
         );
     }
 
@@ -8749,14 +8778,14 @@ fn validate_image_attachment_budget_iter<'a>(
     let session_encoded = history_encoded.saturating_add(turn_encoded);
     if session_count > MAX_IMAGES_PER_SESSION {
         anyhow::bail!(
-            "image attachment count exceeds retained-session limit: {session_count} > {MAX_IMAGES_PER_SESSION}"
+            "image attachment count exceeds retained-session limit: {session_count} > {MAX_IMAGES_PER_SESSION}; run `/compact` to archive earlier images or `/new` to start a fresh session, then attach again"
         );
     }
     if session_decoded > MAX_IMAGE_BYTES_PER_SESSION
         || session_encoded > MAX_IMAGE_BASE64_BYTES_PER_SESSION
     {
         anyhow::bail!(
-            "image attachments exceed retained-session byte limit: {session_decoded} decoded / {session_encoded} encoded bytes"
+            "image attachments exceed retained-session byte limit: {session_decoded} decoded / {session_encoded} encoded bytes; run `/compact` to archive earlier images or `/new` to start a fresh session, then attach again"
         );
     }
     Ok(())
