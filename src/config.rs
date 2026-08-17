@@ -79,6 +79,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,6 +180,7 @@ impl ThinkingLevel {
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
             other => anyhow::bail!("unsupported thinking level: {other}"),
         }
     }
@@ -191,6 +193,7 @@ impl ThinkingLevel {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -202,6 +205,7 @@ impl ThinkingLevel {
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
             Self::Xhigh => Some("high"),
+            Self::Max => Some("max"),
         }
     }
 
@@ -213,6 +217,7 @@ impl ThinkingLevel {
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
             Self::Xhigh => Some("xhigh"),
+            Self::Max => Some("max"),
         }
     }
 }
@@ -1251,6 +1256,22 @@ fn home_dir() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn max_thinking_level_round_trips_and_maps_to_providers() {
+        assert_eq!(ThinkingLevel::parse("max").unwrap(), ThinkingLevel::Max);
+        assert_eq!(ThinkingLevel::Max.as_str(), "max");
+        assert_eq!(ThinkingLevel::Max.as_openai(), Some("max"));
+        assert_eq!(ThinkingLevel::Max.as_codex(), Some("max"));
+        assert_eq!(
+            serde_json::to_string(&ThinkingLevel::Max).unwrap(),
+            "\"max\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ThinkingLevel>("\"max\"").unwrap(),
+            ThinkingLevel::Max
+        );
+    }
 
     #[test]
     fn project_config_applies_only_restrictive_runtime_policy() {

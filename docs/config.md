@@ -480,7 +480,7 @@ Ferrum parses complete Bash syntax before execution and treats here-document bod
 Supported values:
 
 ```text
-off|minimal|low|medium|high|xhigh
+off|minimal|low|medium|high|xhigh|max
 ```
 
 Default:

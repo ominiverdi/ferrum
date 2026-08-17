@@ -16,7 +16,7 @@ pub struct Args {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Override thinking level: off|minimal|low|medium|high|xhigh
+    /// Override thinking level: off|minimal|low|medium|high|xhigh|max
     #[arg(long)]
     pub thinking: Option<String>,
 

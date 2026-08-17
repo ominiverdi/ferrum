@@ -257,7 +257,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /provider [name]
 /providers
 /mcp [on|off|status|list]
-/thinking [off|minimal|low|medium|high|xhigh]
+/thinking [off|minimal|low|medium|high|xhigh|max]
 /diff [unified|compact|full|words|side_by_side]
 /colors [auto|on|off]
 /palette [name]

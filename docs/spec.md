@@ -84,7 +84,7 @@ Slash commands:
 - `/providers`
 - `/mcp [on|off|status|list]`
 - `/colors [auto|on|off]`
-- `/thinking [off|minimal|low|medium|high|xhigh]`
+- `/thinking [off|minimal|low|medium|high|xhigh|max]`
 - `/safety [low|medium|high]`
 - `/diff [unified|compact|full|words|side_by_side]`
 - `/skills`

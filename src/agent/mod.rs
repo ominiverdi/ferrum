@@ -292,7 +292,7 @@ impl FerrumLineHelper {
         command_hints.insert("/model", " <name>");
         command_hints.insert("/login", " openai");
         command_hints.insert("/provider", " <name>");
-        command_hints.insert("/thinking", " off|minimal|low|medium|high|xhigh");
+        command_hints.insert("/thinking", " off|minimal|low|medium|high|xhigh|max");
         command_hints.insert("/safety", " low|medium|high");
         command_hints.insert("/diff", " unified|compact|full|words|side_by_side");
         command_hints.insert("/mcp", " on|off|status|list");
@@ -455,7 +455,7 @@ fn color_words() -> &'static [&'static str] {
 }
 
 fn thinking_words() -> &'static [&'static str] {
-    &["off", "minimal", "low", "medium", "high", "xhigh"]
+    &["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 }
 
 fn safety_words() -> &'static [&'static str] {
@@ -481,7 +481,8 @@ fn thinking_picker_items(current: ThinkingLevel) -> Vec<PickerItem<String>> {
         ("low", "light reasoning effort"),
         ("medium", "balanced reasoning effort"),
         ("high", "deeper reasoning effort"),
-        ("xhigh", "maximum available reasoning effort"),
+        ("xhigh", "very deep reasoning effort"),
+        ("max", "maximum available reasoning effort"),
     ]
     .into_iter()
     .map(|(name, description)| {
@@ -7899,7 +7900,7 @@ mod context_pressure_tests {
     #[test]
     fn setting_picker_items_mark_current_values_and_respect_safety_floor() {
         let thinking = thinking_picker_items(ThinkingLevel::High);
-        assert_eq!(thinking.len(), 6);
+        assert_eq!(thinking.len(), 7);
         assert_eq!(thinking.iter().filter(|item| item.current).count(), 1);
         assert_eq!(
             thinking.iter().find(|item| item.current).unwrap().label,
@@ -9323,7 +9324,7 @@ fn handle_command(
             println!("  /palette [name]       show current palette or apply a palette");
             println!("  /palettes             choose palette from color-palettes/");
             println!(
-                "  /thinking [level]     choose or set thinking: off|minimal|low|medium|high|xhigh"
+                "  /thinking [level]     choose or set thinking: off|minimal|low|medium|high|xhigh|max"
             );
             println!("  /safety [level]       choose or set execution policy: low|medium|high");
             println!(

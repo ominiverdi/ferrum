@@ -88,7 +88,7 @@ prompt.
 
 **--thinking** LEVEL
 : Override thinking level. Supported values are **off**, **minimal**, **low**,
-**medium**, **high**, and **xhigh**.
+**medium**, **high**, **xhigh**, and **max**.
 
 **--safety** LEVEL
 : Override tool execution safety level for this process. Supported values are **low**,
