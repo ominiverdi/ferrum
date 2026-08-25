@@ -60,7 +60,7 @@ Behavior:
 - Ctrl+D exits.
 - Ctrl+C once clears/returns to prompt; double Ctrl+C exits.
 - Alt+I attaches one clipboard image while preserving the current draft and cursor position.
-- Alt+S, Alt+P, and Alt+M open the `/sessions`, `/providers`, and `/models` pickers while preserving the current draft and cursor position.
+- Alt+S, Alt+P, and Alt+M open the `/sessions`, `/provider`, and `/model` pickers while preserving the current draft and cursor position.
 - Alt+C runs `/compact`; Alt+T and Alt+D open the `/thinking` and `/diff` pickers; Alt+G shows the current `/goal`. The current draft and cursor position are preserved.
 - Input beginning with `/` in column zero is always handled locally. Unknown slash commands never reach the provider. Leading whitespace escapes slash-command handling and is removed before the prompt is sent.
 
@@ -71,17 +71,16 @@ Slash commands:
 - `/version`
 - `/session`
 - `/new`
-- `/title [text]``
+- `/title [text]`
 - `/goal [text|clear]`
 - `/sessions`
+- `/sessions all`
 - `/sessions del`
 - `/sessions new`
 - `/model [name]`
-- `/models`
 - `/login <openai|openai-codex>`
 - `/usage [day|week|month]`
 - `/provider [name]`
-- `/providers`
 - `/mcp [on|off|status|list]`
 - `/colors [auto|on|off]`
 - `/thinking [off|minimal|low|medium|high|xhigh|max]`
@@ -102,19 +101,22 @@ Shell shortcuts:
 
 Session resume:
 
-- `ferrum --continue` resumes the latest JSONL session for the current directory.
-- `ferrum --resume` resumes the latest JSONL session for the current directory.
+- `ferrum --continue` resumes the latest interactive JSONL session for the current directory.
+- `ferrum --resume` resumes the latest interactive JSONL session for the current directory.
 - `ferrum --resume <path|id-prefix>` resumes a specific JSONL session.
 - `ferrum --session <name> -p <prompt>` resumes or creates a named print-mode session.
 - `ferrum --session <path|id-prefix>` opens a specific JSONL session in interactive mode.
+- Opening a specific print, ACP, or legacy session in interactive mode marks it interactive immediately.
 - Resumed interactive sessions show the last 40 visible conversation lines before prompting.
-- `/sessions` provides a numbered picker for current-directory sessions.
-- `/sessions del` provides a deletion picker.
+- `/sessions` provides a numbered picker for interactive sessions in the current directory.
+- `/sessions all` also shows print, ACP, and legacy sessions; selecting one marks it interactive.
+- `/sessions del` provides a deletion picker for interactive sessions.
 - `/sessions new` starts a fresh session.
 - `/new` is the short alias for `/sessions new`.
-- `/models`, `/providers`, and `/palettes` provide numbered pickers for their respective resources.
-- `/providers` includes a `providerless` entry when configured model aliases omit `provider`; selecting it opens those aliases in a nested picker.
-- `/thinking`, `/safety`, `/diff`, and `/colors` provide numbered pickers when used without an argument; explicit arguments select directly.
+- `/model` and `/provider` provide numbered pickers when used without an argument; explicit arguments select directly.
+- `/model` queries the active provider before opening its picker and caches the returned model IDs for argument completion.
+- `/provider` includes a `providerless` entry when configured model aliases omit `provider`; selecting it opens those aliases in a nested picker.
+- `/palettes`, `/thinking`, `/safety`, `/diff`, and `/colors` provide numbered pickers for their respective resources.
 - Picker text filters labels and descriptions. Esc returns to the interactive prompt without changing state.
 
 ## Configuration
@@ -221,9 +223,9 @@ Current persisted entry types:
 - `metadata`
 - `compaction`
 
-Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, a bounded session goal note, thinking level, safety level, diff mode, color mode, and resolved tool lists. Goal notes are operator metadata and are not added to model context. Timestamps are `u64` milliseconds.
+Headers record the creating session mode as `interactive`, `print`, or `acp`. Legacy headers omit it. Messages use stable JSON content blocks and include text, tool calls/results, and image blocks where applicable. Metadata entries store title, a bounded session goal note, thinking level, safety level, diff mode, color mode, resolved tool lists, and mode promotion to interactive. Goal notes are operator metadata and are not added to model context. Timestamps are `u64` milliseconds.
 
-Sessions remain human-inspectable and append-oriented. Anonymous names include UUID entropy. Records are bounded to 16 MiB, pre-serialized with their newline, and appended under an exclusive advisory lock; readers take a shared lock and stream bounded records. A writer repairs an incomplete trailing record under lock before appending. Successful appends are flushed and synced, and creation syncs the session directory. Header-only sessions are retained, while automatic latest-session selection skips abandoned anonymous headers. Session/config switches validate a candidate session and resolve candidate provider/model state before committing either in-memory transition. Future branching/forking must preserve backward compatibility.
+Sessions remain human-inspectable and append-oriented. Anonymous names include UUID entropy. Records are bounded to 16 MiB, pre-serialized with their newline, and appended under an exclusive advisory lock; readers take a shared lock and stream bounded records. A writer repairs an incomplete trailing record under lock before appending. Successful appends are flushed and synced, and creation syncs the session directory. Header-only sessions are retained, while automatic latest-session selection skips abandoned anonymous headers. Bare interactive resume selects tagged interactive sessions; when no resumable tagged interactive session exists, it selects the newest legacy session and marks it interactive. Print and ACP sessions are excluded. Session/config switches validate a candidate session and resolve candidate provider/model state before committing either in-memory transition. Future branching/forking must preserve backward compatibility.
 
 ## Agent loop
 

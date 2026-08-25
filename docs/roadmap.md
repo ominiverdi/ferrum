@@ -23,7 +23,7 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 
 ### v0.4: Providers, live models, skills
 - Config-backed provider registry with `[providers.<name>]`.
-- `/providers`, `/provider`, and live `/models`.
+- Searchable `/provider` and live `/model` selection.
 - Live OpenAI Codex / ChatGPT model catalog discovery.
 - OpenAI-compatible providers for remote APIs and local servers.
 - Agent Skills discovery and Pi-style `/skill:<name> [args]` expansion.
@@ -75,7 +75,7 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 - Add Anthropic-compatible `/messages` adapter for providers/models that are not Chat Completions-compatible.
 - Add provider-specific compatibility flags only when verified by real provider behavior.
 - Consider provider/model validation when switching providers or setting `/model`.
-- Improve `/models` errors and provider-specific quirks.
+- Improve `/model` discovery errors and provider-specific quirks.
 
 ### Interactive UX
 - Improve multiline prompt editing/history behavior.

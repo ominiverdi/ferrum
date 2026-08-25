@@ -136,6 +136,8 @@ ferrum --resume
 ferrum --continue
 ```
 
+New sessions record whether they were created by interactive, print, or ACP mode. Bare resume ignores print and ACP sessions. If no resumable tagged interactive session exists after upgrading, Ferrum resumes the newest legacy session and marks it interactive.
+
 Use a named print-mode session for recurring jobs that need prior context:
 
 ```bash
@@ -248,14 +250,13 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /goal [text|clear]
 /new
 /sessions
+/sessions all
 /sessions del
 /sessions new
 /model [name]
-/models
 /login <provider>
 /usage [day|week|month]
 /provider [name]
-/providers
 /mcp [on|off|status|list]
 /thinking [off|minimal|low|medium|high|xhigh|max]
 /diff [unified|compact|full|words|side_by_side]
@@ -272,11 +273,11 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /exit
 ```
 
-`/new` and `/sessions new` both start a fresh session. `/sessions`, `/models`, `/providers`, and `/palettes` open numbered, searchable pickers. When configured model aliases omit `provider`, `/providers` includes a `providerless` entry that opens those aliases. `/thinking`, `/safety`, `/diff`, and `/colors` open pickers when used without an argument. Enter a displayed number to select, enter text to filter labels and descriptions, or press Esc to return to the prompt without changing state. Explicit arguments such as `/model gpt-5` remain available for direct selection.
+`/new` and `/sessions new` both start a fresh session. `/sessions` shows interactive sessions; `/sessions all` includes print, ACP, and legacy sessions. Selecting a non-interactive or legacy session marks it interactive. `/model`, `/provider`, and `/palettes` open numbered, searchable pickers. When configured model aliases omit `provider`, `/provider` includes a `providerless` entry that opens those aliases. `/thinking`, `/safety`, `/diff`, and `/colors` also open pickers when used without an argument. Enter a displayed number to select, enter text to filter labels and descriptions, or press Esc to return to the prompt without changing state. Explicit arguments such as `/model gpt-5` remain available for direct selection.
 
 `/goal` shows one session-scoped note, `/goal <text>` replaces it, and `/goal clear` removes it. The note is limited to 4096 bytes, persists with the session, and does not trigger model work.
 
-Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths. After `/models` succeeds, its provider model ids are available to `/model <Tab>` completion until the active provider changes.
+Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths. After the `/model` picker loads successfully, its provider model ids are available to `/model <Tab>` completion until the active provider changes.
 
 Input beginning with `/` in column zero is always handled by Ferrum. Unknown slash commands are rejected locally instead of being sent to the model. Prefix slash-leading text with a space to send it as a model prompt; Ferrum removes that escape whitespace before sending it.
 

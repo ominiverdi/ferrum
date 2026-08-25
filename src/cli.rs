@@ -48,11 +48,11 @@ pub struct Args {
     #[arg(long = "tools", num_args = 1.., value_name = "TOOL")]
     pub tools: Option<Vec<String>>,
 
-    /// Resume the latest session, or a specific JSONL session path/id prefix
+    /// Resume the latest interactive session, or a specific JSONL session path/id prefix
     #[arg(long, value_name = "REF")]
     pub resume: Option<Option<String>>,
 
-    /// Continue the latest session for the current directory
+    /// Continue the latest interactive session for the current directory
     #[arg(long = "continue")]
     pub r#continue: bool,
 

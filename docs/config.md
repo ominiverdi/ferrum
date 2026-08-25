@@ -226,7 +226,7 @@ Fields:
 - `max_context_tokens`: model-specific operating context budget
 - `supports_images`: set to `false` for a model that cannot accept image input; defaults to `true`
 
-This lets each model or alias use a tuned context budget while preserving friendly names for interactive `/model` selection. The `/models` picker is scoped to the active provider: aliases with an explicit `provider` appear for that provider, while aliases without one appear only when their `actual_model` is returned by the active provider's live model query. The `/providers` picker adds a `providerless` entry when such aliases exist; selecting it opens their complete configured list. `/model <Tab>` starts with configured aliases and the current model; after a successful `/models` call it also completes bounded, command-safe single-token model ids returned by the active provider. The cache is process-local and cleared when the active provider changes.
+This lets each model or alias use a tuned context budget while preserving friendly names for interactive `/model` selection. The `/model` picker is scoped to the active provider: aliases with an explicit `provider` appear for that provider, while aliases without one appear only when their `actual_model` is returned by the active provider's live model query. The `/provider` picker adds a `providerless` entry when such aliases exist; selecting it opens their complete configured list. `/model <Tab>` starts with configured aliases and the current model; after the `/model` picker loads successfully it also completes bounded, command-safe single-token model ids returned by the active provider. The cache is process-local and cleared when the active provider changes.
 
 ### max_context_tokens
 

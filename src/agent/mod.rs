@@ -27,6 +27,7 @@ use rustyline::{
     history::DefaultHistory,
     validate::Validator,
 };
+use session::jsonl::SessionMode;
 use similar::{ChangeTag, TextDiff};
 use std::{
     collections::{HashMap, HashSet},
@@ -285,13 +286,13 @@ impl FerrumLineHelper {
         command_hints.insert("/paste-image", "");
         command_hints.insert("/session", "");
         command_hints.insert("/goal", " <text>|clear");
-        command_hints.insert("/sessions", " del | new");
+        command_hints.insert("/sessions", " all | del | new");
         command_hints.insert("/colors", " auto|on|off");
         command_hints.insert("/palette", " <name>  (/palettes to list)");
         command_hints.insert("/palettes", "");
-        command_hints.insert("/model", " <name>");
+        command_hints.insert("/model", " [name]");
         command_hints.insert("/login", " openai");
-        command_hints.insert("/provider", " <name>");
+        command_hints.insert("/provider", " [name]");
         command_hints.insert("/thinking", " off|minimal|low|medium|high|xhigh|max");
         command_hints.insert("/safety", " low|medium|high");
         command_hints.insert("/diff", " unified|compact|full|words|side_by_side");
@@ -344,10 +345,8 @@ fn slash_command_words() -> &'static [&'static str] {
         "/skills",
         "/skill",
         "/model",
-        "/models",
         "/login",
         "/provider",
-        "/providers",
         "/thinking",
         "/safety",
         "/mcp",
@@ -443,7 +442,7 @@ fn session_words() -> &'static [&'static str] {
 }
 
 fn sessions_words() -> &'static [&'static str] {
-    &["del", "new"]
+    &["all", "del", "new"]
 }
 
 fn login_provider_words() -> &'static [&'static str] {
@@ -703,6 +702,7 @@ fn palette_picker_items(config: &Config, state: &AgentSession) -> Result<Vec<Pic
 fn session_picker_items(
     sessions: &[session::jsonl::SessionInfo],
     current_path: &Path,
+    show_modes: bool,
 ) -> Vec<PickerItem<usize>> {
     sessions
         .iter()
@@ -722,6 +722,12 @@ fn session_picker_items(
             let thinking = session.thinking.as_deref().unwrap_or("off");
             let diff_mode = session.diff_mode.as_deref().unwrap_or("unified");
             let mut details = vec![age, message_label, format!("{provider}/{model}")];
+            if show_modes {
+                details.push(format!(
+                    "mode={}",
+                    session.mode.map(SessionMode::as_str).unwrap_or("legacy")
+                ));
+            }
             if thinking != "off" {
                 details.push(format!("think={thinking}"));
             }
@@ -738,6 +744,11 @@ fn session_picker_items(
                 thinking.to_string(),
                 diff_mode.to_string(),
                 session.goal.clone().unwrap_or_default(),
+                session
+                    .mode
+                    .map(SessionMode::as_str)
+                    .unwrap_or("legacy")
+                    .to_string(),
             ];
             let description = details.join(" ");
             PickerItem::new(index, &session.title)
@@ -915,7 +926,7 @@ pub async fn run_print(
     let mut state = if let Some(reference) = session_ref {
         AgentSession::resume_or_create_ref(&mut effective_config, reference)?
     } else {
-        AgentSession::new(&effective_config)?
+        AgentSession::new_print(&effective_config)?
     };
     print_implicit_fake_provider_notice(&effective_config);
     if let Some(title) = title {
@@ -987,8 +998,8 @@ pub async fn run_interactive(
     for (key, action) in [
         ('i', PromptShortcutAction::AttachClipboardImage),
         ('s', PromptShortcutAction::RunCommand("/sessions")),
-        ('p', PromptShortcutAction::RunCommand("/providers")),
-        ('m', PromptShortcutAction::RunCommand("/models")),
+        ('p', PromptShortcutAction::RunCommand("/provider")),
+        ('m', PromptShortcutAction::RunCommand("/model")),
         ('c', PromptShortcutAction::RunCommand("/compact")),
         ('t', PromptShortcutAction::RunCommand("/thinking")),
         ('d', PromptShortcutAction::RunCommand("/diff")),
@@ -1072,7 +1083,7 @@ pub async fn run_interactive(
                     }
                     continue;
                 }
-                if !slash_escaped && input == "/models" {
+                if !slash_escaped && input == "/model" {
                     let mut abort = ActiveTurnAbort::start(true);
                     let token = abort.token();
                     let model_list =
@@ -1366,7 +1377,7 @@ async fn run_prompt_shortcut_command(
                 Err(error) => render_error(&error),
             }
         }
-        "/models" => {
+        "/model" => {
             let mut abort = ActiveTurnAbort::start(true);
             let token = abort.token();
             let model_list =
@@ -1501,7 +1512,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions del\n- /sessions new\n- /model [name]\n- /models\n- /usage [day|week|month]\n- /provider [name]\n- /providers\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions all\n- /sessions del\n- /sessions new\n- /model [name]\n- /usage [day|week|month]\n- /provider [name]\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -2793,10 +2804,23 @@ pub(crate) struct AgentSession {
 
 impl AgentSession {
     fn new(config: &Config) -> Result<Self> {
-        Self::new_at_cwd(config, std::env::current_dir()?)
+        Self::new_at_cwd_with_mode(config, std::env::current_dir()?, SessionMode::Interactive)
     }
 
-    pub(crate) fn new_at_cwd(config: &Config, cwd: PathBuf) -> Result<Self> {
+    fn new_print(config: &Config) -> Result<Self> {
+        Self::new_at_cwd_with_mode(config, std::env::current_dir()?, SessionMode::Print)
+    }
+
+    #[cfg(test)]
+    fn new_at_cwd(config: &Config, cwd: PathBuf) -> Result<Self> {
+        Self::new_at_cwd_with_mode(config, cwd, SessionMode::Interactive)
+    }
+
+    pub(crate) fn new_acp_at_cwd(config: &Config, cwd: PathBuf) -> Result<Self> {
+        Self::new_at_cwd_with_mode(config, cwd, SessionMode::Acp)
+    }
+
+    fn new_at_cwd_with_mode(config: &Config, cwd: PathBuf, mode: SessionMode) -> Result<Self> {
         let cwd = if cwd.is_absolute() {
             cwd
         } else {
@@ -2819,7 +2843,7 @@ impl AgentSession {
         let messages = immutable_system_messages(config, &cwd, &skills)?;
         let readable_roots = readable_roots_with_skills(config.readable_roots.clone(), &skills);
         Ok(Self {
-            session: session::JsonlSession::create_with_color_mode_at_cwd(
+            session: session::JsonlSession::create_with_color_mode_and_mode_at_cwd(
                 config.sessions_dir(),
                 Some(config.provider_name.clone()),
                 Some(config.model.clone()),
@@ -2829,6 +2853,7 @@ impl AgentSession {
                 Some(config.safety.as_str().to_string()),
                 None,
                 &cwd,
+                mode,
             )?,
             messages,
             skills,
@@ -2867,7 +2892,7 @@ impl AgentSession {
                 Some(path) => path,
                 None => {
                     eprintln!(
-                        "no sessions found for {}; starting a new session",
+                        "no resumable interactive sessions found for {}; starting a new session",
                         cwd.display()
                     );
                     return Self::new(config);
@@ -2884,7 +2909,8 @@ impl AgentSession {
             restore_provider,
             restore_model,
         )?;
-        let state = Self::open_session(&candidate, path)?;
+        let mut state = Self::open_session(&candidate, path)?;
+        state.promote_to_interactive()?;
         *config = candidate;
         Ok(state)
     }
@@ -2902,6 +2928,7 @@ impl AgentSession {
             Some(config.diff_mode.as_str().to_string()),
             Some(config.safety.as_str().to_string()),
             None,
+            Some(SessionMode::Print),
         )?;
         match resolution {
             session::jsonl::SessionRefResolution::Existing(path) => {
@@ -4324,6 +4351,14 @@ impl AgentSession {
         self.session.sync_checkpoint()
     }
 
+    fn promote_to_interactive(&mut self) -> Result<()> {
+        let mode = session::jsonl::session_info(self.session.path())?.and_then(|info| info.mode);
+        if mode != Some(SessionMode::Interactive) {
+            self.session.append_mode(SessionMode::Interactive)?;
+        }
+        Ok(())
+    }
+
     fn replace_runtime_context_message(&mut self, message: messages::Message) {
         if let Some(index) = self.messages.iter().position(message_is_runtime_context) {
             self.messages[index] = message;
@@ -4365,10 +4400,17 @@ impl AgentSession {
         set_terminal_title(title)
     }
 
-    fn visible_sessions(&self, config: &Config) -> Result<Vec<session::jsonl::SessionInfo>> {
+    fn visible_sessions(
+        &self,
+        config: &Config,
+        include_all_modes: bool,
+    ) -> Result<Vec<session::jsonl::SessionInfo>> {
         Ok(
             session::jsonl::list_sessions_for_cwd(&config.sessions_dir(), &self.cwd)?
                 .into_iter()
+                .filter(|session| {
+                    include_all_modes || session.mode == Some(SessionMode::Interactive)
+                })
                 .filter(|session| {
                     session.message_count > 0
                         || session.path == *self.session.path()
@@ -4394,8 +4436,9 @@ impl AgentSession {
         let mut candidate = config.clone();
         let _restored_tools =
             restore_session_preferences(&mut candidate, &path, true, true, true, true, true)?;
-        let next = Self::open_session(&candidate, path)?;
+        let mut next = Self::open_session(&candidate, path)?;
         self.checkpoint_session()?;
+        next.promote_to_interactive()?;
         *self = next;
         *config = candidate;
         print_current_session_header(self)?;
@@ -4430,27 +4473,37 @@ impl AgentSession {
         Ok(())
     }
 
-    fn pick_session(&mut self, config: &mut Config) -> Result<()> {
-        let sessions = self.visible_sessions(config)?;
+    fn pick_session(&mut self, config: &mut Config, include_all_modes: bool) -> Result<()> {
+        let sessions = self.visible_sessions(config, include_all_modes)?;
         if sessions.is_empty() {
-            println!("No sessions found in {}", self.cwd.display());
+            let kind = if include_all_modes {
+                "sessions"
+            } else {
+                "interactive sessions"
+            };
+            println!("No {kind} found in {}", self.cwd.display());
             return Ok(());
         }
-        let items = session_picker_items(&sessions, self.session.path());
+        let items = session_picker_items(&sessions, self.session.path(), include_all_modes);
         self.last_session_list = sessions;
-        if let Some(index) = picker::pick("Select session", &items)? {
+        let title = if include_all_modes {
+            "Select session from all modes"
+        } else {
+            "Select interactive session"
+        };
+        if let Some(index) = picker::pick(title, &items)? {
             self.open_session_by_index(config, index + 1)?;
         }
         Ok(())
     }
 
     fn delete_session_picker(&mut self, config: &Config) -> Result<()> {
-        let sessions = self.visible_sessions(config)?;
+        let sessions = self.visible_sessions(config, false)?;
         if sessions.is_empty() {
-            println!("No sessions found in {}", self.cwd.display());
+            println!("No interactive sessions found in {}", self.cwd.display());
             return Ok(());
         }
-        let items = session_picker_items(&sessions, self.session.path());
+        let items = session_picker_items(&sessions, self.session.path(), false);
         self.last_session_list = sessions;
         if let Some(index) = picker::pick("Delete session", &items)? {
             self.delete_session_by_index(index + 1)?;
@@ -5631,12 +5684,42 @@ mod context_pressure_tests {
         assert_eq!(start, command.len() - 1);
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].replacement, "del");
+        assert_completion(&helper, &ctx, "/sessions a", "all");
 
         let escaped = " /sessions d";
         let (start, candidates) = helper.complete(escaped, escaped.len(), &ctx).unwrap();
         assert_eq!(start, escaped.len());
         assert!(candidates.is_empty());
         assert_eq!(helper.hint(" /sessions", " /sessions".len(), &ctx), None);
+    }
+
+    #[test]
+    fn provider_and_model_commands_use_only_singular_names() {
+        let commands = slash_command_words();
+        assert!(commands.contains(&"/model"));
+        assert!(commands.contains(&"/provider"));
+        assert!(!commands.contains(&"/models"));
+        assert!(!commands.contains(&"/providers"));
+        let prompt = default_system_prompt_template();
+        assert!(!prompt.lines().any(|line| line == "- /models"));
+        assert!(!prompt.lines().any(|line| line == "- /providers"));
+
+        let temp = tempfile::tempdir().unwrap();
+        let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
+        let history = DefaultHistory::default();
+        let ctx = rustyline::Context::new(&history);
+
+        let (_, model_candidates) = helper.complete("/model", 6, &ctx).unwrap();
+        assert_eq!(model_candidates.len(), 1);
+        assert_eq!(model_candidates[0].replacement, "/model");
+        let (_, provider_candidates) = helper.complete("/provider", 9, &ctx).unwrap();
+        assert_eq!(provider_candidates.len(), 1);
+        assert_eq!(provider_candidates[0].replacement, "/provider");
+        assert_eq!(helper.hint("/model", 6, &ctx).as_deref(), Some(" [name]"));
+        assert_eq!(
+            helper.hint("/provider", 9, &ctx).as_deref(),
+            Some(" [name]")
+        );
     }
 
     #[test]
@@ -5714,7 +5797,7 @@ mod context_pressure_tests {
     }
 
     #[test]
-    fn models_command_results_extend_model_completion() {
+    fn model_picker_results_extend_model_completion() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         let mut helper = FerrumLineHelper::new(&[], &config);
@@ -5823,7 +5906,7 @@ mod context_pressure_tests {
 
         assert_eq!(
             helper.hint("/sessions", "/sessions".len(), &ctx),
-            Some(" del | new".to_string())
+            Some(" all | del | new".to_string())
         );
         assert_eq!(helper.hint("/sessions ", "/sessions ".len(), &ctx), None);
         assert_eq!(
@@ -6038,6 +6121,7 @@ mod context_pressure_tests {
             "/new",
             "/title [text]",
             "/goal [text|clear]",
+            "/sessions all",
             "/sessions del",
             "/skill <name> [args]",
             "/skill:<name> [args]",
@@ -7322,6 +7406,194 @@ mod context_pressure_tests {
         assert_eq!(state.cwd, cwd);
         assert!(state.session.path().exists());
         assert!(state.session.path().starts_with(config.sessions_dir()));
+        assert_eq!(
+            session::jsonl::session_info(state.session.path())
+                .unwrap()
+                .unwrap()
+                .mode,
+            Some(SessionMode::Interactive)
+        );
+    }
+
+    #[test]
+    fn bare_resume_promotes_newest_legacy_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut legacy = session::JsonlSession::create(
+            config.sessions_dir(),
+            Some("fake".to_string()),
+            Some("alias".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        legacy
+            .append_message(&messages::Message::text(
+                messages::Role::User,
+                "legacy session",
+            ))
+            .unwrap();
+        let path = legacy.path().clone();
+        drop(legacy);
+
+        let state =
+            AgentSession::resume_ref(&mut config, None, true, true, true, true, true).unwrap();
+
+        assert_eq!(state.session.path(), &path);
+        assert_eq!(
+            session::jsonl::session_info(&path).unwrap().unwrap().mode,
+            Some(SessionMode::Interactive)
+        );
+    }
+
+    #[test]
+    fn explicit_interactive_resume_promotes_noninteractive_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+
+        for mode in [SessionMode::Print, SessionMode::Acp] {
+            let candidate =
+                AgentSession::new_at_cwd_with_mode(&config, std::env::current_dir().unwrap(), mode)
+                    .unwrap();
+            let path = candidate.session.path().clone();
+            drop(candidate);
+
+            let state = AgentSession::resume_ref(
+                &mut config,
+                Some(path.to_str().unwrap()),
+                true,
+                true,
+                true,
+                true,
+                true,
+            )
+            .unwrap();
+
+            assert_eq!(state.session.path(), &path);
+            assert_eq!(
+                session::jsonl::session_info(&path).unwrap().unwrap().mode,
+                Some(SessionMode::Interactive)
+            );
+        }
+    }
+
+    #[test]
+    fn session_creation_records_interactive_print_and_acp_modes() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let interactive = AgentSession::new(&config).unwrap();
+        let print = AgentSession::new_print(&config).unwrap();
+        let acp = AgentSession::new_acp_at_cwd(&config, std::env::current_dir().unwrap()).unwrap();
+
+        for (state, expected) in [
+            (&interactive, SessionMode::Interactive),
+            (&print, SessionMode::Print),
+            (&acp, SessionMode::Acp),
+        ] {
+            assert_eq!(
+                session::jsonl::session_info(state.session.path())
+                    .unwrap()
+                    .unwrap()
+                    .mode,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn default_session_list_hides_noninteractive_and_legacy_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let state = AgentSession::new(&config).unwrap();
+        let mut print = AgentSession::new_print(&config).unwrap();
+        append_test_message(
+            &mut print,
+            messages::Message::text(messages::Role::User, "print session"),
+        );
+        let mut acp =
+            AgentSession::new_acp_at_cwd(&config, std::env::current_dir().unwrap()).unwrap();
+        append_test_message(
+            &mut acp,
+            messages::Message::text(messages::Role::User, "acp session"),
+        );
+        let mut legacy = session::JsonlSession::create(
+            config.sessions_dir(),
+            Some("fake".to_string()),
+            Some("alias".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        legacy
+            .append_message(&messages::Message::text(
+                messages::Role::User,
+                "legacy session",
+            ))
+            .unwrap();
+
+        let default = state.visible_sessions(&config, false).unwrap();
+        assert_eq!(default.len(), 1);
+        assert_eq!(default[0].mode, Some(SessionMode::Interactive));
+        let all = state.visible_sessions(&config, true).unwrap();
+        assert_eq!(all.len(), 4);
+        assert!(all.iter().any(|info| info.mode == Some(SessionMode::Print)));
+        assert!(all.iter().any(|info| info.mode == Some(SessionMode::Acp)));
+        assert!(all.iter().any(|info| info.mode.is_none()));
+    }
+
+    #[test]
+    fn selecting_noninteractive_or_legacy_session_promotes_it_to_interactive() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentSession::new(&config).unwrap();
+        let mut legacy = session::JsonlSession::create(
+            config.sessions_dir(),
+            Some("fake".to_string()),
+            Some("alias".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        legacy
+            .append_message(&messages::Message::text(
+                messages::Role::User,
+                "legacy session",
+            ))
+            .unwrap();
+        let path = legacy.path().clone();
+        drop(legacy);
+        state.last_session_list = vec![session::jsonl::session_info(&path).unwrap().unwrap()];
+
+        state.open_session_by_index(&mut config, 1).unwrap();
+
+        assert_eq!(state.session.path(), &path);
+        assert_eq!(
+            session::jsonl::session_info(&path).unwrap().unwrap().mode,
+            Some(SessionMode::Interactive)
+        );
+
+        for mode in [SessionMode::Print, SessionMode::Acp] {
+            let candidate =
+                AgentSession::new_at_cwd_with_mode(&config, std::env::current_dir().unwrap(), mode)
+                    .unwrap();
+            let path = candidate.session.path().clone();
+            drop(candidate);
+            state.last_session_list = vec![session::jsonl::session_info(&path).unwrap().unwrap()];
+
+            state.open_session_by_index(&mut config, 1).unwrap();
+
+            assert_eq!(state.session.path(), &path);
+            assert_eq!(
+                session::jsonl::session_info(&path).unwrap().unwrap().mode,
+                Some(SessionMode::Interactive)
+            );
+        }
     }
 
     #[test]
@@ -7337,6 +7609,13 @@ mod context_pressure_tests {
         assert_ne!(state.session.path(), &previous);
         assert!(state.session.path().exists());
         assert!(previous.exists());
+        assert_eq!(
+            session::jsonl::session_info(state.session.path())
+                .unwrap()
+                .unwrap()
+                .mode,
+            Some(SessionMode::Interactive)
+        );
     }
 
     fn assert_completion(
@@ -9307,18 +9586,17 @@ fn handle_command(
             println!("  /title [text]         show or set session title");
             println!("  /goal [text|clear]    show, set, or clear the session goal note");
             println!("  /new                  start a new session");
-            println!("  /sessions             choose a recent session for current directory");
+            println!("  /sessions             choose an interactive session");
+            println!("  /sessions all         choose from all session modes");
             println!("  /sessions del         delete session via picker");
             println!("  /sessions new         start a new session");
             println!("  /skills               list available skills");
             println!("  /skill <name> [args]  load a skill into context");
             println!("  /skill:<name> [args]  load a skill into context");
-            println!("  /model [name]         show or set model directly");
-            println!("  /models               choose model for current provider");
+            println!("  /model [name]         choose model or set directly");
             println!("  /login <provider>     authenticate: openai|openai-codex");
             println!("  /usage [period]       show token usage: day|week|month");
-            println!("  /provider [name]      show or set provider directly");
-            println!("  /providers            choose configured provider");
+            println!("  /provider [name]      choose provider or set directly");
             println!("  /mcp [on|off|status|list] show or toggle MCP tools");
             println!("  /colors [mode]        choose or set colors: auto|on|off");
             println!("  /palette [name]       show current palette or apply a palette");
@@ -9332,8 +9610,8 @@ fn handle_command(
             );
             println!("  Alt+I                 attach clipboard image to current draft");
             println!("  Alt+S                 open /sessions picker");
-            println!("  Alt+P                 open /providers picker");
-            println!("  Alt+M                 open /models picker");
+            println!("  Alt+P                 open /provider picker");
+            println!("  Alt+M                 open /model picker");
             println!("  Alt+C                 compact current conversation context");
             println!("  Alt+T                 open /thinking picker");
             println!("  Alt+D                 open /diff picker");
@@ -9364,6 +9642,10 @@ fn handle_command(
                     println!("messages: {}", stats.messages);
                     let info = session::jsonl::session_info(state.session.path())?
                         .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
+                    println!(
+                        "mode: {}",
+                        info.mode.map(SessionMode::as_str).unwrap_or("legacy")
+                    );
                     println!("archived_messages: {}", info.archived_message_count);
                     println!("compactions: {}", info.compaction_count);
                     if let Some(timestamp) = info.last_compaction_timestamp_ms {
@@ -9452,12 +9734,13 @@ fn handle_command(
         }
         "/sessions" => {
             match parts.next() {
-                None | Some("pick") => state.pick_session(config)?,
+                None | Some("pick") => state.pick_session(config, false)?,
+                Some("all") => state.pick_session(config, true)?,
                 Some("del") => state.delete_session_picker(config)?,
                 Some("new") => state.new_session(config)?,
                 Some(reference) => {
                     anyhow::bail!(
-                        "unknown /sessions subcommand: {reference}. Use /sessions, /sessions del, or /sessions new"
+                        "unknown /sessions subcommand: {reference}. Use /sessions, /sessions all, /sessions del, or /sessions new"
                     )
                 }
             }
@@ -9488,22 +9771,19 @@ fn handle_command(
             anyhow::bail!("unknown skill invocation: {command}")
         }
         "/model" => {
-            if let Some(model) = parts.next() {
-                let mut candidate = config.clone();
-                candidate.set_model(model)?;
-                state.commit_provider_model_transition(config, candidate)?;
+            let Some(model) = parts.next() else {
+                anyhow::bail!(
+                    "/model without an argument is async; this command should be handled before sync commands"
+                )
+            };
+            if let Some(extra) = parts.next() {
+                anyhow::bail!("usage: /model [name], got extra argument: {extra}");
             }
-            println!("model: {}", terminal_text::sanitize(&config.model));
-            if config.provider_model != config.model {
-                println!(
-                    "provider_model: {}",
-                    terminal_text::sanitize(&config.provider_model)
-                );
-            }
+            let mut candidate = config.clone();
+            candidate.set_model(model)?;
+            state.commit_provider_model_transition(config, candidate)?;
+            print_model_selection(config);
             Ok(CommandAction::Continue)
-        }
-        "/models" => {
-            anyhow::bail!("/models is async; this command should be handled before sync commands")
         }
         "/login" => {
             anyhow::bail!("/login is async; this command should be handled before sync commands")
@@ -9519,27 +9799,20 @@ fn handle_command(
         }
         "/provider" => {
             if let Some(provider) = parts.next() {
+                if let Some(extra) = parts.next() {
+                    anyhow::bail!("usage: /provider [name], got extra argument: {extra}");
+                }
                 let mut candidate = config.clone();
                 candidate.set_provider(provider)?;
                 state.commit_provider_model_transition(config, candidate)?;
-            }
-            println!(
-                "provider: {}",
-                terminal_text::sanitize(&config.provider_name)
-            );
-            println!("model: {}", terminal_text::sanitize(&config.model));
-            if config.provider_model != config.model {
                 println!(
-                    "provider_model: {}",
-                    terminal_text::sanitize(&config.provider_model)
+                    "provider: {}",
+                    terminal_text::sanitize(&config.provider_name)
                 );
+                print_model_selection(config);
+                return Ok(CommandAction::Continue);
             }
-            Ok(CommandAction::Continue)
-        }
-        "/providers" => {
-            if let Some(extra) = parts.next() {
-                anyhow::bail!("usage: /providers, got extra argument: {extra}");
-            }
+
             let items = provider_picker_items(config);
             if items.is_empty() {
                 println!("no configured providers in config.toml");

@@ -46,13 +46,13 @@ base_url = "https://chatgpt.com/backend-api"
 default_model = "gpt-5.5"
 ```
 
-`/models` uses the live Codex catalog endpoint:
+`/model` without an argument uses the live Codex catalog endpoint:
 
 ```text
 GET https://chatgpt.com/backend-api/codex/models?client_version=<version>
 ```
 
-Ferrum queries the latest stable Codex CLI release for each `/models` command and uses that version for model discovery. If release discovery fails, it uses the current tested Codex CLI version. If an automatically discovered version receives a typed client-version compatibility rejection, Ferrum retries model discovery with the tested fallback. Set `FERRUM_CODEX_CLIENT_VERSION` to bypass release discovery and force a specific compatibility version; explicit overrides are never silently replaced:
+Ferrum queries the latest stable Codex CLI release each time the `/model` picker opens and uses that version for model discovery. If release discovery fails, it uses the current tested Codex CLI version. If an automatically discovered version receives a typed client-version compatibility rejection, Ferrum retries model discovery with the tested fallback. Set `FERRUM_CODEX_CLIENT_VERSION` to bypass release discovery and force a specific compatibility version; explicit overrides are never silently replaced:
 
 ```bash
 export FERRUM_CODEX_CLIENT_VERSION=0.144.0
@@ -176,13 +176,13 @@ For authless local servers, omit `api_key_env`.
 
 ## Live model listing
 
-`/models` queries the selected provider live where supported:
+`/model` without an argument queries the selected provider live where supported:
 
 - OpenAI Codex: `GET /codex/models?client_version=<version>`.
 - OpenAI-compatible providers: `GET /models`.
 - Fake provider: local `fake` model.
 
-The picker combines this live result with configured aliases scoped to the selected provider. An alias without `provider` appears when its `actual_model` is present in the live result. `/providers` exposes the complete set of aliases without `provider` under the `providerless` entry.
+The picker combines this live result with configured aliases scoped to the selected provider. An alias without `provider` appears when its `actual_model` is present in the live result. `/provider` exposes the complete set of aliases without `provider` under the `providerless` entry.
 
 Ferrum does not silently guess static model lists.
 

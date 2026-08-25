@@ -54,8 +54,7 @@ supported methods and current interoperability limits.
 
 **Resume mode**
 
-: Use **--resume** to resume the latest session for the current directory. If no
-matching session exists, Ferrum starts a new session.
+: Use **--resume** to resume the latest interactive session for the current directory. If no resumable tagged interactive session exists, Ferrum resumes and promotes the newest legacy session. If no matching session exists, Ferrum starts a new session.
 
 **Print-mode named session mode**
 
@@ -66,12 +65,12 @@ creates **REF.jsonl** in the session data directory.
 **Interactive explicit session mode**
 
 : Use **--session** REF or **--resume** REF in interactive mode to open an
-existing session by JSONL path or id prefix.
+existing session by JSONL path or id prefix. Opening a print, ACP, or legacy
+session this way marks it interactive.
 
 **Continue mode**
 
-: Use **--continue** as an alias for continuing the latest session for the
-current directory.
+: Use **--continue** as an alias for continuing the latest interactive session for the current directory.
 
 # OPTIONS
 
@@ -133,11 +132,10 @@ JSONL, including entries archived before compaction, and return rendered text
 with JSONL line numbers. There is no slash command for these tools.
 
 **--resume** [REF]
-: Resume the latest session for the current directory, or resume a specific
-session by JSONL path or id prefix.
+: Resume the latest interactive session for the current directory, or resume a specific session by JSONL path or id prefix.
 
 **--continue**
-: Continue the latest session for the current directory.
+: Continue the latest interactive session for the current directory.
 
 **--session** REF
 : In print mode, resume or create a named session. In interactive mode, open an
@@ -171,7 +169,10 @@ Common slash commands:
 : Start a new session. This is the short alias for **/sessions new**.
 
 **/sessions**
-: Open the numbered, searchable session picker. Press Esc to return to the prompt without switching.
+: Open the numbered, searchable interactive-session picker. Press Esc to return to the prompt without switching.
+
+**/sessions all**
+: Include print, ACP, and legacy sessions. Selecting one marks it interactive.
 
 **/sessions del**
 : Open an interactive session deletion picker.
@@ -185,20 +186,14 @@ Common slash commands:
 **/goal** [TEXT|clear]
 : Show, replace, or clear the bounded session goal note. The note persists with the session and does not trigger model work.
 
-**/model** NAME
-: Switch model.
-
-**/models**
-: Fetch models known to the active provider, cache them for **/model** Tab completion, and open the numbered, searchable model picker.
+**/model** \[NAME\]
+: Without NAME, fetch models known to the active provider, cache them for Tab completion, and open the numbered, searchable model picker. With NAME, switch directly.
 
 **/login** {openai,openai-codex}
 : Run the OpenAI Codex / ChatGPT OAuth flow from the interactive session.
 
-**/provider** NAME
-: Switch provider.
-
-**/providers**
-: Open the numbered, searchable provider picker. If configured model aliases omit **provider**, the **providerless** entry opens those aliases.
+**/provider** \[NAME\]
+: Without NAME, open the numbered, searchable provider picker. With NAME, switch directly. If configured model aliases omit **provider**, the **providerless** entry opens those aliases.
 
 **/mcp** on|off|status|list
 : Manage MCP server availability for the current session.
@@ -215,7 +210,7 @@ Common slash commands:
 **/colors** [MODE]
 : Open the color-mode picker, or set the mode directly.
 
-**/palette** [NAME]
+**/palette** \[NAME\]
 : Show the current palette, or validate, apply, and persist a palette to **~/.config/ferrum/colors.toml**. Use **default** to restore Ferrum's built-in colors.
 
 **/palettes**
@@ -318,7 +313,7 @@ hex values such as **#ffaa00**, and xterm 256-color indexes such as **245**.
 Xterm names are matched case-insensitively. Spaces, dashes, and underscores are
 ignored, and **gray**/**grey** are equivalent. Duplicate xterm names map to the
 first matching xterm index; use numeric indexes for exact selection. Reusable
-palettes can live in **~/.config/ferrum/color-palettes/*.toml**; **/palette**
+palettes can live in **~/.config/ferrum/color-palettes/\*.toml**; **/palette**
 shows the current palette, **/palettes** opens the palette picker, and
 **/palette NAME** validates and applies one live. **/palette default** restores
 Ferrum's built-in colors. See **docs/colors.md** for all palette keys and color
@@ -332,7 +327,7 @@ values.
 **~/.config/ferrum/colors.toml**
 : Optional semantic UI color palette.
 
-**~/.config/ferrum/color-palettes/*.toml**
+**~/.config/ferrum/color-palettes/\*.toml**
 : Optional reusable UI palettes selectable with **/palette** and **/palettes**.
 
 **~/.local/share/ferrum/sessions/**
@@ -412,7 +407,7 @@ Use a local OpenAI-compatible provider:
 ferrum --provider local -p "say hello"
 ```
 
-Resume the latest session for the current directory:
+Resume the latest interactive session for the current directory:
 
 ```sh
 ferrum --resume

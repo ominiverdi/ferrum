@@ -14,9 +14,8 @@ That works well for:
 
 But it is awkward for interactive usage such as:
 
-- `/providers`
-- `/provider <name>`
-- `/models`
+- `/provider [name]`
+- `/model [name]`
 
 where users may want Ferrum to already know the provider secret without pre-exporting an environment variable in every shell.
 

@@ -25,6 +25,27 @@ pub struct JsonlSession {
     file: File,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    Interactive,
+    Print,
+    Acp,
+    #[serde(other)]
+    Unknown,
+}
+
+impl SessionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Print => "print",
+            Self::Acp => "acp",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEntry {
@@ -42,6 +63,8 @@ pub enum SessionEntry {
         safety: Option<String>,
         tools: Option<Vec<String>>,
         cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SessionMode>,
     },
     Message {
         id: String,
@@ -69,6 +92,8 @@ pub enum SessionEntry {
         tools: Option<Vec<String>>,
         #[serde(default)]
         goal: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<SessionMode>,
     },
 }
 
@@ -110,9 +135,11 @@ impl JsonlSession {
             safety,
             tools,
             cwd.as_deref(),
+            None,
         )
     }
 
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub fn create_with_color_mode_at_cwd(
         dir: PathBuf,
@@ -135,6 +162,34 @@ impl JsonlSession {
             safety,
             tools,
             Some(cwd),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_color_mode_and_mode_at_cwd(
+        dir: PathBuf,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+        color_mode: Option<String>,
+        diff_mode: Option<String>,
+        safety: Option<String>,
+        tools: Option<Vec<String>>,
+        cwd: &Path,
+        mode: SessionMode,
+    ) -> Result<Self> {
+        Self::create_with_color_mode_for_cwd(
+            dir,
+            provider,
+            model,
+            thinking,
+            color_mode,
+            diff_mode,
+            safety,
+            tools,
+            Some(cwd),
+            Some(mode),
         )
     }
 
@@ -149,6 +204,7 @@ impl JsonlSession {
         safety: Option<String>,
         tools: Option<Vec<String>>,
         cwd: Option<&Path>,
+        mode: Option<SessionMode>,
     ) -> Result<Self> {
         for _ in 0..16 {
             let filename = format!("{}-{}.jsonl", now_ms(), Uuid::new_v4());
@@ -164,6 +220,7 @@ impl JsonlSession {
                 safety.clone(),
                 tools.clone(),
                 cwd,
+                mode,
             ) {
                 Ok(session) => return Ok(session),
                 Err(error)
@@ -207,6 +264,24 @@ impl JsonlSession {
         safety: Option<String>,
         tools: Option<Vec<String>>,
     ) -> Result<Self> {
+        Self::create_named_with_color_mode_and_mode(
+            dir, id, provider, model, thinking, color_mode, diff_mode, safety, tools, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_named_with_color_mode_and_mode(
+        dir: PathBuf,
+        id: &str,
+        provider: Option<String>,
+        model: Option<String>,
+        thinking: Option<String>,
+        color_mode: Option<String>,
+        diff_mode: Option<String>,
+        safety: Option<String>,
+        tools: Option<Vec<String>>,
+        mode: Option<SessionMode>,
+    ) -> Result<Self> {
         validate_user_session_id(id)?;
         let cwd = std::env::current_dir().ok();
         Self::create_with_header_id(
@@ -221,6 +296,7 @@ impl JsonlSession {
             safety,
             tools,
             cwd.as_deref(),
+            mode,
         )
     }
 
@@ -237,6 +313,7 @@ impl JsonlSession {
         safety: Option<String>,
         tools: Option<Vec<String>>,
         cwd: Option<&Path>,
+        mode: Option<SessionMode>,
     ) -> Result<Self> {
         fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
         tighten_dir_permissions(&dir);
@@ -262,6 +339,7 @@ impl JsonlSession {
             safety,
             tools,
             cwd: cwd.map(canonical_display_path),
+            mode,
         };
         if let Err(error) = session.append(&header) {
             drop(session.file);
@@ -332,6 +410,7 @@ impl JsonlSession {
             safety: None,
             tools: None,
             goal: None,
+            mode: None,
         })
     }
 
@@ -349,6 +428,7 @@ impl JsonlSession {
             safety: None,
             tools: None,
             goal: None,
+            mode: None,
         })
     }
 
@@ -366,6 +446,7 @@ impl JsonlSession {
             safety: None,
             tools: None,
             goal: None,
+            mode: None,
         })
     }
 
@@ -383,6 +464,7 @@ impl JsonlSession {
             safety: Some(safety.to_string()),
             tools: None,
             goal: None,
+            mode: None,
         })
     }
 
@@ -400,6 +482,7 @@ impl JsonlSession {
             safety: None,
             tools: Some(tools.to_vec()),
             goal: None,
+            mode: None,
         })
     }
 
@@ -417,6 +500,7 @@ impl JsonlSession {
             safety: None,
             tools: None,
             goal: None,
+            mode: None,
         })
     }
 
@@ -434,6 +518,7 @@ impl JsonlSession {
             safety: None,
             tools: None,
             goal: None,
+            mode: None,
         })
     }
 
@@ -454,6 +539,25 @@ impl JsonlSession {
             safety: None,
             tools: None,
             goal: Some(goal.to_string()),
+            mode: None,
+        })
+    }
+
+    pub fn append_mode(&mut self, mode: SessionMode) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            provider: None,
+            model: None,
+            thinking: None,
+            color_mode: None,
+            diff_mode: None,
+            safety: None,
+            tools: None,
+            goal: None,
+            mode: Some(mode),
         })
     }
 
@@ -672,6 +776,7 @@ pub struct SessionInfo {
     pub safety: Option<String>,
     pub tools: Option<Vec<String>>,
     pub goal: Option<String>,
+    pub mode: Option<SessionMode>,
     pub title: String,
     pub message_count: usize,
     pub archived_message_count: usize,
@@ -681,12 +786,19 @@ pub struct SessionInfo {
 }
 
 pub fn latest_session_for_cwd(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
-    Ok(list_sessions_for_cwd(dir, cwd)?
-        .into_iter()
-        .find(|info| {
-            info.message_count > 0 || info.title != "(empty session)" || info.goal.is_some()
+    let sessions = list_sessions_for_cwd(dir, cwd)?;
+    let is_resumable = |info: &&SessionInfo| {
+        info.message_count > 0 || info.title != "(empty session)" || info.goal.is_some()
+    };
+    Ok(sessions
+        .iter()
+        .find(|info| info.mode == Some(SessionMode::Interactive) && is_resumable(info))
+        .or_else(|| {
+            sessions
+                .iter()
+                .find(|info| info.mode.is_none() && is_resumable(info))
         })
-        .map(|info| info.path))
+        .map(|info| info.path.clone()))
 }
 
 pub fn list_sessions_for_cwd(dir: &Path, cwd: &Path) -> Result<Vec<SessionInfo>> {
@@ -1091,6 +1203,7 @@ pub fn resolve_or_create_session_ref(
     diff_mode: Option<String>,
     safety: Option<String>,
     tools: Option<Vec<String>>,
+    mode: Option<SessionMode>,
 ) -> Result<SessionRefResolution> {
     match resolve_session_ref(dir, cwd, reference) {
         Ok(path) => Ok(SessionRefResolution::Existing(path)),
@@ -1104,7 +1217,7 @@ pub fn resolve_or_create_session_ref(
             if path.exists() {
                 return Ok(SessionRefResolution::Existing(path));
             }
-            JsonlSession::create_named_with_color_mode(
+            JsonlSession::create_named_with_color_mode_and_mode(
                 dir.to_path_buf(),
                 reference,
                 provider,
@@ -1114,6 +1227,7 @@ pub fn resolve_or_create_session_ref(
                 diff_mode,
                 safety,
                 tools,
+                mode,
             )?;
             Ok(SessionRefResolution::Created(path))
         }
@@ -1143,6 +1257,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
     let mut explicit_safety = None;
     let mut explicit_tools = None;
     let mut explicit_goal = None;
+    let mut explicit_mode = None;
     let mut total_message_count = 0usize;
     let mut visible_message_count = 0usize;
     let mut archived_message_count = 0usize;
@@ -1161,6 +1276,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
                 safety: header_safety,
                 tools: header_tools,
                 cwd: header_cwd,
+                mode: header_mode,
                 ..
             } => {
                 id = Some(header_id);
@@ -1173,6 +1289,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
                 explicit_diff_mode = header_diff_mode;
                 explicit_safety = header_safety;
                 explicit_tools = header_tools;
+                explicit_mode = header_mode;
                 cwd = header_cwd;
             }
             SessionEntry::Message { message, .. } => {
@@ -1195,6 +1312,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
                 safety,
                 tools,
                 goal,
+                mode,
                 ..
             } => {
                 if let Some(title) = title
@@ -1243,6 +1361,9 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
                         eprintln!("[session] ignored goal larger than {MAX_GOAL_BYTES} bytes");
                     }
                 }
+                if let Some(mode) = mode {
+                    explicit_mode = Some(mode);
+                }
             }
             SessionEntry::Compaction { timestamp_ms, .. } => {
                 archived_message_count = total_message_count;
@@ -1271,6 +1392,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
         safety: explicit_safety,
         tools: explicit_tools,
         goal: explicit_goal,
+        mode: explicit_mode,
         title: explicit_title
             .or(inferred_title)
             .unwrap_or_else(|| "(empty session)".to_string()),
@@ -1506,12 +1628,17 @@ mod tests {
             None,
             None,
             None,
+            Some(SessionMode::Print),
         )
         .unwrap();
         match path {
             SessionRefResolution::Created(path) => {
                 assert_eq!(path, temp.path().join("named-session.jsonl"));
                 assert!(path.exists());
+                assert_eq!(
+                    session_info(&path).unwrap().unwrap().mode,
+                    Some(SessionMode::Print)
+                );
             }
             SessionRefResolution::Existing(_) => panic!("expected created named session"),
         }
@@ -1520,6 +1647,7 @@ mod tests {
             temp.path(),
             &cwd,
             "named-session",
+            None,
             None,
             None,
             None,
@@ -1571,6 +1699,7 @@ mod tests {
             temp.path(),
             temp.path(),
             "foo.jsonl",
+            None,
             None,
             None,
             None,
@@ -1634,6 +1763,7 @@ mod tests {
             safety: None,
             tools: None,
             cwd: cwd.map(|path| path.display().to_string()),
+            mode: None,
         };
         let text = serde_json::to_string(&header).unwrap();
         std::fs::write(path, format!("{text}\n")).unwrap();
@@ -1910,6 +2040,7 @@ mod tests {
             safety: None,
             tools: None,
             cwd: None,
+            mode: None,
         })
         .unwrap();
         let message = r#"{"type":"message","id":"m1","parent_id":null,"timestamp_ms":2,"message":{"role":"assistant","content":[{"type":"text","text":"old usage"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}"#;
@@ -2243,6 +2374,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap_err();
 
@@ -2309,6 +2441,92 @@ mod tests {
         assert_eq!(
             latest_session_for_cwd(temp.path(), &cwd).unwrap(),
             Some(goal_path)
+        );
+    }
+
+    #[test]
+    fn latest_session_prefers_interactive_and_falls_back_to_legacy() {
+        fn create_tagged_session(dir: &Path, cwd: &Path, mode: SessionMode, text: &str) -> PathBuf {
+            let mut session = JsonlSession::create_with_color_mode_and_mode_at_cwd(
+                dir.to_path_buf(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                cwd,
+                mode,
+            )
+            .unwrap();
+            session
+                .append_message(&Message::text(Role::User, text))
+                .unwrap();
+            session.path().clone()
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let interactive_path =
+            create_tagged_session(temp.path(), &cwd, SessionMode::Interactive, "interactive");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        create_tagged_session(temp.path(), &cwd, SessionMode::Print, "newer print");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        create_tagged_session(temp.path(), &cwd, SessionMode::Acp, "newest acp");
+
+        assert_eq!(
+            latest_session_for_cwd(temp.path(), &cwd).unwrap(),
+            Some(interactive_path)
+        );
+
+        let legacy_dir = temp.path().join("legacy");
+        let mut legacy =
+            JsonlSession::create(legacy_dir.clone(), None, None, None, None, None, None).unwrap();
+        legacy
+            .append_message(&Message::text(Role::User, "legacy"))
+            .unwrap();
+        let legacy_path = legacy.path().clone();
+        drop(legacy);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        create_tagged_session(&legacy_dir, &cwd, SessionMode::Print, "newer print");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        create_tagged_session(&legacy_dir, &cwd, SessionMode::Acp, "newest acp");
+
+        assert_eq!(
+            latest_session_for_cwd(&legacy_dir, &cwd).unwrap(),
+            Some(legacy_path)
+        );
+
+        let noninteractive_dir = temp.path().join("noninteractive-only");
+        create_tagged_session(&noninteractive_dir, &cwd, SessionMode::Print, "print only");
+        create_tagged_session(&noninteractive_dir, &cwd, SessionMode::Acp, "acp only");
+        assert_eq!(
+            latest_session_for_cwd(&noninteractive_dir, &cwd).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn session_mode_metadata_promotes_legacy_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(session_info(session.path()).unwrap().unwrap().mode, None);
+
+        session.append_mode(SessionMode::Interactive).unwrap();
+
+        assert_eq!(
+            session_info(session.path()).unwrap().unwrap().mode,
+            Some(SessionMode::Interactive)
         );
     }
 

@@ -847,7 +847,7 @@ async fn handle_line(
                     return Ok(());
                 }
             }
-            let mut agent = match AgentSession::new_at_cwd(&session_config, cwd) {
+            let mut agent = match AgentSession::new_acp_at_cwd(&session_config, cwd) {
                 Ok(agent) => agent,
                 Err(_) => {
                     output

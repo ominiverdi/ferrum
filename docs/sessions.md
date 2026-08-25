@@ -15,23 +15,27 @@ Entry types:
 - `metadata`
 - `compaction`
 
-Sessions are append-oriented and human-inspectable. New session files are created with user-private permissions (`0600`), and Ferrum tightens existing session file permissions on open when possible. Anonymous filenames include a timestamp plus UUID entropy.
+Sessions are append-oriented and human-inspectable. New session headers record `mode` as `interactive`, `print`, or `acp`. New session files are created with user-private permissions (`0600`), and Ferrum tightens existing session file permissions on open when possible. Anonymous filenames include a timestamp plus UUID entropy.
 
 Each JSONL append is serialized before locking, bounded to 16 MiB, written with its newline while holding an exclusive advisory file lock, flushed, and synced before Ferrum reports success. Readers take a shared lock and process bounded records incrementally. When a writer opens or appends to a session, it removes an incomplete trailing record under the exclusive lock before adding new data. Complete prior records remain intact.
 
 ## Resume and named sessions
 
-Continue the latest session for the current directory in interactive mode:
+Continue the latest interactive session for the current directory:
 
 ```bash
 ferrum --continue
 ```
 
-Resume the latest session for the current directory in interactive mode:
+Resume the latest interactive session for the current directory:
 
 ```bash
 ferrum --resume
 ```
+
+Bare `--resume` and `--continue` select only sessions marked `interactive`. During migration, if no resumable tagged interactive session exists, Ferrum resumes the newest legacy session without a mode and marks it interactive. Print and ACP sessions never win this fallback.
+
+Opening a specific print, ACP, or legacy session in interactive mode marks it interactive immediately.
 
 Resume a specific existing session by JSONL path or id prefix:
 
@@ -84,6 +88,7 @@ ferrum --title "Quick check" -p "summarize this repo"
 /goal [text|clear]
 /new
 /sessions
+/sessions all
 /sessions del
 /sessions new
 /compact
@@ -93,9 +98,9 @@ ferrum --title "Quick check" -p "summarize this repo"
 
 When an interactive session is resumed with `--resume`, `--continue`, or `--session REF`, Ferrum prints the last 40 visible conversation lines before prompting. This is UI-only: it does not add anything to model context and does not create a new model turn.
 
-`/sessions` opens a numbered picker for recent sessions in the current directory. Entering a number opens that session, text filters session titles and details, and Esc returns to the prompt without switching. `/sessions del` opens the same interface for deletion. `/new` and `/sessions new` both start a fresh session.
+`/sessions` opens a numbered picker containing only interactive sessions in the current directory. `/sessions all` also shows print, ACP, and legacy sessions, with their modes in the picker. Selecting a non-interactive or legacy session marks it interactive immediately; no model prompt is required. Entering a number opens that session, text filters session titles and details, and Esc returns to the prompt without switching. `/sessions del` opens the interactive-session deletion picker. `/new` and `/sessions new` both start a fresh interactive session.
 
-Header-only and metadata-only sessions are retained so a failed start or state transition never unlinks an active file handle. `/sessions` hides old empty sessions by default, while still showing the current empty session so you can see where you are. Automatic latest-session selection skips abandoned anonymous header-only sessions.
+Header-only and metadata-only sessions are retained so a failed start or state transition never unlinks an active file handle. `/sessions` hides non-interactive and old empty sessions by default, while still showing the current empty session so you can see where you are. Automatic latest-session selection skips abandoned anonymous header-only sessions.
 
 `/title` shows the current session title. `/title <text>` sets an explicit title used by `/sessions`. `--title <text>` sets the title when starting, resuming, or running a print-mode session. If no title is set, Ferrum falls back to a title inferred from the first user message.
 
