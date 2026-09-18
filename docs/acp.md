@@ -121,7 +121,7 @@ Use a deterministic canonical `cwd` per chat thread. Persist the ACP `sessionId`
 
 ### Troubleshooting
 
-- Keep stdout reserved for newline-delimited ACP JSON-RPC. Inspect sanitized diagnostics on stderr.
+- Keep stdout reserved for newline-delimited ACP JSON-RPC. Prompt failures return bounded `kind` and `message` fields in the JSON-RPC error data. Current kinds are `authentication_storage`, `provider_authentication`, `provider_timeout`, `mcp`, and `agent_turn`; clients should handle unknown future kinds. Ferrum sanitizes terminal controls, redacts common credential forms, and size-bounds the underlying error chain written to stderr without adding prompt content. Inspect stderr for the actionable cause.
 - Supply an absolute existing `cwd`; loading or resuming with a different canonical directory is rejected.
 - Re-send client MCP definitions on load/resume. They are intentionally not persisted by Ferrum.
 - If a project policy unexpectedly removes a capability, inspect `/session` and the nearest `.ferrum/config.toml`; project restrictions override broader CLI/global choices.

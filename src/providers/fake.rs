@@ -28,6 +28,9 @@ impl Provider for FakeProvider {
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             if let Ok(script) = std::env::var("FERRUM_FAKE_SCRIPT") {
+                if script == "fail" {
+                    anyhow::bail!("scripted fake provider failure");
+                }
                 let response = if script == "inspect_images" {
                     image_inspection_response(messages)
                 } else {
