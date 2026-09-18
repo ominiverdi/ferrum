@@ -9,9 +9,10 @@ use crate::{
         messages::{self, ContentBlock as FerrumContentBlock, Role as FerrumRole},
         parse_headless_command, restore_session_preferences,
     },
+    auth::openai_codex,
     cli::AcpPermissionPolicy,
     config::Config,
-    mcp, session, terminal_text,
+    mcp, providers, session, terminal_text,
     text_truncate::truncate_to_max_bytes,
 };
 use agent_client_protocol_schema::{
@@ -34,6 +35,7 @@ use agent_client_protocol_schema::{
     },
 };
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
@@ -41,7 +43,7 @@ use std::{
     os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
@@ -54,6 +56,7 @@ use tokio::{
 use url::Url;
 
 const MAX_INPUT_LINE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_PROMPT_FAILURE_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 const MAX_DECODED_REQUEST_BYTES: usize = 30 * 1024 * 1024;
 const MAX_DECODED_REQUEST_NODES: usize = 100_000;
 const MAX_DECODED_REQUEST_DEPTH: usize = 64;
@@ -1369,6 +1372,122 @@ async fn handle_line(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PromptFailureCategory {
+    AuthenticationStorage,
+    ProviderAuthentication,
+    ProviderTimeout,
+    Mcp,
+    AgentTurn,
+}
+
+impl PromptFailureCategory {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::AuthenticationStorage => "authentication_storage",
+            Self::ProviderAuthentication => "provider_authentication",
+            Self::ProviderTimeout => "provider_timeout",
+            Self::Mcp => "mcp",
+            Self::AgentTurn => "agent_turn",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            Self::AuthenticationStorage => "authentication storage is not writable",
+            Self::ProviderAuthentication => "provider authentication failed",
+            Self::ProviderTimeout => "provider request timed out",
+            Self::Mcp => "MCP request failed",
+            Self::AgentTurn => "agent turn failed",
+        }
+    }
+}
+
+fn prompt_failure_category(error: &anyhow::Error) -> PromptFailureCategory {
+    let detail = format!("{error:#}").to_ascii_lowercase();
+    if openai_codex::is_authentication_storage_error(error)
+        || ((detail.contains("auth.json") || detail.contains("authentication storage"))
+            && (detail.contains("read-only file system") || detail.contains("permission denied")))
+    {
+        PromptFailureCategory::AuthenticationStorage
+    } else if providers::is_authentication_error(error)
+        || detail.contains("token refresh")
+        || detail.contains("authentication required")
+        || detail.contains("auth not found")
+    {
+        PromptFailureCategory::ProviderAuthentication
+    } else if providers::is_timeout_error(error)
+        || detail.contains("did not respond")
+        || detail.contains("request timed out")
+        || detail.contains("operation timed out")
+    {
+        PromptFailureCategory::ProviderTimeout
+    } else if detail.contains("mcp server")
+        || detail.contains("mcp request")
+        || detail.contains("mcp tool")
+    {
+        PromptFailureCategory::Mcp
+    } else {
+        PromptFailureCategory::AgentTurn
+    }
+}
+
+fn redact_prompt_failure_credentials(text: &str) -> String {
+    static PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            (
+                r#"(?i)["']?(access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|client[_-]?secret|password|authorization|cookie|set-cookie)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)"#,
+                "$1=[redacted]",
+            ),
+            (
+                r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}",
+                "Bearer [redacted]",
+            ),
+            (
+                r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}\b",
+                "[redacted JWT]",
+            ),
+            (
+                r"\b(?:sk-[A-Za-z0-9_-]{12,}|AIza[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})",
+                "[redacted API key]",
+            ),
+        ]
+        .into_iter()
+        .map(|(pattern, replacement)| {
+            (
+                Regex::new(pattern).expect("prompt diagnostic credential regex must compile"),
+                replacement,
+            )
+        })
+        .collect()
+    });
+    patterns.iter().fold(text.to_string(), |redacted, rule| {
+        rule.0.replace_all(&redacted, rule.1).into_owned()
+    })
+}
+
+fn prompt_failure_diagnostic(category: PromptFailureCategory, error: &anyhow::Error) -> String {
+    let diagnostic = format!(
+        "[acp] prompt failed category={}: {error:#}",
+        category.kind()
+    );
+    let diagnostic = terminal_text::sanitize(&diagnostic).replace(['\r', '\n'], " ");
+    truncate_to_max_bytes(
+        &redact_prompt_failure_credentials(&diagnostic),
+        MAX_PROMPT_FAILURE_DIAGNOSTIC_BYTES,
+    )
+}
+
+fn report_prompt_failure(error: anyhow::Error) -> AcpError {
+    let category = prompt_failure_category(&error);
+    terminal_text::write_stderr_diagnostic(&prompt_failure_diagnostic(category, &error));
+    AcpError::internal_error().data(serde_json::json!({
+        "kind": category.kind(),
+        "message": category.message(),
+    }))
+}
+
 async fn run_prompt(
     entry: &SessionEntry,
     session_id: &str,
@@ -1386,7 +1505,7 @@ async fn run_prompt(
         let outcome = agent
             .execute_headless_command(command, &entry.config, &cancellation)
             .await
-            .map_err(|_| AcpError::internal_error().data("command execution failed"))?;
+            .map_err(report_prompt_failure)?;
         return match outcome {
             HeadlessCommandOutcome::Completed(text) => {
                 for chunk in utf8_chunks(&text, MAX_UPDATE_TEXT_BYTES) {
@@ -1433,7 +1552,7 @@ async fn run_prompt(
             &mut sink,
         )
         .await
-        .map_err(|_| AcpError::internal_error())
+        .map_err(report_prompt_failure)
 }
 
 async fn handle_client_response(
@@ -2213,6 +2332,89 @@ mod tests {
             .write_to(&mut bytes, format)
             .unwrap();
         STANDARD.encode(bytes.into_inner())
+    }
+
+    #[test]
+    fn prompt_failure_categories_are_specific() {
+        let cases = [
+            (
+                "failed to open lock file /private/.auth.json.lock: Read-only file system",
+                PromptFailureCategory::AuthenticationStorage,
+            ),
+            (
+                "OpenAI Codex token refresh returned 401 Unauthorized",
+                PromptFailureCategory::ProviderAuthentication,
+            ),
+            (
+                "provider did not respond within 30s",
+                PromptFailureCategory::ProviderTimeout,
+            ),
+            ("MCP request failed", PromptFailureCategory::Mcp),
+            (
+                "provider rejected model named mcp-helper",
+                PromptFailureCategory::AgentTurn,
+            ),
+            (
+                "unexpected provider failure",
+                PromptFailureCategory::AgentTurn,
+            ),
+        ];
+
+        for (detail, expected) in cases {
+            let error = anyhow::anyhow!(detail);
+            assert_eq!(prompt_failure_category(&error), expected);
+        }
+
+        let typed_auth = anyhow::Error::new(providers::ProviderFailure::Authentication {
+            message: "unusual provider-specific auth error".to_string(),
+        });
+        assert_eq!(
+            prompt_failure_category(&typed_auth),
+            PromptFailureCategory::ProviderAuthentication
+        );
+
+        let typed_storage = anyhow::Error::new(openai_codex::AuthenticationStorageFailure)
+            .context("failed to allocate random auth temporary file: Read-only file system");
+        assert_eq!(
+            prompt_failure_category(&typed_storage),
+            PromptFailureCategory::AuthenticationStorage
+        );
+
+        for message in [
+            "OpenAI Codex stream was idle for 90s",
+            "OpenAI provider response exceeded its 120s total body deadline",
+        ] {
+            let typed_timeout = anyhow::Error::new(providers::ProviderFailure::Timeout {
+                message: message.to_string(),
+            });
+            assert_eq!(
+                prompt_failure_category(&typed_timeout),
+                PromptFailureCategory::ProviderTimeout
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_failure_diagnostics_are_sanitized_redacted_and_bounded() {
+        let secret = "sk-proj-SENSITIVEVALUE123456789";
+        let jwt = "eyJabcdefghij.abcdefghijklmnop.qrstuvwxyz";
+        let detail = format!(
+            "line one\n\x1b]0;unsafe title\x07 api_key={secret} bearer {jwt} {}",
+            "x".repeat(8 * 1024)
+        );
+        let error = anyhow::anyhow!(detail);
+        let diagnostic = prompt_failure_diagnostic(PromptFailureCategory::AgentTurn, &error);
+
+        assert!(diagnostic.starts_with("[acp] prompt failed category=agent_turn: line one "));
+        assert!(diagnostic.contains("api_key=[redacted]"));
+        assert!(diagnostic.contains("Bearer [redacted]"));
+        assert!(diagnostic.len() <= MAX_PROMPT_FAILURE_DIAGNOSTIC_BYTES);
+        assert!(!diagnostic.contains(secret));
+        assert!(!diagnostic.contains(jwt));
+        assert!(!diagnostic.contains('\n'));
+        assert!(!diagnostic.contains('\r'));
+        assert!(!diagnostic.contains('\x1b'));
+        assert!(!diagnostic.contains("unsafe title"));
     }
 
     #[tokio::test]

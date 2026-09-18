@@ -453,6 +453,71 @@ fn acp_stdio_runs_client_stdio_mcp_with_isolated_environment_and_cleanup() {
 }
 
 #[test]
+fn acp_stdio_reports_prompt_failure_category_and_logs_cause() {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn(cwd.path(), Some("fail"));
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+    let private_prompt = "private prompt must not reach diagnostics";
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": private_prompt}]
+        }
+    }));
+    let failed = acp.recv();
+    assert_eq!(failed["error"]["code"], -32603);
+    assert_eq!(failed["error"]["data"]["kind"], "agent_turn");
+    assert_eq!(failed["error"]["data"]["message"], "agent turn failed");
+    assert!(!failed.to_string().contains(private_prompt));
+
+    let stderr = acp.finish();
+    assert!(stderr.contains("[acp] prompt failed category=agent_turn"));
+    assert!(stderr.contains("scripted fake provider failure"));
+    assert!(!stderr.contains(private_prompt));
+}
+
+#[test]
+fn acp_stdio_reports_command_prompt_failures_with_structured_data() {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn(cwd.path(), Some("fail"));
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "x".repeat(100_000)}]
+        }
+    }));
+    let failed_turn = acp.recv();
+    assert_eq!(failed_turn["error"]["data"]["kind"], "agent_turn");
+
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 4, "method": "session/prompt",
+        "params": {
+            "sessionId": session_id,
+            "prompt": [{"type": "text", "text": "/compact"}]
+        }
+    }));
+    let failed_command = acp.recv();
+    assert_eq!(failed_command["id"], 4);
+    assert_eq!(failed_command["error"]["code"], -32603);
+    assert_eq!(failed_command["error"]["data"]["kind"], "agent_turn");
+    assert_eq!(
+        failed_command["error"]["data"]["message"],
+        "agent turn failed"
+    );
+
+    let stderr = acp.finish();
+    assert!(stderr.contains("model compaction failed"));
+    assert!(stderr.contains("scripted fake provider failure"));
+}
+
+#[test]
 fn acp_stdio_disconnect_cleans_up_client_mcp_processes() {
     let cwd = tempfile::tempdir().unwrap();
     let (script, pid_file) = write_fake_mcp_server(cwd.path());

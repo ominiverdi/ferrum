@@ -30,6 +30,8 @@ pub enum ProviderFailure {
     ContextOverflow { message: String },
     #[error("{message}")]
     Authentication { message: String },
+    #[error("{message}")]
+    Timeout { message: String },
 }
 
 pub fn is_context_overflow_error(error: &anyhow::Error) -> bool {
@@ -47,6 +49,20 @@ pub fn is_authentication_error(error: &anyhow::Error) -> bool {
             cause.downcast_ref::<ProviderFailure>(),
             Some(ProviderFailure::Authentication { .. })
         )
+    })
+}
+
+pub fn is_timeout_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<ProviderFailure>(),
+            Some(ProviderFailure::Timeout { .. })
+        ) || matches!(
+            cause.downcast_ref::<transport::RetryableSseError>(),
+            Some(transport::RetryableSseError::Idle { .. })
+        ) || cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
     })
 }
 

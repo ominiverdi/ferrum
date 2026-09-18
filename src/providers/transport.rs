@@ -1,3 +1,4 @@
+use super::ProviderFailure;
 use crate::cancel::{self, WaitError};
 use anyhow::{Context, Result};
 use futures_util::{Stream, StreamExt, pin_mut};
@@ -64,10 +65,13 @@ where
     loop {
         let remaining = limits.total_timeout.saturating_sub(started.elapsed());
         if remaining.is_zero() {
-            anyhow::bail!(
-                "{label} exceeded its {}s total body deadline",
-                limits.total_timeout.as_secs_f64()
-            );
+            return Err(ProviderFailure::Timeout {
+                message: format!(
+                    "{label} exceeded its {}s total body deadline",
+                    limits.total_timeout.as_secs_f64()
+                ),
+            }
+            .into());
         }
         let wait = limits.idle_timeout.min(remaining);
         let next = cancel::race_timeout(stream.next(), cancelled, wait).await;
@@ -76,15 +80,23 @@ where
             Ok(None) => return Ok(body),
             Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
             Err(WaitError::TimedOut) if started.elapsed() >= limits.total_timeout => {
-                anyhow::bail!(
-                    "{label} exceeded its {}s total body deadline",
-                    limits.total_timeout.as_secs_f64()
-                )
+                return Err(ProviderFailure::Timeout {
+                    message: format!(
+                        "{label} exceeded its {}s total body deadline",
+                        limits.total_timeout.as_secs_f64()
+                    ),
+                }
+                .into());
             }
-            Err(WaitError::TimedOut) => anyhow::bail!(
-                "{label} was idle for {}s while reading the body",
-                limits.idle_timeout.as_secs_f64()
-            ),
+            Err(WaitError::TimedOut) => {
+                return Err(ProviderFailure::Timeout {
+                    message: format!(
+                        "{label} was idle for {}s while reading the body",
+                        limits.idle_timeout.as_secs_f64()
+                    ),
+                }
+                .into());
+            }
         };
         let chunk = chunk.as_ref();
         if body.len().saturating_add(chunk.len()) > limits.max_bytes {
@@ -402,6 +414,7 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("was idle"));
         assert!(error.downcast_ref::<RetryableSseError>().is_some());
+        assert!(super::super::is_timeout_error(&error));
     }
 
     #[tokio::test]
@@ -446,6 +459,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("total body deadline"));
+        assert!(super::super::is_timeout_error(&error));
     }
 
     #[tokio::test]
