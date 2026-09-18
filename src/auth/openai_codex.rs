@@ -14,6 +14,7 @@ use std::{
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -37,6 +38,20 @@ const MAX_AUTH_STORAGE_BYTES: usize = 1024 * 1024;
 const REFRESH_EARLY_MS: u128 = 5 * 60 * 1000;
 const SCOPE: &str = "openid profile email offline_access";
 const JWT_CLAIM_PATH: &str = "https://api.openai.com/auth";
+
+#[derive(Debug, Error)]
+#[error("authentication storage operation failed")]
+pub(crate) struct AuthenticationStorageFailure;
+
+pub(crate) fn is_authentication_storage_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<AuthenticationStorageFailure>()
+        .is_some()
+}
+
+fn storage_write_context<T>(result: Result<T>) -> Result<T> {
+    result.context(AuthenticationStorageFailure)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiCodexCredential {
@@ -193,8 +208,10 @@ fn prepare_auth_parent(path: &std::path::Path) -> Result<PathBuf> {
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    fs::create_dir_all(&parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
+    storage_write_context(
+        fs::create_dir_all(&parent)
+            .with_context(|| format!("failed to create {}", parent.display())),
+    )?;
     tighten_dir_permissions(&parent);
     Ok(parent)
 }
@@ -210,7 +227,7 @@ fn auth_lock_path(path: &std::path::Path) -> PathBuf {
 
 fn lock_auth_storage(path: &std::path::Path) -> Result<ExclusiveFileLock> {
     prepare_auth_parent(path)?;
-    ExclusiveFileLock::acquire(&auth_lock_path(path))
+    storage_write_context(ExclusiveFileLock::acquire(&auth_lock_path(path)))
 }
 
 async fn lock_auth_storage_async(path: PathBuf) -> Result<ExclusiveFileLock> {
@@ -238,7 +255,7 @@ fn save_unlocked(path: &std::path::Path, credential: &OpenAiCodexCredential) -> 
         .and_then(|name| name.to_str())
         .unwrap_or("auth.json");
 
-    let (temp_path, mut file) = (0..16)
+    let allocation = (0..16)
         .find_map(|_| {
             let candidate = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
             match OpenOptions::new()
@@ -252,22 +269,34 @@ fn save_unlocked(path: &std::path::Path, credential: &OpenAiCodexCredential) -> 
                 Err(error) => Some(Err(error)),
             }
         })
-        .transpose()?
-        .context("failed to allocate random auth temporary file")?;
+        .transpose()
+        .context("failed to allocate random auth temporary file")
+        .and_then(|allocation| allocation.context("failed to allocate random auth temporary file"));
+    let (temp_path, mut file) = storage_write_context(allocation)?;
     let mut temp_guard = AuthTempFile::new(temp_path.clone());
-    file.write_all(&text)
-        .with_context(|| format!("failed to write {}", temp_path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("failed to sync {}", temp_path.display()))?;
+    storage_write_context(
+        file.write_all(&text)
+            .with_context(|| format!("failed to write {}", temp_path.display())),
+    )?;
+    storage_write_context(
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", temp_path.display())),
+    )?;
     drop(file);
-    fs::rename(&temp_path, path)
-        .with_context(|| format!("failed to replace {}", path.display()))?;
+    storage_write_context(
+        fs::rename(&temp_path, path)
+            .with_context(|| format!("failed to replace {}", path.display())),
+    )?;
     temp_guard.disarm();
     tighten_file_permissions(path);
-    File::open(&parent)
-        .with_context(|| format!("failed to open {}", parent.display()))?
-        .sync_all()
-        .with_context(|| format!("failed to sync {}", parent.display()))?;
+    let parent_directory = storage_write_context(
+        File::open(&parent).with_context(|| format!("failed to open {}", parent.display())),
+    )?;
+    storage_write_context(
+        parent_directory
+            .sync_all()
+            .with_context(|| format!("failed to sync {}", parent.display())),
+    )?;
     Ok(())
 }
 
@@ -624,6 +653,18 @@ fn oauth_page(title: &str, heading: &str, message: &str, details: Option<&str>) 
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn authentication_storage_write_failures_are_typed() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocked_parent = temp.path().join("not-a-directory");
+        fs::write(&blocked_parent, "blocked").unwrap();
+
+        let error = save(blocked_parent.join("auth.json"), &test_credential()).unwrap_err();
+
+        assert!(is_authentication_storage_error(&error));
+        assert!(format!("{error:#}").contains("authentication storage operation failed"));
+    }
 
     #[test]
     fn save_tightens_existing_auth_file_permissions() {

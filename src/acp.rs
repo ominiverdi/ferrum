@@ -9,6 +9,7 @@ use crate::{
         messages::{self, ContentBlock as FerrumContentBlock, Role as FerrumRole},
         parse_headless_command, restore_session_preferences,
     },
+    auth::openai_codex,
     cli::AcpPermissionPolicy,
     config::Config,
     mcp, providers, session, terminal_text,
@@ -1404,8 +1405,9 @@ impl PromptFailureCategory {
 
 fn prompt_failure_category(error: &anyhow::Error) -> PromptFailureCategory {
     let detail = format!("{error:#}").to_ascii_lowercase();
-    if (detail.contains("auth.json") || detail.contains("authentication storage"))
-        && (detail.contains("read-only file system") || detail.contains("permission denied"))
+    if openai_codex::is_authentication_storage_error(error)
+        || ((detail.contains("auth.json") || detail.contains("authentication storage"))
+            && (detail.contains("read-only file system") || detail.contains("permission denied")))
     {
         PromptFailureCategory::AuthenticationStorage
     } else if providers::is_authentication_error(error)
@@ -1414,7 +1416,8 @@ fn prompt_failure_category(error: &anyhow::Error) -> PromptFailureCategory {
         || detail.contains("auth not found")
     {
         PromptFailureCategory::ProviderAuthentication
-    } else if detail.contains("did not respond")
+    } else if providers::is_timeout_error(error)
+        || detail.contains("did not respond")
         || detail.contains("request timed out")
         || detail.contains("operation timed out")
     {
@@ -1502,7 +1505,7 @@ async fn run_prompt(
         let outcome = agent
             .execute_headless_command(command, &entry.config, &cancellation)
             .await
-            .map_err(|_| AcpError::internal_error().data("command execution failed"))?;
+            .map_err(report_prompt_failure)?;
         return match outcome {
             HeadlessCommandOutcome::Completed(text) => {
                 for chunk in utf8_chunks(&text, MAX_UPDATE_TEXT_BYTES) {
@@ -2362,13 +2365,33 @@ mod tests {
             assert_eq!(prompt_failure_category(&error), expected);
         }
 
-        let typed = anyhow::Error::new(providers::ProviderFailure::Authentication {
+        let typed_auth = anyhow::Error::new(providers::ProviderFailure::Authentication {
             message: "unusual provider-specific auth error".to_string(),
         });
         assert_eq!(
-            prompt_failure_category(&typed),
+            prompt_failure_category(&typed_auth),
             PromptFailureCategory::ProviderAuthentication
         );
+
+        let typed_storage = anyhow::Error::new(openai_codex::AuthenticationStorageFailure)
+            .context("failed to allocate random auth temporary file: Read-only file system");
+        assert_eq!(
+            prompt_failure_category(&typed_storage),
+            PromptFailureCategory::AuthenticationStorage
+        );
+
+        for message in [
+            "OpenAI Codex stream was idle for 90s",
+            "OpenAI provider response exceeded its 120s total body deadline",
+        ] {
+            let typed_timeout = anyhow::Error::new(providers::ProviderFailure::Timeout {
+                message: message.to_string(),
+            });
+            assert_eq!(
+                prompt_failure_category(&typed_timeout),
+                PromptFailureCategory::ProviderTimeout
+            );
+        }
     }
 
     #[test]

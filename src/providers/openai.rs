@@ -45,6 +45,10 @@ const MAX_PROVIDER_FIELD_BYTES: usize = 16 * 1024;
 const MAX_PROVIDER_ERROR_DISPLAY_BYTES: usize = 8 * 1024;
 const MAX_PROVIDER_EVENTS: usize = 100_000;
 
+fn provider_timeout_error(message: String) -> anyhow::Error {
+    anyhow::Error::new(ProviderFailure::Timeout { message })
+}
+
 pub struct OpenAiCompatProvider {
     api_key_env: Option<String>,
     base_url: String,
@@ -362,10 +366,10 @@ impl Provider for OpenAiCompatProvider {
             .await
             .map_err(|error| match error {
                 WaitError::Cancelled => anyhow::anyhow!("aborted"),
-                WaitError::TimedOut => anyhow::anyhow!(
+                WaitError::TimedOut => provider_timeout_error(format!(
                     "OpenAI-compatible provider did not respond within {}s",
                     PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
-                ),
+                )),
             })?
             .context("OpenAI-compatible request failed")?;
 
@@ -398,10 +402,10 @@ impl Provider for OpenAiCompatProvider {
                     .await
                     .map_err(|error| match error {
                         WaitError::Cancelled => anyhow::anyhow!("aborted"),
-                        WaitError::TimedOut => anyhow::anyhow!(
+                        WaitError::TimedOut => provider_timeout_error(format!(
                             "OpenAI-compatible reasoning retry did not respond within {}s",
                             PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
-                        ),
+                        )),
                     })?
                     .context("OpenAI-compatible reasoning retry failed")?;
                     let retry_status = retry_response.status();
@@ -662,10 +666,10 @@ async fn send_openai_compat_stream_request(
     .await
     .map_err(|error| match error {
         WaitError::Cancelled => anyhow::anyhow!("aborted"),
-        WaitError::TimedOut => anyhow::anyhow!(
+        WaitError::TimedOut => provider_timeout_error(format!(
             "OpenAI-compatible provider did not respond within {}s",
             PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
-        ),
+        )),
     })?
     .context("OpenAI-compatible streaming request failed")
 }
@@ -948,10 +952,12 @@ async fn send_codex_request_with_retries(
         let response = match response {
             Ok(response) => response,
             Err(WaitError::Cancelled) => anyhow::bail!("aborted"),
-            Err(WaitError::TimedOut) => anyhow::bail!(
-                "OpenAI Codex did not respond within {}s; the request may have reached the provider, so Ferrum did not retry it",
-                PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
-            ),
+            Err(WaitError::TimedOut) => {
+                return Err(provider_timeout_error(format!(
+                    "OpenAI Codex did not respond within {}s; the request may have reached the provider, so Ferrum did not retry it",
+                    PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
+                )));
+            }
         };
         match response {
             Ok(response) if response.status().is_success() => return Ok(response),
