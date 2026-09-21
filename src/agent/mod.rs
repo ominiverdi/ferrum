@@ -1470,7 +1470,7 @@ async fn run_prompt_shortcut_command(
 fn implicit_fake_provider_notice(config: &Config) -> Option<String> {
     config.provider_is_implicit_fake.then(|| {
         format!(
-            "[setup] no provider configured; using the fake demo provider. Run `ferrum login --help` for OAuth providers, or define an OpenAI-compatible provider in {} (API keys use `api_key_env`, not literal config values).",
+            "[setup] no provider configured; using the fake demo provider. Run `ferrum login --help` for OAuth providers, or define an OpenAI-compatible provider in {} (API keys may use `api_key_env` or an inline `api_key`; environment variables are safer).",
             terminal_text::sanitize(&config.config_dir.join("config.toml").display().to_string())
         )
     })

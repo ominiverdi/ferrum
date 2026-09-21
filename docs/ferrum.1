@@ -366,8 +366,7 @@ default_model = \[dq]local-model\[dq]
 \f[R]
 .fi
 .PP
-Providers that require keys should use environment variables rather than
-hardcoded secrets:
+Providers that require keys should prefer environment variables:
 .IP
 .nf
 \f[C]
@@ -378,6 +377,12 @@ api_key_env = \[dq]EXAMPLE_API_KEY\[dq]
 default_model = \[dq]example-model\[dq]
 \f[R]
 .fi
+.PP
+Alternatively, set \f[V]api_key = \[dq]...\[dq]\f[R].
+The two key fields are mutually exclusive.
+Inline keys are plaintext in \f[B]config.toml\f[R]; never commit or
+share that file, and restrict it with
+\f[V]chmod 600 \[ti]/.config/ferrum/config.toml\f[R].
 .PP
 Ferrum supports a small semantic UI color palette.
 Set the color mode in \f[B]config.toml\f[R]:

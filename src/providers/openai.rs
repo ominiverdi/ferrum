@@ -12,7 +12,7 @@ use crate::{
     },
     auth::openai_codex,
     cancel::{self, WaitError},
-    config::ThinkingLevel,
+    config::{ApiKeySource, ThinkingLevel},
     terminal_text,
     text_truncate::truncate_to_max_bytes,
 };
@@ -21,7 +21,6 @@ use reqwest::{Client, Response, StatusCode, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
-    env,
     future::Future,
     path::{Path, PathBuf},
     pin::Pin,
@@ -50,7 +49,7 @@ fn provider_timeout_error(message: String) -> anyhow::Error {
 }
 
 pub struct OpenAiCompatProvider {
-    api_key_env: Option<String>,
+    api_key: Option<ApiKeySource>,
     base_url: String,
     streaming: bool,
     stream_usage: bool,
@@ -308,13 +307,13 @@ fn validate_field(value: &str, max_bytes: usize, field: &str) -> Result<()> {
 
 impl OpenAiCompatProvider {
     pub fn new(
-        api_key_env: Option<String>,
+        api_key: Option<ApiKeySource>,
         base_url: String,
         streaming: bool,
         stream_usage: bool,
     ) -> Result<Self> {
         Ok(Self {
-            api_key_env,
+            api_key,
             base_url: base_url.trim_end_matches('/').to_string(),
             streaming,
             stream_usage,
@@ -337,9 +336,9 @@ impl Provider for OpenAiCompatProvider {
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             let api_key = self
-                .api_key_env
+                .api_key
                 .as_ref()
-                .map(|name| env::var(name).with_context(|| format!("{name} is not set")))
+                .map(ApiKeySource::resolve)
                 .transpose()?;
             let reasoning_effort = thinking.as_openai();
             let request = ChatRequest {
@@ -491,9 +490,9 @@ impl Provider for OpenAiCompatProvider {
         }
         Box::pin(async move {
             let api_key = self
-                .api_key_env
+                .api_key
                 .as_ref()
-                .map(|name| env::var(name).with_context(|| format!("{name} is not set")))
+                .map(ApiKeySource::resolve)
                 .transpose()?;
             let mut response = send_openai_compat_stream_request(
                 self,
@@ -2642,6 +2641,7 @@ fn extract_responses_text(body: &serde_json::Value) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SecretString;
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use serde_json::json;
     use std::{
@@ -2665,6 +2665,34 @@ mod tests {
             reasoning: None,
             parallel_tool_calls: false,
         }
+    }
+
+    fn spawn_auth_server(
+        content_type: &'static str,
+        body: &'static [u8],
+    ) -> (String, thread::JoinHandle<bool>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut request = [0u8; 16 * 1024];
+            let bytes = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes]).to_ascii_lowercase();
+            let authorized = request.contains("authorization: bearer test-inline-key\r\n");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .unwrap();
+            stream.write_all(body).unwrap();
+            stream.flush().unwrap();
+            authorized
+        });
+        (format!("http://{address}"), handle)
     }
 
     fn spawn_stream_server(
@@ -3188,6 +3216,50 @@ data: {"type":"response.completed","response":{"output":[]}}
 
         assert_eq!(server.join().unwrap(), 2);
         assert_eq!(response.message.display_text(), "recovered");
+    }
+
+    #[tokio::test]
+    async fn inline_api_key_authenticates_buffered_and_streaming_completions() {
+        const BUFFERED_BODY: &[u8] =
+            br#"{"choices":[{"message":{"role":"assistant","content":"buffered"}}]}"#;
+        let (base_url, buffered_server) = spawn_auth_server("application/json", BUFFERED_BODY);
+        let provider = OpenAiCompatProvider::new(
+            Some(ApiKeySource::Inline(SecretString::new("test-inline-key"))),
+            base_url,
+            false,
+            false,
+        )
+        .unwrap();
+        let response = provider
+            .complete("test-model", &[], &[], ThinkingLevel::Off)
+            .await
+            .unwrap();
+        assert_eq!(response.message.display_text(), "buffered");
+        assert!(buffered_server.join().unwrap());
+
+        const STREAMING_BODY: &[u8] =
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"streamed\"}}]}\n\ndata: [DONE]\n\n";
+        let (base_url, streaming_server) = spawn_auth_server("text/event-stream", STREAMING_BODY);
+        let provider = OpenAiCompatProvider::new(
+            Some(ApiKeySource::Inline(SecretString::new("test-inline-key"))),
+            base_url,
+            true,
+            false,
+        )
+        .unwrap();
+        let response = provider
+            .complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::Off,
+                &mut |_| {},
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.message.display_text(), "streamed");
+        assert!(streaming_server.join().unwrap());
     }
 
     #[tokio::test]

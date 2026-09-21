@@ -180,11 +180,22 @@ Fields:
 
 - `type`: `openai-codex`, `openai-compatible`, or `fake`
 - `base_url`: provider endpoint
-- `api_key_env`: optional environment variable for `openai-compatible` providers; when omitted, Ferrum sends no `Authorization` header
+- `api_key_env`: optional environment variable containing the API key for `openai-compatible` providers
+- `api_key`: optional inline API key for `openai-compatible` providers; mutually exclusive with `api_key_env`
 - `default_model`: model selected when `/provider <name>` switches to this provider, and used at startup when top-level `model` is omitted
 - `streaming`: optional OpenAI-compatible streaming toggle; defaults to `true`
 - `stream_usage`: optional `stream_options.include_usage` toggle for OpenAI-compatible streaming; defaults to `true`
 - `allow_insecure_http`: explicit opt-in for sending credentials to a non-loopback `http://` base URL; defaults to `false`
+
+When both `api_key_env` and `api_key` are omitted, Ferrum sends no `Authorization` header. Inline keys are stored as plaintext in `config.toml`; environment variables are safer. Never commit or share a configuration containing an inline key, and restrict its permissions with `chmod 600 ~/.config/ferrum/config.toml`.
+
+```toml
+[providers.example-inline]
+type = "openai-compatible"
+base_url = "https://example.com/v1"
+api_key = "replace-with-provider-key"
+default_model = "example-model"
+```
 
 Authenticated provider URLs must use HTTPS unless the host is loopback or `allow_insecure_http = true` is set explicitly. Authless OpenAI-compatible endpoints may use remote HTTP, although HTTPS is still preferred.
 

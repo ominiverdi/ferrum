@@ -231,9 +231,7 @@ pub async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
             })
         }
         ProviderConfig::OpenAiCompat {
-            api_key_env,
-            base_url,
-            ..
+            api_key, base_url, ..
         } => {
             let url = format!("{}/models", base_url.trim_end_matches('/'));
             let mut request = Client::builder()
@@ -241,10 +239,8 @@ pub async fn list_models(config: &ProviderConfig) -> Result<ModelList> {
                 .redirect(Policy::none())
                 .build()?
                 .get(&url);
-            if let Some(api_key_env) = api_key_env {
-                let api_key = std::env::var(api_key_env)
-                    .with_context(|| format!("{} is not set", api_key_env))?;
-                request = request.bearer_auth(api_key);
+            if let Some(api_key) = api_key {
+                request = request.bearer_auth(api_key.resolve()?);
             }
             let response = request
                 .send()
@@ -460,12 +456,12 @@ pub fn from_config(config: &ProviderConfig) -> Result<Box<dyn Provider>> {
     match config {
         ProviderConfig::Fake => Ok(Box::new(fake::FakeProvider)),
         ProviderConfig::OpenAiCompat {
-            api_key_env,
+            api_key,
             base_url,
             streaming,
             stream_usage,
         } => Ok(Box::new(openai::OpenAiCompatProvider::new(
-            api_key_env.clone(),
+            api_key.clone(),
             base_url.clone(),
             *streaming,
             *stream_usage,
@@ -483,6 +479,48 @@ pub fn from_config(config: &ProviderConfig) -> Result<Box<dyn Provider>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ApiKeySource, SecretString};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+        time::Duration,
+    };
+
+    #[tokio::test]
+    async fn inline_api_key_authenticates_model_listing() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut request = [0u8; 16 * 1024];
+            let bytes = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes]).to_ascii_lowercase();
+            let authorized = request.contains("authorization: bearer test-inline-key\r\n");
+            let body = r#"{"data":[{"id":"test-model"}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            stream.flush().unwrap();
+            authorized
+        });
+        let config = ProviderConfig::OpenAiCompat {
+            api_key: Some(ApiKeySource::Inline(SecretString::new("test-inline-key"))),
+            base_url: format!("http://{address}"),
+            streaming: true,
+            stream_usage: true,
+        };
+
+        let ModelList::Live { models, .. } = list_models(&config).await.unwrap();
+        assert_eq!(models, vec!["test-model"]);
+        assert!(handle.join().unwrap());
+    }
 
     #[test]
     fn accepts_codex_release_name_and_tag_versions() {

@@ -283,8 +283,7 @@ base_url = "http://localhost:8080"
 default_model = "local-model"
 ```
 
-Providers that require keys should use environment variables rather than
-hardcoded secrets:
+Providers that require keys should prefer environment variables:
 
 ```toml
 [providers.example]
@@ -293,6 +292,10 @@ base_url = "https://api.example.com/v1"
 api_key_env = "EXAMPLE_API_KEY"
 default_model = "example-model"
 ```
+
+Alternatively, set `api_key = "..."`. The two key fields are mutually
+exclusive. Inline keys are plaintext in **config.toml**; never commit or share
+that file, and restrict it with `chmod 600 ~/.config/ferrum/config.toml`.
 
 Ferrum supports a small semantic UI color palette. Set the color mode in
 **config.toml**:

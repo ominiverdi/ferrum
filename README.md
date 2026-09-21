@@ -180,6 +180,8 @@ actual_model = "gpt-5.5"
 max_context_tokens = 6000
 ```
 
+OpenAI-compatible providers may use `api_key = "..."` instead of `api_key_env`, but the two fields are mutually exclusive. Inline keys are plaintext in `config.toml`; environment variables are safer. Never commit or share a configuration containing an inline key, and restrict its permissions with `chmod 600 ~/.config/ferrum/config.toml`.
+
 Login for ChatGPT/Codex OAuth:
 
 ```bash

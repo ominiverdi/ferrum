@@ -1,16 +1,17 @@
 use crate::{atomic_file, ui_colors::ColorPalette};
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use std::{
     collections::BTreeMap,
     collections::BTreeSet,
-    env, fs,
+    env, fmt, fs,
     path::{Path, PathBuf},
 };
 use toml_edit::{DocumentMut, InlineTable, Item, Table, Value, value};
 
 pub const OPENAI_CODEX_PROVIDER_NAME: &str = "openai-codex";
 pub(crate) const MAX_LOGIN_MODEL_BYTES: usize = 256;
+const MAX_INLINE_API_KEY_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -222,11 +223,55 @@ impl ThinkingLevel {
     }
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub(crate) fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl Serialize for SecretString {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str("[REDACTED]")
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ApiKeySource {
+    Environment(String),
+    Inline(SecretString),
+}
+
+impl ApiKeySource {
+    pub(crate) fn resolve(&self) -> Result<String> {
+        match self {
+            Self::Environment(name) => env::var(name).with_context(|| format!("{name} is not set")),
+            Self::Inline(value) => Ok(value.expose().to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProviderConfig {
     Fake,
     OpenAiCompat {
-        api_key_env: Option<String>,
+        api_key: Option<ApiKeySource>,
         base_url: String,
         streaming: bool,
         stream_usage: bool,
@@ -243,6 +288,7 @@ pub struct ProviderDefinition {
     pub kind: String,
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
+    pub api_key: Option<SecretString>,
     pub default_model: Option<String>,
     pub streaming: Option<bool>,
     pub stream_usage: Option<bool>,
@@ -344,6 +390,42 @@ impl Default for ProjectSkillsConfig {
     }
 }
 
+fn source_contains_inline_api_key(source: &str) -> bool {
+    source.lines().any(|line| {
+        let Some((key, _)) = line.split_once('=') else {
+            return false;
+        };
+        matches!(
+            key.trim().rsplit('.').next().map(str::trim),
+            Some("api_key" | "\"api_key\"" | "'api_key'")
+        )
+    })
+}
+
+fn safe_toml_error(error: &toml::de::Error, source: &str) -> String {
+    let message = if source_contains_inline_api_key(source) {
+        "invalid TOML configuration containing an inline API key"
+    } else {
+        error.message()
+    };
+    let Some(span) = error.span() else {
+        return message.to_string();
+    };
+    let mut offset = span.start.min(source.len());
+    while !source.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let before = &source[..offset];
+    let line = before.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let column = before
+        .rsplit_once('\n')
+        .map_or(before, |(_, current_line)| current_line)
+        .chars()
+        .count()
+        + 1;
+    format!("{message} at line {line}, column {column}")
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct ProjectMcpConfig {
@@ -379,7 +461,13 @@ impl Config {
         let file_config: FileConfig = if file.exists() {
             let text = fs::read_to_string(&file)
                 .with_context(|| format!("failed to read {}", file.display()))?;
-            toml::from_str(&text).with_context(|| format!("failed to parse {}", file.display()))?
+            toml::from_str(&text).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to parse {}: {}",
+                    file.display(),
+                    safe_toml_error(&error, &text)
+                )
+            })?
         } else {
             FileConfig::default()
         };
@@ -857,10 +945,11 @@ impl Config {
 
         let rendered = configure_openai_codex_document(&text, model)
             .with_context(|| format!("failed to update {}", path.display()))?;
-        toml::from_str::<FileConfig>(&rendered).with_context(|| {
-            format!(
-                "automatic provider setup produced invalid {}",
-                path.display()
+        toml::from_str::<FileConfig>(&rendered).map_err(|error| {
+            anyhow::anyhow!(
+                "automatic provider setup produced invalid {}: {}",
+                path.display(),
+                safe_toml_error(&error, &rendered)
             )
         })?;
         atomic_file::replace(&path, rendered.as_bytes(), expected)
@@ -1063,6 +1152,7 @@ fn default_openai_codex_definition() -> ProviderDefinition {
         kind: "openai-codex".to_string(),
         base_url: None,
         api_key_env: None,
+        api_key: None,
         default_model: None,
         streaming: None,
         stream_usage: None,
@@ -1143,6 +1233,29 @@ fn resolve_provider(
     legacy_provider_from_name(name, config_dir)
 }
 
+fn provider_api_key(name: &str, definition: &ProviderDefinition) -> Result<Option<ApiKeySource>> {
+    match (&definition.api_key_env, &definition.api_key) {
+        (Some(_), Some(_)) => anyhow::bail!(
+            "providers.{name}.api_key and providers.{name}.api_key_env are mutually exclusive"
+        ),
+        (Some(environment), None) => Ok(Some(ApiKeySource::Environment(environment.clone()))),
+        (None, Some(value)) => {
+            let value = value.expose();
+            if value.is_empty() {
+                anyhow::bail!("providers.{name}.api_key cannot be empty");
+            }
+            if value.len() > MAX_INLINE_API_KEY_BYTES {
+                anyhow::bail!("providers.{name}.api_key exceeds {MAX_INLINE_API_KEY_BYTES} bytes");
+            }
+            if value.chars().any(char::is_control) {
+                anyhow::bail!("providers.{name}.api_key cannot contain control characters");
+            }
+            Ok(Some(ApiKeySource::Inline(SecretString::new(value))))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 fn provider_from_definition(
     name: &str,
     definition: &ProviderDefinition,
@@ -1155,14 +1268,15 @@ fn provider_from_definition(
                 .base_url
                 .clone()
                 .with_context(|| format!("providers.{name}.base_url is required"))?;
+            let api_key = provider_api_key(name, definition)?;
             validate_provider_base_url(
                 name,
                 &base_url,
-                definition.api_key_env.is_some(),
+                api_key.is_some(),
                 definition.allow_insecure_http,
             )?;
             Ok(ProviderConfig::OpenAiCompat {
-                api_key_env: definition.api_key_env.clone(),
+                api_key,
                 base_url,
                 streaming: definition.streaming.unwrap_or(true),
                 stream_usage: definition.stream_usage.unwrap_or(true),
@@ -1191,7 +1305,7 @@ fn legacy_provider_from_name(name: &str, config_dir: &std::path::Path) -> Result
                 .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
             validate_provider_base_url(name, &base_url, true, false)?;
             Ok(ProviderConfig::OpenAiCompat {
-                api_key_env: Some("OPENAI_API_KEY".to_string()),
+                api_key: Some(ApiKeySource::Environment("OPENAI_API_KEY".to_string())),
                 base_url,
                 streaming: true,
                 stream_usage: true,
@@ -1694,11 +1808,93 @@ writable_roots = [".", "/tmp/ferrum-output"]
     }
 
     #[test]
+    fn inline_provider_api_key_loads_and_debug_output_is_redacted() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "inline"
+model = "test-model"
+
+[providers.inline]
+type = "openai-compatible"
+base_url = "https://example.test/v1"
+api_key = "test-inline-key"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let ProviderConfig::OpenAiCompat {
+            api_key: Some(ApiKeySource::Inline(api_key)),
+            ..
+        } = &config.provider
+        else {
+            panic!("missing inline API key");
+        };
+        assert_eq!(api_key.expose(), "test-inline-key");
+        assert!(!format!("{config:?}").contains("test-inline-key"));
+        assert!(
+            !serde_json::to_string(&config)
+                .unwrap()
+                .contains("test-inline-key")
+        );
+    }
+
+    #[test]
+    fn malformed_inline_api_key_is_redacted_from_parse_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "inline"
+model = "test-model"
+
+[providers.inline]
+type = "openai-compatible"
+base_url = "https://example.test/v1"
+api_key = "test-inline-key
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load_from_dir(dir.path().to_path_buf()).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("invalid TOML configuration"));
+        assert!(!message.contains("test-inline-key"));
+    }
+
+    #[test]
+    fn inline_and_environment_provider_api_keys_are_mutually_exclusive() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "conflict"
+model = "test-model"
+
+[providers.conflict]
+type = "openai-compatible"
+base_url = "https://example.test/v1"
+api_key_env = "EXAMPLE_API_KEY"
+api_key = "test-inline-key"
+"#,
+        )
+        .unwrap();
+
+        let error = Config::load_from_dir(dir.path().to_path_buf()).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("mutually exclusive"));
+        assert!(!message.contains("test-inline-key"));
+    }
+
+    #[test]
     fn rejects_authenticated_remote_cleartext_provider_by_default() {
         let definition = ProviderDefinition {
             kind: "openai-compatible".to_string(),
             base_url: Some("http://example.com/v1".to_string()),
             api_key_env: Some("EXAMPLE_API_KEY".to_string()),
+            api_key: None,
             default_model: None,
             streaming: None,
             stream_usage: None,
@@ -1711,6 +1907,18 @@ writable_roots = [".", "/tmp/ferrum-output"]
         )
         .unwrap_err();
         assert!(error.to_string().contains("cleartext HTTP"));
+
+        let mut inline_definition = definition;
+        inline_definition.api_key_env = None;
+        inline_definition.api_key = Some(SecretString::new("test-inline-key"));
+        let error = provider_from_definition(
+            "remote",
+            &inline_definition,
+            std::path::Path::new("/tmp/ferrum-config-test"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cleartext HTTP"));
+        assert!(!error.to_string().contains("test-inline-key"));
     }
 
     #[test]
@@ -1719,6 +1927,7 @@ writable_roots = [".", "/tmp/ferrum-output"]
             kind: "openai-compatible".to_string(),
             base_url: Some("http://127.0.0.1:8080/v1".to_string()),
             api_key_env: Some("EXAMPLE_API_KEY".to_string()),
+            api_key: None,
             default_model: None,
             streaming: None,
             stream_usage: None,
