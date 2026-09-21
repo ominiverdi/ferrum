@@ -119,7 +119,7 @@ Session resume:
 - `/model` queries the active provider before opening its picker and caches the returned model IDs for argument completion.
 - `/provider` includes a `providerless` entry when configured model aliases omit `provider`; selecting it opens those aliases in a nested picker.
 - `/palettes`, `/thinking`, `/safety`, `/diff`, and `/colors` provide numbered pickers for their respective resources.
-- Picker text filters labels and descriptions. Esc returns to the interactive prompt without changing state.
+- Pickers move the highlight with Up/Down and select it with Enter. A digits-only query selects that displayed number without filtering; any other query filters labels and descriptions live. Esc returns to the interactive prompt without changing state.
 
 ## Configuration
 
