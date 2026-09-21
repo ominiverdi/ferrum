@@ -63,6 +63,7 @@ Behavior:
 - Alt+S, Alt+P, and Alt+M open the `/sessions`, `/provider`, and `/model` pickers while preserving the current draft and cursor position.
 - Alt+C runs `/compact`; Alt+T and Alt+D open the `/thinking` and `/diff` pickers; Alt+G shows the current `/goal`. The current draft and cursor position are preserved.
 - Input beginning with `/` in column zero is always handled locally. Unknown slash commands never reach the provider. Leading whitespace escapes slash-command handling and is removed before the prompt is sent.
+- `/perf` reports the last completed turn's process-local model timings. `/perf on|off` toggles automatic summaries, and `--perf` enables them at startup. Print-mode summaries use stderr.
 
 Slash commands:
 
@@ -80,6 +81,7 @@ Slash commands:
 - `/model [name]`
 - `/login <openai|openai-codex>`
 - `/usage [day|week|month]`
+- `/perf [on|off]`
 - `/provider [name]`
 - `/mcp [on|off|status|list]`
 - `/colors [auto|on|off]`

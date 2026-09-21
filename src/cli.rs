@@ -28,6 +28,10 @@ pub struct Args {
     #[arg(long)]
     pub title: Option<String>,
 
+    /// Print model performance after each completed turn
+    #[arg(long)]
+    pub perf: bool,
+
     /// Attach a local image file to the prompt. Repeatable. Supports png, jpg, jpeg, webp.
     #[arg(long = "image", value_name = "PATH")]
     pub images: Vec<String>,
@@ -218,6 +222,12 @@ mod tests {
     fn parses_title_flag() {
         let args = Args::try_parse_from(["ferrum", "--title", "Issue triage", "-p", "hi"]).unwrap();
         assert_eq!(args.title.as_deref(), Some("Issue triage"));
+    }
+
+    #[test]
+    fn parses_perf_flag() {
+        let args = Args::try_parse_from(["ferrum", "--perf", "-p", "hi"]).unwrap();
+        assert!(args.perf);
     }
 
     #[test]

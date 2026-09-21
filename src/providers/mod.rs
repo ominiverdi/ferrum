@@ -70,9 +70,14 @@ pub fn is_timeout_error(error: &anyhow::Error) -> bool {
 pub enum StreamEvent {
     ThinkingDelta(String),
     TextDelta(String),
+    OutputActivity,
 }
 
 pub trait Provider: Send + Sync {
+    fn supports_live_streaming(&self) -> bool {
+        false
+    }
+
     fn complete<'a>(
         &'a self,
         model: &'a str,

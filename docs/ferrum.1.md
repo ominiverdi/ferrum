@@ -96,6 +96,9 @@ prompt.
 **--title** TITLE
 : Set the session title.
 
+**--perf**
+: Print a compact model-performance summary to stderr after each completed turn. This keeps print-mode stdout pipe-safe.
+
 **--image** PATH
 : Attach a local image file. Repeatable. Supported formats are png, jpg, jpeg,
 and webp. Images are decoded under bounded validation; per-turn and retained-session count and byte limits apply.
@@ -218,6 +221,9 @@ Common slash commands:
 
 **/usage** [day|week|month]
 : Show token usage summary.
+
+**/perf** [on|off]
+: Show model performance for the last completed turn, or toggle automatic summaries for the current process. TTFT is measured to the first non-empty streamed model output, and throughput covers the interval from first output to request completion. Non-streaming values are shown as `n/a`; estimated token counts and rates use a `~` prefix.
 
 **/skills**
 : List discovered skills.

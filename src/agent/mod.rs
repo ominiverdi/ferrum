@@ -1,5 +1,6 @@
 pub mod events;
 pub mod messages;
+mod performance;
 pub mod tools;
 
 use crate::{
@@ -17,6 +18,7 @@ use crossterm::{
 };
 use events::{AgentEvent, AgentEventSink, ModelRequestKind, NoticeKind, TurnOptions, TurnOutcome};
 use futures_util::{StreamExt, stream};
+use performance::{ModelPerformanceTimer, TurnPerformance, TurnPerformanceRecorder};
 use rustyline::{
     Cmd, ConditionalEventHandler, Editor, Event as ReadlineEvent, EventContext, EventHandler,
     Helper, KeyEvent as ReadlineKeyEvent, RepeatCount,
@@ -268,6 +270,10 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, usage_words())));
         }
+        if let Some(prefix) = command_before.strip_prefix("/perf ") {
+            let start = pos - prefix.len();
+            return Ok((start, complete_from_words(prefix, perf_words())));
+        }
         if command_before.starts_with('/') && !command_before.chars().any(char::is_whitespace) {
             let start = leading_spaces + command_before.rfind('/').unwrap_or(0);
             return Ok((
@@ -298,6 +304,7 @@ impl FerrumLineHelper {
         command_hints.insert("/diff", " unified|compact|full|words|side_by_side");
         command_hints.insert("/mcp", " on|off|status|list");
         command_hints.insert("/usage", " day|week|month");
+        command_hints.insert("/perf", " [on|off]");
         let skill_names = skill_command_words(skills);
         let model_names = model_command_words(config);
         let provider_names = provider_command_words(config);
@@ -357,6 +364,7 @@ fn slash_command_words() -> &'static [&'static str] {
         "/diff",
         "/image",
         "/usage",
+        "/perf",
         "/compact",
     ]
 }
@@ -471,6 +479,10 @@ fn mcp_words() -> &'static [&'static str] {
 
 fn usage_words() -> &'static [&'static str] {
     &["day", "week", "month"]
+}
+
+fn perf_words() -> &'static [&'static str] {
+    &["on", "off"]
 }
 
 fn thinking_picker_items(current: ThinkingLevel) -> Vec<PickerItem<String>> {
@@ -920,6 +932,7 @@ pub async fn run_print(
     images: Vec<String>,
     session_ref: Option<&str>,
     title: Option<&str>,
+    perf: bool,
     config: &Config,
 ) -> Result<()> {
     let mut effective_config = config.clone();
@@ -928,6 +941,7 @@ pub async fn run_print(
     } else {
         AgentSession::new_print(&effective_config)?
     };
+    state.perf_enabled = perf;
     print_implicit_fake_provider_notice(&effective_config);
     if let Some(title) = title {
         state.set_title(title)?;
@@ -950,6 +964,7 @@ pub async fn run_interactive(
     tools_overridden: bool,
     provider_overridden: bool,
     model_overridden: bool,
+    perf: bool,
 ) -> Result<()> {
     let show_resume_tail = session_ref.is_some() || resume.is_some() || continue_latest;
     let mut state = match (session_ref, resume, continue_latest) {
@@ -982,6 +997,7 @@ pub async fn run_interactive(
         )?,
         (None, None, false) => AgentSession::new(config)?,
     };
+    state.perf_enabled = perf;
     print_implicit_fake_provider_notice(config);
     if let Some(title) = title {
         state.set_title(title)?;
@@ -1512,7 +1528,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions all\n- /sessions del\n- /sessions new\n- /model [name]\n- /usage [day|week|month]\n- /provider [name]\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions all\n- /sessions del\n- /sessions new\n- /model [name]\n- /usage [day|week|month]\n- /perf [on|off]\n- /provider [name]\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -1921,10 +1937,13 @@ impl AgentEventSink for TerminalAgentEventSink {
             }
             AgentEvent::ModelRequestStarted { request, kind } => {
                 let _ = self.finish_live_render()?;
-                self.live_render = Some(LiveRenderState::new(self.color_mode, self.colors.clone()));
-                if self.interactive && request > 1 && matches!(kind, ModelRequestKind::Agent) {
-                    render_turn_separator(self.color_mode, &self.colors);
-                    io::stdout().flush()?;
+                if self.interactive {
+                    self.live_render =
+                        Some(LiveRenderState::new(self.color_mode, self.colors.clone()));
+                    if request > 1 && matches!(kind, ModelRequestKind::Agent) {
+                        render_turn_separator(self.color_mode, &self.colors);
+                        io::stdout().flush()?;
+                    }
                 }
             }
             AgentEvent::ThinkingDelta(delta) => {
@@ -2069,6 +2088,7 @@ impl LiveRenderState {
                     )?;
                 }
             }
+            providers::StreamEvent::OutputActivity => {}
         }
         Ok(())
     }
@@ -2800,6 +2820,8 @@ pub(crate) struct AgentSession {
     active_tool_names: HashSet<String>,
     saved_tool_names: Option<Vec<String>>,
     last_context_warning_bucket: Option<usize>,
+    perf_enabled: bool,
+    last_performance: Option<TurnPerformance>,
 }
 
 impl AgentSession {
@@ -2871,6 +2893,8 @@ impl AgentSession {
             active_tool_names: HashSet::new(),
             saved_tool_names: None,
             last_context_warning_bucket: None,
+            perf_enabled: false,
+            last_performance: None,
         })
     }
 
@@ -3026,19 +3050,31 @@ impl AgentSession {
             active_tool_names: HashSet::new(),
             saved_tool_names,
             last_context_warning_bucket: None,
+            perf_enabled: false,
+            last_performance: None,
         })
     }
 
     async fn run_turn(&mut self, prompt: String, config: &Config, interactive: bool) -> Result<()> {
-        let options = TurnOptions::terminal(interactive);
+        let mut options = TurnOptions::terminal(interactive);
+        if self.perf_enabled {
+            options.stream_responses = true;
+        }
         let mut sink = TerminalAgentEventSink::new(
             interactive,
             self.color_mode,
             self.colors.clone(),
             self.diff_mode,
         );
-        self.run_turn_with_events(prompt, config, options, &mut sink)
+        let outcome = self
+            .run_turn_with_events(prompt, config, options, &mut sink)
             .await?;
+        if self.perf_enabled
+            && matches!(outcome, TurnOutcome::Completed)
+            && let Some(performance) = &self.last_performance
+        {
+            eprintln!("{}", performance.compact_summary());
+        }
         Ok(())
     }
 
@@ -3088,8 +3124,12 @@ impl AgentSession {
         }
         let mut turn_images = std::mem::take(&mut self.pending_images);
         turn_images.extend(images);
-        match self
-            .run_turn_inner(prompt, turn_images, config, options, sink)
+        let mut performance = TurnPerformanceRecorder::start(
+            config.provider_name.clone(),
+            config.provider_model.clone(),
+        );
+        let result = match self
+            .run_turn_inner(prompt, turn_images, config, options, sink, &mut performance)
             .await
         {
             Err(error) if error.to_string() == "aborted" => {
@@ -3097,7 +3137,11 @@ impl AgentSession {
                 Ok(TurnOutcome::Cancelled)
             }
             result => result,
+        };
+        if matches!(result, Ok(TurnOutcome::Completed)) {
+            self.last_performance = Some(performance.finish());
         }
+        result
     }
 
     async fn run_turn_inner(
@@ -3107,6 +3151,7 @@ impl AgentSession {
         config: &Config,
         options: TurnOptions,
         sink: &mut dyn AgentEventSink,
+        performance: &mut TurnPerformanceRecorder,
     ) -> Result<TurnOutcome> {
         let user = if images.is_empty() {
             messages::Message::text(messages::Role::User, prompt)
@@ -3172,7 +3217,9 @@ impl AgentSession {
             if metrics_enabled {
                 emit_model_metrics_start(model_request_index, provider_messages, &tools);
             }
-            let started = Instant::now();
+            let mut performance_timer = ModelPerformanceTimer::start(
+                options.stream_responses && provider.supports_live_streaming(),
+            );
             let mut event_error = None;
             let event_cancel = Arc::clone(&turn_cancel);
             let mut thinking_sanitizer = messages::ThinkingSanitizer::default();
@@ -3181,11 +3228,13 @@ impl AgentSession {
                     if event_error.is_some() {
                         return;
                     }
+                    performance_timer.observe(&event);
                     let event = match event {
                         providers::StreamEvent::ThinkingDelta(delta) => {
                             AgentEvent::ThinkingDelta(thinking_sanitizer.push(&delta))
                         }
                         providers::StreamEvent::TextDelta(delta) => AgentEvent::TextDelta(delta),
+                        providers::StreamEvent::OutputActivity => return,
                     };
                     if let Err(error) = sink.emit(event) {
                         event_cancel.store(true, Ordering::Release);
@@ -3305,11 +3354,16 @@ impl AgentSession {
             if metrics_enabled {
                 emit_model_metrics_end(
                     model_request_index,
-                    started.elapsed(),
+                    performance_timer.elapsed(),
                     &response,
                     turn_tool_calls,
                 );
             }
+            performance.record(performance_timer.finish(
+                model_request_index,
+                ModelRequestKind::Agent,
+                &token_usage,
+            ));
             sink.emit(AgentEvent::AssistantMessage {
                 message: response.clone(),
             })?;
@@ -3412,7 +3466,7 @@ impl AgentSession {
         let mut final_messages = self.messages.clone();
         final_messages.push(final_instruction.clone());
         let mut final_overflow_recovery_attempted = overflow_recovery_attempted;
-        let final_response = loop {
+        let (final_response, final_performance_timer) = loop {
             model_request_index += 1;
             sink.emit(AgentEvent::ModelRequestStarted {
                 request: model_request_index,
@@ -3421,7 +3475,9 @@ impl AgentSession {
             if metrics_enabled {
                 emit_model_metrics_start(model_request_index, &final_messages, &[]);
             }
-            let started = Instant::now();
+            let mut performance_timer = ModelPerformanceTimer::start(
+                options.stream_responses && provider.supports_live_streaming(),
+            );
             let mut abort = ActiveTurnAbort::start_with_token(
                 options.monitor_terminal_cancel,
                 Arc::clone(&turn_cancel),
@@ -3434,11 +3490,13 @@ impl AgentSession {
                     if event_error.is_some() {
                         return;
                     }
+                    performance_timer.observe(&event);
                     let event = match event {
                         providers::StreamEvent::ThinkingDelta(delta) => {
                             AgentEvent::ThinkingDelta(thinking_sanitizer.push(&delta))
                         }
                         providers::StreamEvent::TextDelta(delta) => AgentEvent::TextDelta(delta),
+                        providers::StreamEvent::OutputActivity => return,
                     };
                     if let Err(error) = sink.emit(event) {
                         event_cancel.store(true, Ordering::Release);
@@ -3492,12 +3550,12 @@ impl AgentSession {
                             .saturating_add(model_tool_call_count(&response.message));
                         emit_model_metrics_end(
                             model_request_index,
-                            started.elapsed(),
+                            performance_timer.elapsed(),
                             &response.message,
                             final_turn_tool_calls,
                         );
                     }
-                    break response;
+                    break (response, performance_timer);
                 }
                 Err(error) if error.to_string() == "aborted" => {
                     sink.emit(AgentEvent::TurnCancelled)?;
@@ -3558,6 +3616,11 @@ impl AgentSession {
         if final_response.usage.is_none() {
             final_response.usage = Some(token_usage.clone());
         }
+        performance.record(final_performance_timer.finish(
+            model_request_index,
+            ModelRequestKind::FinalSynthesis,
+            &token_usage,
+        ));
         if let Some(message) = append_usage_record_with_warning(
             &config.data_dir,
             &usage::UsageRecord {
@@ -4437,6 +4500,7 @@ impl AgentSession {
         let _restored_tools =
             restore_session_preferences(&mut candidate, &path, true, true, true, true, true)?;
         let mut next = Self::open_session(&candidate, path)?;
+        next.perf_enabled = self.perf_enabled;
         self.checkpoint_session()?;
         next.promote_to_interactive()?;
         *self = next;
@@ -4465,7 +4529,8 @@ impl AgentSession {
     }
 
     fn new_session(&mut self, config: &Config) -> Result<()> {
-        let next = Self::new(config)?;
+        let mut next = Self::new(config)?;
+        next.perf_enabled = self.perf_enabled;
         self.checkpoint_session()?;
         println!("started new session {}", next.session.path().display());
         *self = next;
@@ -5745,6 +5810,7 @@ mod context_pressure_tests {
                 .any(|candidate| candidate.replacement == "catppuccin")
         );
         assert_completion(&helper, &ctx, "/mcp l", "list");
+        assert_completion(&helper, &ctx, "/perf on", "on");
         assert_completion(&helper, &ctx, "/login openai-c", "openai-codex");
     }
 
@@ -6126,6 +6192,7 @@ mod context_pressure_tests {
             "/skill <name> [args]",
             "/skill:<name> [args]",
             "/usage [day|week|month]",
+            "/perf [on|off]",
             "/mcp [on|off|status|list]",
             "/colors [auto|on|off]",
             "/palette [name]",
@@ -7594,6 +7661,57 @@ mod context_pressure_tests {
                 Some(SessionMode::Interactive)
             );
         }
+    }
+
+    #[test]
+    fn perf_command_toggles_runtime_display_across_new_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentSession::new(&config).unwrap();
+
+        assert!(!state.perf_enabled);
+        assert!(matches!(
+            handle_command("/perf on", &mut config, &mut state).unwrap(),
+            CommandAction::Continue
+        ));
+        assert!(state.perf_enabled);
+        handle_command("/new", &mut config, &mut state).unwrap();
+        assert!(state.perf_enabled);
+        handle_command("/perf off", &mut config, &mut state).unwrap();
+        assert!(!state.perf_enabled);
+        assert!(handle_command("/perf sometimes", &mut config, &mut state).is_err());
+    }
+
+    #[tokio::test]
+    async fn completed_turn_records_runtime_performance() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        config.max_context_tokens = 100_000;
+        config.base_max_context_tokens = 100_000;
+        let mut state = AgentSession::new(&config).unwrap();
+        let mut sink = events::IgnoreAgentEvents;
+
+        let outcome = state
+            .run_turn_with_events(
+                "hello".to_string(),
+                &config,
+                TurnOptions::headless(events::TurnCancellation::new()),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, TurnOutcome::Completed);
+        let summary = state
+            .last_performance
+            .as_ref()
+            .expect("missing turn performance")
+            .detailed_summary();
+        assert!(summary.contains("provider: fake"));
+        assert!(summary.contains("model: actual-model"));
+        assert!(summary.contains("completed_requests: 1"));
+        assert!(summary.contains("ttft n/a"));
+        assert!(summary.contains("(estimated)"));
     }
 
     #[test]
@@ -9596,6 +9714,7 @@ fn handle_command(
             println!("  /model [name]         choose model or set directly");
             println!("  /login <provider>     authenticate: openai|openai-codex");
             println!("  /usage [period]       show token usage: day|week|month");
+            println!("  /perf [on|off]       show last turn performance or toggle summaries");
             println!("  /provider [name]      choose provider or set directly");
             println!("  /mcp [on|off|status|list] show or toggle MCP tools");
             println!("  /colors [mode]        choose or set colors: auto|on|off");
@@ -9795,6 +9914,33 @@ fn handle_command(
             }
             let rows = usage::summarize_usage(&config.data_dir, period, usage::now_unix())?;
             print_usage_summary(period, &rows);
+            Ok(CommandAction::Continue)
+        }
+        "/perf" => {
+            match parts.next() {
+                None => match &state.last_performance {
+                    Some(performance) => println!(
+                        "{}",
+                        terminal_text::sanitize(&performance.detailed_summary())
+                    ),
+                    None => println!("performance: no completed turn recorded"),
+                },
+                Some("on") => {
+                    if let Some(extra) = parts.next() {
+                        anyhow::bail!("usage: /perf [on|off], got extra argument: {extra}");
+                    }
+                    state.perf_enabled = true;
+                    println!("performance display: on");
+                }
+                Some("off") => {
+                    if let Some(extra) = parts.next() {
+                        anyhow::bail!("usage: /perf [on|off], got extra argument: {extra}");
+                    }
+                    state.perf_enabled = false;
+                    println!("performance display: off");
+                }
+                Some(other) => anyhow::bail!("usage: /perf [on|off], got: {other}"),
+            }
             Ok(CommandAction::Continue)
         }
         "/provider" => {

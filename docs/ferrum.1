@@ -112,6 +112,11 @@ Supported values are \f[B]low\f[R], \f[B]medium\f[R], and
 \f[B]\[en]title\f[R] TITLE
 Set the session title.
 .TP
+\f[B]\[en]perf\f[R]
+Print a compact model-performance summary to stderr after each completed
+turn.
+This keeps print-mode stdout pipe-safe.
+.TP
 \f[B]\[en]image\f[R] PATH
 Attach a local image file.
 Repeatable.
@@ -285,6 +290,14 @@ Open the numbered, searchable palette picker using
 .TP
 \f[B]/usage\f[R] [day|week|month]
 Show token usage summary.
+.TP
+\f[B]/perf\f[R] [on|off]
+Show model performance for the last completed turn, or toggle automatic
+summaries for the current process.
+TTFT is measured to the first non-empty streamed model output, and
+throughput covers the interval from first output to request completion.
+Non-streaming values are shown as \f[V]n/a\f[R]; estimated token counts
+and rates use a \f[V]\[ti]\f[R] prefix.
 .TP
 \f[B]/skills\f[R]
 List discovered skills.

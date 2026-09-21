@@ -256,6 +256,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /model [name]
 /login <provider>
 /usage [day|week|month]
+/perf [on|off]
 /provider [name]
 /mcp [on|off|status|list]
 /thinking [off|minimal|low|medium|high|xhigh|max]
@@ -276,6 +277,8 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 `/new` and `/sessions new` both start a fresh session. `/sessions` shows interactive sessions; `/sessions all` includes print, ACP, and legacy sessions. Selecting a non-interactive or legacy session marks it interactive. `/model`, `/provider`, and `/palettes` open numbered, searchable pickers. When configured model aliases omit `provider`, `/provider` includes a `providerless` entry that opens those aliases. `/thinking`, `/safety`, `/diff`, and `/colors` also open pickers when used without an argument. Enter a displayed number to select, enter text to filter labels and descriptions, or press Esc to return to the prompt without changing state. Explicit arguments such as `/model gpt-5` remain available for direct selection.
 
 `/goal` shows one session-scoped note, `/goal <text>` replaces it, and `/goal clear` removes it. The note is limited to 4096 bytes, persists with the session, and does not trigger model work.
+
+`/perf` shows timing and throughput for each completed model request in the last turn. `/perf on|off` toggles a compact summary after each completed turn, and `--perf` enables summaries at startup. Print-mode summaries go to stderr so stdout remains pipe-safe. TTFT and throughput are `n/a` for non-streaming providers; estimated token counts and rates use a `~` prefix. Performance data is process-local and is not written to session history.
 
 Interactive mode also supports command completion and hints via Tab for slash commands, selected command arguments, `/palette`, `/skill:`, and `/image` paths. After the `/model` picker loads successfully, its provider model ids are available to `/model <Tab>` completion until the active provider changes.
 

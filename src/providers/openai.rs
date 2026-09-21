@@ -324,6 +324,10 @@ impl OpenAiCompatProvider {
 }
 
 impl Provider for OpenAiCompatProvider {
+    fn supports_live_streaming(&self) -> bool {
+        self.streaming
+    }
+
     fn complete<'a>(
         &'a self,
         model: &'a str,
@@ -721,6 +725,10 @@ impl OpenAiCodexProvider {
 }
 
 impl Provider for OpenAiCodexProvider {
+    fn supports_live_streaming(&self) -> bool {
+        true
+    }
+
     fn complete<'a>(
         &'a self,
         model: &'a str,
@@ -1488,6 +1496,9 @@ impl ChatSseParser {
                 tool_call
                     .as_object()
                     .context("OpenAI-compatible streamed tool call must be an object")?;
+                if let Some(on_event) = on_event.as_deref_mut() {
+                    on_event(StreamEvent::OutputActivity);
+                }
                 let raw_index = match tool_call.get("index") {
                     None => self.tool_calls.len() as u64,
                     Some(value) => value
@@ -1945,6 +1956,9 @@ impl ResponsesSseParser {
                     .and_then(|value| value.as_object().map(|_| value))
                     .context("OpenAI Codex output-item added event missing object `item`")?;
                 if item.get("type").and_then(|value| value.as_str()) == Some("function_call") {
+                    if let Some(on_event) = on_event.as_deref_mut() {
+                        on_event(StreamEvent::OutputActivity);
+                    }
                     match parse_response_function_call_added_item(item) {
                         Ok(mut call) => {
                             let key = response_event_call_key(&event)
@@ -1979,6 +1993,11 @@ impl ResponsesSseParser {
                     "response.function_call_arguments.delta",
                 )?
                 .context("OpenAI Codex function-call arguments delta event missing `delta`")?;
+                if !delta.is_empty()
+                    && let Some(on_event) = on_event
+                {
+                    on_event(StreamEvent::OutputActivity);
+                }
                 self.update_current_call_args(&event, |args| {
                     push_bounded(
                         args,
@@ -3621,21 +3640,30 @@ data: {"type":"response.completed","response":{"output":[]}}
     #[test]
     fn extracts_chat_stream_tool_call() {
         let mut parser = ChatSseParser::default();
+        let mut events = Vec::new();
+        let mut on_event = |event| events.push(event);
         parser
             .process_line(
                 r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read","arguments":"{\"pa"}}]}}]}"#,
-                None,
+                Some(&mut on_event),
             )
             .unwrap();
         parser
             .process_line(
                 r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"Cargo.toml\"}"}}]}}]}"#,
-                None,
+                Some(&mut on_event),
             )
             .unwrap();
         parser.process_line("data:[DONE]", None).unwrap();
 
         let response = parser.finish().unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, StreamEvent::OutputActivity))
+        );
 
         let Some(ContentBlock::ToolUse { id, name, input }) = response.message.content.first()
         else {

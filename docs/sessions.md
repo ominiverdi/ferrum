@@ -91,6 +91,7 @@ ferrum --title "Quick check" -p "summarize this repo"
 /sessions all
 /sessions del
 /sessions new
+/perf [on|off]
 /compact
 ```
 
@@ -105,6 +106,8 @@ Header-only and metadata-only sessions are retained so a failed start or state t
 `/title` shows the current session title. `/title <text>` sets an explicit title used by `/sessions`. `--title <text>` sets the title when starting, resuming, or running a print-mode session. If no title is set, Ferrum falls back to a title inferred from the first user message.
 
 `/goal` shows a single session-scoped note. `/goal <text>` replaces the note, and `/goal clear` removes it. Goal notes are limited to 4096 bytes and remain available after compaction and session resume. They are operator metadata only: Ferrum does not inject them into model context, expose goal tools, or start additional turns.
+
+`/perf` shows model-request performance for the last completed turn in the current process. `/perf on|off` toggles compact summaries, while `--perf` starts with summaries enabled. Timing data is not persisted to JSONL, and switching sessions clears the previous session's last-turn measurement while preserving the display toggle.
 
 Thinking level is stored in session metadata. New sessions record the current thinking level, and `/thinking <level>` appends an updated level. Resuming or switching sessions restores the session thinking level unless the process was started with an explicit `--thinking` override. Provider-supplied thinking content and replay signatures are stored in message history when the provider sends them.
 

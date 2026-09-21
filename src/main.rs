@@ -129,6 +129,7 @@ async fn run() -> Result<()> {
                 .as_ref()
                 .and_then(|reference| reference.as_deref())),
             args.title.as_deref(),
+            args.perf,
             &config,
         )
         .await?;
@@ -146,6 +147,7 @@ async fn run() -> Result<()> {
         tools_overridden,
         args.provider.is_some(),
         args.model.is_some(),
+        args.perf,
     )
     .await
 }
