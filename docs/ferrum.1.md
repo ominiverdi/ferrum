@@ -157,6 +157,8 @@ Ferrum interactive mode supports slash commands and shell shortcuts.
 
 Input beginning with `/` in column zero is reserved for Ferrum. Unknown slash commands are rejected locally and are not sent to the model. Prefix slash-leading text with a space to send it as a model prompt; Ferrum removes the escape whitespace.
 
+Pickers open an in-place menu: Up/Down move the highlight, Enter selects it, typing a number on its own selects that displayed item, typing any other text filters labels and descriptions, and Esc returns to the prompt without changing anything.
+
 Common slash commands:
 
 **/help**
@@ -172,7 +174,7 @@ Common slash commands:
 : Start a new session. This is the short alias for **/sessions new**.
 
 **/sessions**
-: Open the numbered, searchable interactive-session picker. Press Esc to return to the prompt without switching.
+: Open the numbered, searchable interactive-session picker. Up/Down move the highlight and Enter opens it; press Esc to return to the prompt without switching.
 
 **/sessions all**
 : Include print, ACP, and legacy sessions. Selecting one marks it interactive.

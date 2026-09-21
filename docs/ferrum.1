@@ -214,6 +214,11 @@ model.
 Prefix slash-leading text with a space to send it as a model prompt;
 Ferrum removes the escape whitespace.
 .PP
+Pickers open an in-place menu: Up/Down move the highlight, Enter
+selects it, typing a number on its own selects that displayed item,
+typing any other text filters labels and descriptions, and Esc returns
+to the prompt without changing anything.
+.PP
 Common slash commands:
 .TP
 \f[B]/help\f[R]
@@ -231,7 +236,8 @@ This is the short alias for \f[B]/sessions new\f[R].
 .TP
 \f[B]/sessions\f[R]
 Open the numbered, searchable interactive-session picker.
-Press Esc to return to the prompt without switching.
+Up/Down move the highlight and Enter opens it; press Esc to return to the
+prompt without switching.
 .TP
 \f[B]/sessions all\f[R]
 Include print, ACP, and legacy sessions.

@@ -563,6 +563,8 @@ dependencies = [
  "toml_edit",
  "tree-sitter",
  "tree-sitter-bash",
+ "unicode-segmentation",
+ "unicode-width",
  "url",
  "uuid",
 ]
