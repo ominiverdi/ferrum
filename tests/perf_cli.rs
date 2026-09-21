@@ -37,6 +37,7 @@ fn print_perf_is_opt_in_and_keeps_stdout_pipe_safe() {
         "fake provider response: hello\n"
     );
     let stderr = String::from_utf8(measured.stderr).unwrap();
+    assert!(stderr.starts_with("\nperf:"));
     let perf = stderr
         .lines()
         .find(|line| line.starts_with("perf:"))

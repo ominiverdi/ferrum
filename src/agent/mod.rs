@@ -3073,7 +3073,7 @@ impl AgentSession {
             && matches!(outcome, TurnOutcome::Completed)
             && let Some(performance) = &self.last_performance
         {
-            eprintln!("{}", performance.compact_summary());
+            eprintln!("\n{}", performance.compact_summary());
         }
         Ok(())
     }
