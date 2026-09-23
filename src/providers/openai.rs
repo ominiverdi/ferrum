@@ -343,7 +343,7 @@ impl Provider for OpenAiCompatProvider {
             let reasoning_effort = thinking.as_openai();
             let request = ChatRequest {
                 model,
-                messages: messages.iter().map(ChatMessage::from_message).collect(),
+                messages: normalized_chat_messages(messages),
                 tools: openai_tools(_tools),
                 tool_choice: if _tools.is_empty() {
                     None
@@ -645,7 +645,7 @@ async fn send_openai_compat_stream_request(
 
     let request = ChatRequest {
         model,
-        messages: messages.iter().map(ChatMessage::from_message).collect(),
+        messages: normalized_chat_messages(messages),
         tools: openai_tools(tools),
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
         reasoning_effort: thinking.as_openai(),
@@ -1111,6 +1111,47 @@ struct ChatToolCall {
 struct ChatToolFunction {
     name: String,
     arguments: String,
+}
+
+/// Keep chat requests compatible with templates that accept exactly one leading system message.
+///
+/// Ferrum can add immutable context and later runtime guidance as separate system messages. Merge
+/// those instructions in their original order and move the result ahead of the conversation while
+/// leaving every non-system message in place.
+fn normalized_chat_messages(messages: &[Message]) -> Vec<ChatMessage> {
+    let mut system_content = Vec::new();
+    let system_count = messages
+        .iter()
+        .filter(|message| matches!(message.role, Role::System))
+        .count();
+    let mut normalized = Vec::with_capacity(messages.len().saturating_sub(system_count) + 1);
+
+    for message in messages
+        .iter()
+        .filter(|message| matches!(message.role, Role::System))
+    {
+        if !system_content.is_empty() && !message.content.is_empty() {
+            system_content.push(ContentBlock::Text {
+                text: "\n\n".to_string(),
+            });
+        }
+        system_content.extend(message.content.iter().cloned());
+    }
+    if system_count > 0 {
+        normalized.push(ChatMessage::from_message(&Message {
+            role: Role::System,
+            content: system_content,
+            usage: None,
+        }));
+    }
+
+    normalized.extend(
+        messages
+            .iter()
+            .filter(|message| !matches!(message.role, Role::System))
+            .map(ChatMessage::from_message),
+    );
+    normalized
 }
 
 impl ChatMessage {
@@ -3411,6 +3452,31 @@ data: {"type":"response.completed","response":{"output":[]}}
         let chat = ChatMessage::from_message(&message);
         assert_eq!(chat.role, "user");
         assert_eq!(chat.content, "hello");
+    }
+
+    #[test]
+    fn chat_requests_merge_and_frontload_system_messages() {
+        let messages = vec![
+            Message::text(Role::System, "runtime context"),
+            Message::text(Role::System, "project context"),
+            Message::text(Role::User, "hello"),
+            Message::text(Role::Assistant, "working"),
+            Message::text(Role::System, "late guidance"),
+        ];
+
+        let chat = normalized_chat_messages(&messages);
+        assert_eq!(chat.len(), 3);
+        assert_eq!(chat[0].role, "system");
+        assert_eq!(
+            chat[0].content,
+            "runtime context\n\nproject context\n\nlate guidance"
+        );
+        assert_eq!(
+            chat.iter().map(|message| message.role).collect::<Vec<_>>(),
+            vec!["system", "user", "assistant",]
+        );
+        assert_eq!(chat[1].content, "hello");
+        assert_eq!(chat[2].content, "working");
     }
 
     #[test]
