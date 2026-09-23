@@ -53,6 +53,7 @@ pub struct OpenAiCompatProvider {
     base_url: String,
     streaming: bool,
     stream_usage: bool,
+    reasoning_history_field: ChatReasoningHistoryField,
     client: Client,
 }
 
@@ -312,9 +313,11 @@ impl OpenAiCompatProvider {
         streaming: bool,
         stream_usage: bool,
     ) -> Result<Self> {
+        let base_url = base_url.trim_end_matches('/').to_string();
         Ok(Self {
             api_key,
-            base_url: base_url.trim_end_matches('/').to_string(),
+            reasoning_history_field: chat_reasoning_history_field(&base_url),
+            base_url,
             streaming,
             stream_usage,
             client: Client::builder().redirect(Policy::none()).build()?,
@@ -343,7 +346,7 @@ impl Provider for OpenAiCompatProvider {
             let reasoning_effort = thinking.as_openai();
             let request = ChatRequest {
                 model,
-                messages: normalized_chat_messages(messages),
+                messages: normalized_chat_messages(messages, self.reasoning_history_field),
                 tools: openai_tools(_tools),
                 tool_choice: if _tools.is_empty() {
                     None
@@ -645,7 +648,7 @@ async fn send_openai_compat_stream_request(
 
     let request = ChatRequest {
         model,
-        messages: normalized_chat_messages(messages),
+        messages: normalized_chat_messages(messages, provider.reasoning_history_field),
         tools: openai_tools(tools),
         tool_choice: if tools.is_empty() { None } else { Some("auto") },
         reasoning_effort: thinking.as_openai(),
@@ -1087,6 +1090,12 @@ struct ChatStreamOptions {
     include_usage: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatReasoningHistoryField {
+    Reasoning,
+    ReasoningContent,
+}
+
 #[derive(Debug, Serialize)]
 struct ChatMessage {
     role: &'static str,
@@ -1095,6 +1104,8 @@ struct ChatMessage {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
 }
@@ -1113,12 +1124,29 @@ struct ChatToolFunction {
     arguments: String,
 }
 
+/// Cerebras documents historical assistant reasoning as `messages[].reasoning`. Keep the existing
+/// `reasoning_content` extension for other OpenAI-compatible providers.
+fn chat_reasoning_history_field(base_url: &str) -> ChatReasoningHistoryField {
+    let is_cerebras = url::Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .is_some_and(|host| host.eq_ignore_ascii_case("api.cerebras.ai"));
+    if is_cerebras {
+        ChatReasoningHistoryField::Reasoning
+    } else {
+        ChatReasoningHistoryField::ReasoningContent
+    }
+}
+
 /// Keep chat requests compatible with templates that accept exactly one leading system message.
 ///
 /// Ferrum can add immutable context and later runtime guidance as separate system messages. Merge
 /// those instructions in their original order and move the result ahead of the conversation while
 /// leaving every non-system message in place.
-fn normalized_chat_messages(messages: &[Message]) -> Vec<ChatMessage> {
+fn normalized_chat_messages(
+    messages: &[Message],
+    reasoning_history_field: ChatReasoningHistoryField,
+) -> Vec<ChatMessage> {
     let mut system_content = Vec::new();
     let system_count = messages
         .iter()
@@ -1138,24 +1166,40 @@ fn normalized_chat_messages(messages: &[Message]) -> Vec<ChatMessage> {
         system_content.extend(message.content.iter().cloned());
     }
     if system_count > 0 {
-        normalized.push(ChatMessage::from_message(&Message {
-            role: Role::System,
-            content: system_content,
-            usage: None,
-        }));
+        normalized.push(ChatMessage::from_message_with_reasoning_field(
+            &Message {
+                role: Role::System,
+                content: system_content,
+                usage: None,
+            },
+            reasoning_history_field,
+        ));
     }
 
     normalized.extend(
         messages
             .iter()
             .filter(|message| !matches!(message.role, Role::System))
-            .map(ChatMessage::from_message),
+            .map(|message| {
+                ChatMessage::from_message_with_reasoning_field(message, reasoning_history_field)
+            }),
     );
     normalized
 }
 
 impl ChatMessage {
+    #[cfg(test)]
     fn from_message(message: &Message) -> Self {
+        Self::from_message_with_reasoning_field(
+            message,
+            ChatReasoningHistoryField::ReasoningContent,
+        )
+    }
+
+    fn from_message_with_reasoning_field(
+        message: &Message,
+        reasoning_history_field: ChatReasoningHistoryField,
+    ) -> Self {
         let role = match message.role {
             Role::System => "system",
             Role::User => "user",
@@ -1230,7 +1274,7 @@ impl ChatMessage {
             })
             .collect();
         let has_tool_calls = !tool_calls.is_empty();
-        let reasoning_content = message
+        let reasoning = message
             .content
             .iter()
             .filter_map(|block| match block {
@@ -1239,13 +1283,18 @@ impl ChatMessage {
             })
             .collect::<Vec<_>>()
             .join("\n\n");
+        let reasoning = (role == "assistant" && !reasoning.is_empty()).then_some(reasoning);
+        let (reasoning, reasoning_content) = match reasoning_history_field {
+            ChatReasoningHistoryField::Reasoning => (reasoning, None),
+            ChatReasoningHistoryField::ReasoningContent => (None, reasoning),
+        };
         Self {
             role,
             content,
             tool_call_id,
             tool_calls: has_tool_calls.then_some(tool_calls),
-            reasoning_content: (role == "assistant" && !reasoning_content.is_empty())
-                .then_some(reasoning_content),
+            reasoning,
+            reasoning_content,
         }
     }
 }
@@ -2875,7 +2924,7 @@ mod tests {
     }
 
     #[test]
-    fn replays_openai_compatible_reasoning_content() {
+    fn replays_generic_openai_compatible_reasoning_content() {
         let message = Message {
             role: Role::Assistant,
             content: vec![
@@ -2890,12 +2939,52 @@ mod tests {
             usage: None,
         };
         let chat = ChatMessage::from_message(&message);
+        assert_eq!(chat.reasoning.as_deref(), None);
         assert_eq!(
             chat.reasoning_content.as_deref(),
             Some("provider reasoning")
         );
         let value = serde_json::to_value(chat).unwrap();
+        assert_eq!(value.get("reasoning"), None);
         assert_eq!(value["reasoning_content"], "provider reasoning");
+    }
+
+    #[test]
+    fn cerebras_replays_multi_turn_reasoning_in_documented_field() {
+        assert_eq!(
+            chat_reasoning_history_field("https://api.cerebras.ai/v1"),
+            ChatReasoningHistoryField::Reasoning
+        );
+        assert_eq!(
+            chat_reasoning_history_field("https://example.com/v1"),
+            ChatReasoningHistoryField::ReasoningContent
+        );
+        let messages = vec![
+            Message::text(Role::System, "system"),
+            Message::text(Role::User, "first turn"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::Thinking {
+                        text: "provider reasoning".to_string(),
+                        signature: None,
+                    },
+                    ContentBlock::Text {
+                        text: "first answer".to_string(),
+                    },
+                ],
+                usage: None,
+            },
+            Message::text(Role::User, "second turn"),
+        ];
+
+        let chat = normalized_chat_messages(&messages, ChatReasoningHistoryField::Reasoning);
+        let assistant = serde_json::to_value(&chat[2]).unwrap();
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["content"], "first answer");
+        assert_eq!(assistant["reasoning"], "provider reasoning");
+        assert_eq!(assistant.get("reasoning_content"), None);
+        assert_eq!(chat[3].content, "second turn");
     }
 
     #[test]
@@ -3464,7 +3553,7 @@ data: {"type":"response.completed","response":{"output":[]}}
             Message::text(Role::System, "late guidance"),
         ];
 
-        let chat = normalized_chat_messages(&messages);
+        let chat = normalized_chat_messages(&messages, ChatReasoningHistoryField::ReasoningContent);
         assert_eq!(chat.len(), 3);
         assert_eq!(chat[0].role, "system");
         assert_eq!(
