@@ -13,6 +13,7 @@ pub(super) struct ModelPerformance {
     time_to_first_output: Option<Duration>,
     output_tokens: Option<u64>,
     estimated_tokens: bool,
+    interrupted: bool,
 }
 
 impl ModelPerformance {
@@ -66,8 +67,19 @@ impl TurnPerformance {
             self.provider,
             self.model,
             format_duration(self.total),
-            self.requests.len()
+            self.requests
+                .iter()
+                .filter(|request| !request.interrupted)
+                .count()
         );
+        let interrupted = self
+            .requests
+            .iter()
+            .filter(|request| request.interrupted)
+            .count();
+        if interrupted > 0 {
+            let _ = write!(output, "\n  interrupted_requests: {interrupted}");
+        }
         if self.requests.is_empty() {
             output.push_str("\n  model requests: none");
             return output;
@@ -92,7 +104,11 @@ impl TurnPerformance {
                 output,
                 "\n  request {} ({}): ttft {}, generation {}, throughput {}, output_tokens {} ({}), total {}",
                 request.request,
-                request_kind_label(request.kind),
+                if request.interrupted {
+                    "interrupted"
+                } else {
+                    request_kind_label(request.kind)
+                },
                 format_optional_duration(request.time_to_first_output),
                 format_optional_duration(request.generation_duration()),
                 format_throughput(request.tokens_per_second(), request.estimated_tokens),
@@ -183,7 +199,19 @@ impl ModelPerformanceTimer {
             time_to_first_output: self.time_to_first_output,
             output_tokens: usage.output_tokens,
             estimated_tokens: usage.source != "provider",
+            interrupted: false,
         }
+    }
+
+    pub(super) fn finish_interrupted(
+        self,
+        request: usize,
+        kind: ModelRequestKind,
+        usage: &TokenUsage,
+    ) -> ModelPerformance {
+        let mut performance = self.finish(request, kind, usage);
+        performance.interrupted = true;
+        performance
     }
 }
 
@@ -250,6 +278,7 @@ mod tests {
             time_to_first_output: ttft_ms.map(Duration::from_millis),
             output_tokens,
             estimated_tokens,
+            interrupted: false,
         }
     }
 
@@ -320,6 +349,34 @@ mod tests {
         };
 
         assert!(performance.compact_summary().contains("final ~20.0 tok/s"));
+    }
+
+    #[test]
+    fn interrupted_requests_count_usage_without_claiming_completion() {
+        let usage = TokenUsage {
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            total_tokens: Some(30),
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            source: "estimated".to_string(),
+        };
+        let timer = ModelPerformanceTimer::start(true);
+        let performance = TurnPerformance {
+            provider: "mock".to_string(),
+            model: "mock".to_string(),
+            total: Duration::from_secs(1),
+            requests: vec![
+                timer.finish_interrupted(1, ModelRequestKind::Agent, &usage),
+                request(2, ModelRequestKind::Agent, 100, Some(10), Some(5), false),
+            ],
+        };
+        assert!(performance.compact_summary().contains("2 requests"));
+        assert!(performance.compact_summary().contains("output ~25 tok"));
+        let detail = performance.detailed_summary();
+        assert!(detail.contains("completed_requests: 1"));
+        assert!(detail.contains("interrupted_requests: 1"));
+        assert!(detail.contains("request 1 (interrupted)"));
     }
 
     #[test]

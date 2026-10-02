@@ -267,7 +267,13 @@ Default:
 max_tool_rounds = 0
 ```
 
-`0` means adaptive loop guard: Ferrum does not stop normal long tasks at a low fixed round count. It nudges or stops only when behavior looks pathological, such as repeated identical tool calls or many consecutive tool errors. A hard emergency safety limit still applies internally.
+`0` means adaptive loop guard: Ferrum does not stop normal long tasks at a low fixed round count. Consecutive identical calls trigger guidance at 4 calls and final synthesis at 7; consecutive tool errors trigger guidance at 5 and final synthesis at 8. A hard emergency limit of 256 tool rounds still applies.
+
+Ferrum also detects repeated sequences of 2–16 tool calls with identical arguments and unchanged results: 2 consecutive copies trigger guidance; 3 trigger final synthesis with tools disabled. Successful native `write`/`edit` calls and deliberate `wait` calls break sequence adjacency. Changed results distinguish useful retries. Detection runs after completed tool batches and resets for each user turn; it does not block individual calls or impose file-read/search ceilings.
+
+Model reasoning and answer streams are checked for 3 adjacent verbatim copies of an 80-character (reasoning) or 100-character (answer) minimum block, up to 2,048 characters per block. Whitespace-only repetition and fenced code are ignored; similar paragraph openings alone do not trigger detection. The detector keeps only a 6,144-character tail and also checks buffered responses.
+
+A detected stream loop interrupts only the current model request. Partial output, reasoning signatures, and unexecuted tool calls are discarded rather than replayed or saved as completed messages. Already displayed text cannot be retracted. Ferrum allows one recovery request, then one tools-disabled final synthesis; repetition during final synthesis stops with an explicit error. User cancellation always takes priority. Interrupted requests remain in usage/performance accounting, estimated when provider usage is unavailable. These guards are independent of `/safety` and do not change execution authority.
 
 Set a positive value to restore an explicit fixed round cap for debugging or benchmarks:
 

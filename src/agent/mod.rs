@@ -1,6 +1,10 @@
 pub mod events;
+mod loop_guard;
+#[cfg(test)]
+mod loop_tests;
 pub mod messages;
 mod performance;
+mod stream_guard;
 pub mod tools;
 
 use crate::{
@@ -18,6 +22,7 @@ use crossterm::{
 };
 use events::{AgentEvent, AgentEventSink, ModelRequestKind, NoticeKind, TurnOptions, TurnOutcome};
 use futures_util::{StreamExt, stream};
+use loop_guard::{LoopGuard, LoopGuardAction, ToolObservation};
 use performance::{ModelPerformanceTimer, TurnPerformance, TurnPerformanceRecorder};
 use rustyline::{
     Cmd, ConditionalEventHandler, Editor, Event as ReadlineEvent, EventContext, EventHandler,
@@ -49,8 +54,10 @@ use std::{
     },
     time::{Duration, Instant, SystemTime},
 };
+use stream_guard::{InterruptedResponse, StreamGuard, StreamLoop};
 use ui_colors::{ColorPalette, ColorToken};
 
+const RECENT_CONVERSATION_LINE_LIMIT: usize = 40;
 const COMPACTION_KEEP_RECENT_TOKENS: usize = 20_000;
 const COMPACTION_TOOL_RESULT_MAX_CHARS: usize = 2_000;
 const LOCAL_COMPACTION_SUMMARY_MAX_CHARS: usize = 16_000;
@@ -61,11 +68,6 @@ const CONTEXT_WARNING_PERCENT: usize = 85;
 const CONTEXT_CRITICAL_PERCENT: usize = 92;
 const CONTEXT_AUTO_COMPACT_PERCENT: usize = 95;
 const CONTEXT_RESERVE_TOKENS: usize = 16_384;
-const HARD_TOOL_ROUND_LIMIT: usize = 256;
-const REPEATED_TOOL_NUDGE_LIMIT: usize = 4;
-const REPEATED_TOOL_FORCE_LIMIT: usize = 7;
-const CONSECUTIVE_ERROR_NUDGE_LIMIT: usize = 5;
-const CONSECUTIVE_ERROR_FORCE_LIMIT: usize = 8;
 const MAX_PARALLEL_BUILTIN_TOOLS: usize = 8;
 const PROVIDER_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 const MAX_IMAGES_PER_TURN: usize = 8;
@@ -1003,10 +1005,7 @@ pub async fn run_interactive(
         state.set_title(title)?;
     }
     println!("Ferrum interactive. /help for commands.");
-    print_current_session_header(&state)?;
-    if show_resume_tail {
-        print_recent_conversation_lines(&state.messages, 40, state.color_mode, &state.colors);
-    }
+    print_current_session_context(&state, show_resume_tail)?;
 
     let mut rl = Editor::<FerrumLineHelper, DefaultHistory>::new()?;
     rl.set_helper(Some(FerrumLineHelper::new(&state.skills, config)));
@@ -1643,20 +1642,165 @@ fn aborted_tool_uses(
         .collect()
 }
 
-#[derive(Debug)]
-struct ToolObservation {
-    fingerprint: String,
-    is_error: bool,
-}
-
-impl ToolObservation {
-    fn new(name: &str, input: &serde_json::Value, is_error: bool) -> Self {
-        let input = serde_json::to_string(input).unwrap_or_else(|_| input.to_string());
-        Self {
-            fingerprint: format!("{name}:{input}"),
-            is_error,
-        }
+#[allow(clippy::too_many_arguments)]
+async fn complete_model_request(
+    provider: &dyn providers::Provider,
+    config: &Config,
+    messages: &[messages::Message],
+    tools: &[tools::ToolDefinition],
+    options: &TurnOptions,
+    sink: &mut dyn AgentEventSink,
+    performance: &mut ModelPerformanceTimer,
+) -> Result<providers::ProviderResponse> {
+    let turn_cancel = options.cancellation.flag();
+    if turn_cancel.load(Ordering::Acquire) {
+        anyhow::bail!("aborted");
     }
+    // A loop cancels only this request. Never clear or reuse the user's token
+    // for recovery: a concurrent Esc/ACP cancellation must remain authoritative.
+    let request_cancel = Arc::new(AtomicBool::new(false));
+    let mut abort = ActiveTurnAbort::start_with_token(
+        options.monitor_terminal_cancel,
+        Arc::clone(&turn_cancel),
+    );
+    let mut guard = StreamGuard::new();
+    let mut loop_hit = None;
+    let mut observed_chars = 0usize;
+    let mut event_error = None;
+    let mut thinking_sanitizer = messages::ThinkingSanitizer::default();
+    let response = {
+        let mut on_event = |event| {
+            if turn_cancel.load(Ordering::Acquire) {
+                request_cancel.store(true, Ordering::Release);
+                return;
+            }
+            if event_error.is_some() || loop_hit.is_some() {
+                return;
+            }
+            performance.observe(&event);
+            if let providers::StreamEvent::ThinkingDelta(delta)
+            | providers::StreamEvent::TextDelta(delta) = &event
+            {
+                observed_chars = observed_chars.saturating_add(delta.chars().count());
+            }
+            let (kind, delta) = match event {
+                providers::StreamEvent::ThinkingDelta(delta) => {
+                    (StreamLoop::Thinking, thinking_sanitizer.push(&delta))
+                }
+                providers::StreamEvent::TextDelta(delta) => (StreamLoop::Text, delta),
+                providers::StreamEvent::OutputActivity => {
+                    loop_hit = guard.finish();
+                    guard.reset();
+                    if loop_hit.is_some() {
+                        request_cancel.store(true, Ordering::Release);
+                    }
+                    return;
+                }
+            };
+            let (accepted, hit) = guard.push(kind, &delta);
+            loop_hit = hit;
+            if hit.is_some() {
+                request_cancel.store(true, Ordering::Release);
+            }
+            if accepted > 0 {
+                let delta = delta[..accepted].to_string();
+                let event = match kind {
+                    StreamLoop::Thinking => AgentEvent::ThinkingDelta(delta),
+                    StreamLoop::Text => AgentEvent::TextDelta(delta),
+                };
+                if let Err(error) = sink.emit(event) {
+                    request_cancel.store(true, Ordering::Release);
+                    event_error = Some(error);
+                }
+                if turn_cancel.load(Ordering::Acquire) {
+                    request_cancel.store(true, Ordering::Release);
+                }
+            }
+        };
+        let future = if options.stream_responses {
+            provider.complete_streaming(
+                &config.provider_model,
+                messages,
+                tools,
+                config.thinking,
+                &mut on_event,
+                Some(Arc::clone(&request_cancel)),
+            )
+        } else {
+            provider.complete(&config.provider_model, messages, tools, config.thinking)
+        };
+        tokio::pin!(future);
+        tokio::select! {
+            biased;
+            _ = cancel::wait(Some(&turn_cancel)) => {
+                request_cancel.store(true, Ordering::Release);
+                let _ = tokio::time::timeout(PROVIDER_CANCELLATION_GRACE, &mut future).await;
+                Err(anyhow::anyhow!("aborted"))
+            }
+            result = cancel::race_with_cancel_grace(
+                &mut future,
+                Some(&request_cancel),
+                PROVIDER_CANCELLATION_GRACE,
+            ) => result.unwrap_or_else(|_| Err(anyhow::anyhow!("aborted"))),
+        }
+    };
+    abort.stop();
+    if turn_cancel.load(Ordering::Acquire) {
+        anyhow::bail!("aborted");
+    }
+    if let Some(error) = event_error {
+        return Err(error);
+    }
+    // Transport/auth/protocol failures must not be reclassified from an
+    // incomplete stream tail. Only an explicit mid-stream hit overrides abort.
+    if loop_hit.is_none() && response.is_err() {
+        return response;
+    }
+    if let Some(hit) = loop_hit.or_else(|| guard.finish()) {
+        let provider_usage = response.as_ref().ok().and_then(|response| {
+            response
+                .usage
+                .clone()
+                .or_else(|| response.message.usage.clone())
+        });
+        let token_usage = provider_usage.unwrap_or_else(|| {
+            let input = estimated_request_tokens(messages, tools) as u64;
+            let output = observed_chars.div_ceil(4) as u64;
+            messages::TokenUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                total_tokens: Some(input.saturating_add(output)),
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                source: "estimated".to_string(),
+            }
+        });
+        return Err(InterruptedResponse {
+            kind: hit,
+            usage: token_usage,
+        }
+        .into());
+    }
+    let response = response?;
+    // Providers without live streaming and final-only completion events still
+    // receive the same repetition check before persistence or tool execution.
+    if let Some(hit) = StreamGuard::inspect_message(&response.message) {
+        let token_usage = usage_for_response(
+            response
+                .usage
+                .clone()
+                .or_else(|| response.message.usage.clone()),
+            messages,
+            tools,
+            &response.message,
+        );
+        return Err(InterruptedResponse {
+            kind: hit,
+            usage: token_usage,
+        }
+        .into());
+    }
+    Ok(response)
 }
 
 fn metrics_enabled() -> bool {
@@ -2487,211 +2631,6 @@ fn validate_known_tools(
     Ok(())
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum LoopGuardAction {
-    Continue,
-    Nudge(String),
-    ForceFinal(String),
-}
-
-#[derive(Debug)]
-struct LoopGuard {
-    explicit_limit: usize,
-    rounds: usize,
-    consecutive_errors: usize,
-    last_tool_fingerprint: Option<String>,
-    consecutive_tool_repeats: usize,
-    repeated_nudged: bool,
-    errors_nudged: bool,
-}
-
-impl LoopGuard {
-    fn new(explicit_limit: usize) -> Self {
-        Self {
-            explicit_limit,
-            rounds: 0,
-            consecutive_errors: 0,
-            last_tool_fingerprint: None,
-            consecutive_tool_repeats: 0,
-            repeated_nudged: false,
-            errors_nudged: false,
-        }
-    }
-
-    fn observe_round(&mut self, observations: &[ToolObservation]) -> LoopGuardAction {
-        self.rounds += 1;
-        if self.explicit_limit > 0 && self.rounds >= self.explicit_limit {
-            return LoopGuardAction::ForceFinal(format!(
-                "explicit tool round limit ({}) reached",
-                self.explicit_limit
-            ));
-        }
-        if self.rounds >= HARD_TOOL_ROUND_LIMIT {
-            return LoopGuardAction::ForceFinal(format!(
-                "hard safety limit ({HARD_TOOL_ROUND_LIMIT}) reached"
-            ));
-        }
-
-        let mut max_repeats = 0;
-        let mut repeated_fingerprint = None;
-        for observation in observations {
-            if self.last_tool_fingerprint.as_deref() == Some(&observation.fingerprint) {
-                self.consecutive_tool_repeats += 1;
-            } else {
-                self.last_tool_fingerprint = Some(observation.fingerprint.clone());
-                self.consecutive_tool_repeats = 1;
-                self.repeated_nudged = false;
-            }
-            if self.consecutive_tool_repeats > max_repeats {
-                max_repeats = self.consecutive_tool_repeats;
-                repeated_fingerprint = Some(observation.fingerprint.as_str());
-            }
-
-            if observation.is_error {
-                self.consecutive_errors += 1;
-            } else {
-                self.consecutive_errors = 0;
-            }
-        }
-
-        if max_repeats >= REPEATED_TOOL_FORCE_LIMIT {
-            return LoopGuardAction::ForceFinal(format!(
-                "same tool call repeated {max_repeats} times ({})",
-                repeated_fingerprint.unwrap_or("unknown")
-            ));
-        }
-        if max_repeats >= REPEATED_TOOL_NUDGE_LIMIT && !self.repeated_nudged {
-            self.repeated_nudged = true;
-            return LoopGuardAction::Nudge(format!(
-                "same tool call repeated {max_repeats} times ({})",
-                repeated_fingerprint.unwrap_or("unknown")
-            ));
-        }
-
-        if self.consecutive_errors >= CONSECUTIVE_ERROR_FORCE_LIMIT {
-            return LoopGuardAction::ForceFinal(format!(
-                "{} consecutive tool errors",
-                self.consecutive_errors
-            ));
-        }
-        if self.consecutive_errors >= CONSECUTIVE_ERROR_NUDGE_LIMIT && !self.errors_nudged {
-            self.errors_nudged = true;
-            return LoopGuardAction::Nudge(format!(
-                "{} consecutive tool errors",
-                self.consecutive_errors
-            ));
-        }
-
-        LoopGuardAction::Continue
-    }
-}
-
-#[cfg(test)]
-mod loop_guard_tests {
-    use super::*;
-
-    fn observation(name: &str, input: serde_json::Value, is_error: bool) -> ToolObservation {
-        ToolObservation::new(name, &input, is_error)
-    }
-
-    #[test]
-    fn nudges_then_forces_repeated_tool_calls() {
-        let mut guard = LoopGuard::new(0);
-        let read = observation("read", serde_json::json!({"path": "a.txt"}), false);
-        assert_eq!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::Continue
-        );
-        assert_eq!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::Continue
-        );
-        assert_eq!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::Continue
-        );
-        assert!(matches!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::Nudge(reason) if reason.contains("same tool call repeated")
-        ));
-        assert_eq!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::Continue
-        );
-        assert_eq!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::Continue
-        );
-        assert!(matches!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::ForceFinal(reason) if reason.contains("same tool call repeated")
-        ));
-    }
-
-    #[test]
-    fn separated_identical_calls_do_not_accumulate_repetition_count() {
-        let mut guard = LoopGuard::new(0);
-        let read_a = observation("read", serde_json::json!({"path": "a.txt"}), false);
-        let read_b = observation("read", serde_json::json!({"path": "b.txt"}), false);
-
-        for _ in 0..3 {
-            assert_eq!(
-                guard.observe_round(std::slice::from_ref(&read_a)),
-                LoopGuardAction::Continue
-            );
-        }
-        assert_eq!(
-            guard.observe_round(std::slice::from_ref(&read_b)),
-            LoopGuardAction::Continue
-        );
-        for _ in 0..3 {
-            assert_eq!(
-                guard.observe_round(std::slice::from_ref(&read_a)),
-                LoopGuardAction::Continue
-            );
-        }
-        assert!(matches!(
-            guard.observe_round(std::slice::from_ref(&read_a)),
-            LoopGuardAction::Nudge(reason) if reason.contains("same tool call repeated")
-        ));
-    }
-
-    #[test]
-    fn nudges_consecutive_tool_errors() {
-        let mut guard = LoopGuard::new(0);
-        for index in 0..4 {
-            let failed = observation(
-                "edit",
-                serde_json::json!({"path": format!("{index}.txt")}),
-                true,
-            );
-            assert_eq!(
-                guard.observe_round(std::slice::from_ref(&failed)),
-                LoopGuardAction::Continue
-            );
-        }
-        let failed = observation("edit", serde_json::json!({"path": "final.txt"}), true);
-        assert!(matches!(
-            guard.observe_round(std::slice::from_ref(&failed)),
-            LoopGuardAction::Nudge(reason) if reason.contains("consecutive tool errors")
-        ));
-    }
-
-    #[test]
-    fn explicit_limit_forces_final() {
-        let mut guard = LoopGuard::new(2);
-        let read = observation("read", serde_json::json!({"path": "a.txt"}), false);
-        assert_eq!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::Continue
-        );
-        assert!(matches!(
-            guard.observe_round(std::slice::from_ref(&read)),
-            LoopGuardAction::ForceFinal(reason) if reason.contains("explicit tool round limit")
-        ));
-    }
-}
-
 fn immutable_system_messages(
     config: &Config,
     cwd: &Path,
@@ -3188,6 +3127,7 @@ impl AgentSession {
         let mut loop_guard = LoopGuard::new(config.max_tool_rounds);
         let mut overflow_recovery_attempted = false;
         let mut request_guidance = None;
+        let mut stream_recoveries = 0;
         let force_final_reason = loop {
             let request_extras = request_guidance.as_slice();
             self.ensure_provider_request_budget(
@@ -3210,79 +3150,52 @@ impl AgentSession {
                 request: model_request_index,
                 kind: ModelRequestKind::Agent,
             })?;
-            let mut abort = ActiveTurnAbort::start_with_token(
-                options.monitor_terminal_cancel,
-                Arc::clone(&turn_cancel),
-            );
             if metrics_enabled {
                 emit_model_metrics_start(model_request_index, provider_messages, &tools);
             }
             let mut performance_timer = ModelPerformanceTimer::start(
                 options.stream_responses && provider.supports_live_streaming(),
             );
-            let mut event_error = None;
-            let event_cancel = Arc::clone(&turn_cancel);
-            let mut thinking_sanitizer = messages::ThinkingSanitizer::default();
-            let response_result = {
-                let mut on_event = |event| {
-                    if event_error.is_some() {
-                        return;
-                    }
-                    performance_timer.observe(&event);
-                    let event = match event {
-                        providers::StreamEvent::ThinkingDelta(delta) => {
-                            AgentEvent::ThinkingDelta(thinking_sanitizer.push(&delta))
-                        }
-                        providers::StreamEvent::TextDelta(delta) => AgentEvent::TextDelta(delta),
-                        providers::StreamEvent::OutputActivity => return,
-                    };
-                    if let Err(error) = sink.emit(event) {
-                        event_cancel.store(true, Ordering::Release);
-                        event_error = Some(error);
-                    }
-                };
-                if options.stream_responses {
-                    match cancel::race_with_cancel_grace(
-                        provider.complete_streaming(
-                            &config.provider_model,
-                            provider_messages,
-                            &tools,
-                            config.thinking,
-                            &mut on_event,
-                            Some(Arc::clone(&turn_cancel)),
-                        ),
-                        Some(&turn_cancel),
-                        PROVIDER_CANCELLATION_GRACE,
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow::anyhow!("aborted")),
-                    }
-                } else {
-                    match cancel::race_with_cancel_grace(
-                        provider.complete(
-                            &config.provider_model,
-                            provider_messages,
-                            &tools,
-                            config.thinking,
-                        ),
-                        Some(&turn_cancel),
-                        PROVIDER_CANCELLATION_GRACE,
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow::anyhow!("aborted")),
-                    }
-                }
-            };
-            if let Some(error) = event_error {
-                return Err(error);
-            }
-            abort.stop();
+            let response_result = complete_model_request(
+                provider.as_ref(),
+                config,
+                provider_messages,
+                &tools,
+                &options,
+                sink,
+                &mut performance_timer,
+            )
+            .await;
             let response = match response_result {
                 Ok(response) => response,
+                Err(error) if error.downcast_ref::<InterruptedResponse>().is_some() => {
+                    let interrupted = error.downcast_ref::<InterruptedResponse>().unwrap();
+                    self.record_interrupted_response(
+                        config,
+                        interrupted,
+                        performance_timer,
+                        performance,
+                        model_request_index,
+                        ModelRequestKind::Agent,
+                        sink,
+                    )?;
+                    let reason = error.to_string();
+                    sink.emit(AgentEvent::Notice {
+                        kind: NoticeKind::Diagnostic,
+                        message: format!("[loop-guard] {reason}; interrupted model response"),
+                    })?;
+                    if stream_recoveries >= 1 {
+                        break "stream repetition persisted after one recovery attempt".to_string();
+                    }
+                    stream_recoveries += 1;
+                    request_guidance = Some(messages::Message::text(
+                        messages::Role::System,
+                        format!(
+                            "The previous response was interrupted because of {reason}. Its partial output was discarded. Choose a different approach or provide a concise result. Do not repeat the interrupted output."
+                        ),
+                    ));
+                    continue;
+                }
                 Err(error) if error.to_string() == "aborted" => {
                     sink.emit(AgentEvent::TurnCancelled)?;
                     return Ok(TurnOutcome::Cancelled);
@@ -3409,6 +3322,7 @@ impl AgentSession {
                 observations.push(ToolObservation::new(
                     &executed.name,
                     &executed.input,
+                    &executed.content,
                     executed.is_error,
                 ));
                 let result = messages::Message {
@@ -3478,71 +3392,16 @@ impl AgentSession {
             let mut performance_timer = ModelPerformanceTimer::start(
                 options.stream_responses && provider.supports_live_streaming(),
             );
-            let mut abort = ActiveTurnAbort::start_with_token(
-                options.monitor_terminal_cancel,
-                Arc::clone(&turn_cancel),
-            );
-            let mut event_error = None;
-            let event_cancel = Arc::clone(&turn_cancel);
-            let mut thinking_sanitizer = messages::ThinkingSanitizer::default();
-            let response_result = {
-                let mut on_event = |event| {
-                    if event_error.is_some() {
-                        return;
-                    }
-                    performance_timer.observe(&event);
-                    let event = match event {
-                        providers::StreamEvent::ThinkingDelta(delta) => {
-                            AgentEvent::ThinkingDelta(thinking_sanitizer.push(&delta))
-                        }
-                        providers::StreamEvent::TextDelta(delta) => AgentEvent::TextDelta(delta),
-                        providers::StreamEvent::OutputActivity => return,
-                    };
-                    if let Err(error) = sink.emit(event) {
-                        event_cancel.store(true, Ordering::Release);
-                        event_error = Some(error);
-                    }
-                };
-                if options.stream_responses {
-                    match cancel::race_with_cancel_grace(
-                        provider.complete_streaming(
-                            &config.provider_model,
-                            &final_messages,
-                            &[],
-                            config.thinking,
-                            &mut on_event,
-                            Some(Arc::clone(&turn_cancel)),
-                        ),
-                        Some(&turn_cancel),
-                        PROVIDER_CANCELLATION_GRACE,
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow::anyhow!("aborted")),
-                    }
-                } else {
-                    match cancel::race_with_cancel_grace(
-                        provider.complete(
-                            &config.provider_model,
-                            &final_messages,
-                            &[],
-                            config.thinking,
-                        ),
-                        Some(&turn_cancel),
-                        PROVIDER_CANCELLATION_GRACE,
-                    )
-                    .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow::anyhow!("aborted")),
-                    }
-                }
-            };
-            if let Some(error) = event_error {
-                return Err(error);
-            }
-            abort.stop();
+            let response_result = complete_model_request(
+                provider.as_ref(),
+                config,
+                &final_messages,
+                &[],
+                &options,
+                sink,
+                &mut performance_timer,
+            )
+            .await;
             match response_result {
                 Ok(response) => {
                     if metrics_enabled {
@@ -3556,6 +3415,21 @@ impl AgentSession {
                         );
                     }
                     break (response, performance_timer);
+                }
+                Err(error) if error.downcast_ref::<InterruptedResponse>().is_some() => {
+                    let interrupted = error.downcast_ref::<InterruptedResponse>().unwrap();
+                    self.record_interrupted_response(
+                        config,
+                        interrupted,
+                        performance_timer,
+                        performance,
+                        model_request_index,
+                        ModelRequestKind::FinalSynthesis,
+                        sink,
+                    )?;
+                    return Err(error.context(
+                        "final response interrupted by loop guard; stopped without further retries",
+                    ));
                 }
                 Err(error) if error.to_string() == "aborted" => {
                     sink.emit(AgentEvent::TurnCancelled)?;
@@ -3656,6 +3530,51 @@ impl AgentSession {
         )?;
         sink.emit(AgentEvent::TurnCompleted)?;
         Ok(TurnOutcome::Completed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_interrupted_response(
+        &self,
+        config: &Config,
+        interrupted: &InterruptedResponse,
+        timer: ModelPerformanceTimer,
+        performance: &mut TurnPerformanceRecorder,
+        request: usize,
+        kind: ModelRequestKind,
+        sink: &mut dyn AgentEventSink,
+    ) -> Result<()> {
+        let token_usage = &interrupted.usage;
+        if metrics_enabled() {
+            eprintln!(
+                "[metrics:model interrupted] request={request} latency_ms={} reason={}",
+                timer.elapsed().as_millis(),
+                interrupted.kind
+            );
+        }
+        performance.record(timer.finish_interrupted(request, kind, token_usage));
+        if let Some(message) = append_usage_record_with_warning(
+            &config.data_dir,
+            &usage::UsageRecord {
+                timestamp_unix: usage::now_unix(),
+                provider: config.provider_name.clone(),
+                model: config.provider_model.clone(),
+                input_tokens: token_usage.input_tokens,
+                output_tokens: token_usage.output_tokens,
+                total_tokens: token_usage.total_tokens,
+                cache_read_tokens: token_usage.cache_read_tokens,
+                cache_write_tokens: token_usage.cache_write_tokens,
+                source: token_usage.source.clone(),
+            },
+        ) {
+            sink.emit(AgentEvent::Notice {
+                kind: NoticeKind::Diagnostic,
+                message,
+            })?;
+        }
+        sink.emit(AgentEvent::UsageUpdated {
+            usage: token_usage.clone(),
+            estimated_context_tokens: self.stats().estimated_tokens,
+        })
     }
 
     fn attach_clipboard_image(&mut self) -> Result<()> {
@@ -4505,7 +4424,7 @@ impl AgentSession {
         next.promote_to_interactive()?;
         *self = next;
         *config = candidate;
-        print_current_session_header(self)?;
+        print_current_session_context(self, true)?;
         Ok(())
     }
 
@@ -4534,7 +4453,7 @@ impl AgentSession {
         self.checkpoint_session()?;
         println!("started new session {}", next.session.path().display());
         *self = next;
-        print_current_session_header(self)?;
+        print_current_session_context(self, false)?;
         Ok(())
     }
 
@@ -5327,11 +5246,19 @@ fn set_terminal_title(title: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_current_session_header(state: &AgentSession) -> Result<()> {
+fn print_current_session_context(state: &AgentSession, show_recent: bool) -> Result<()> {
     let info = session::jsonl::session_info(state.session.path())?
         .ok_or_else(|| anyhow::anyhow!("current session metadata unavailable"))?;
     set_terminal_title(&info.title)?;
     print_session_title(&info.title, state.color_mode, &state.colors);
+    if show_recent {
+        print_recent_conversation_lines(
+            &state.messages,
+            RECENT_CONVERSATION_LINE_LIMIT,
+            state.color_mode,
+            &state.colors,
+        );
+    }
     Ok(())
 }
 
@@ -5660,8 +5587,8 @@ mod context_pressure_tests {
     }
 
     #[derive(Default)]
-    struct RecordingSink {
-        events: Vec<AgentEvent>,
+    pub(super) struct RecordingSink {
+        pub(super) events: Vec<AgentEvent>,
     }
 
     impl AgentEventSink for RecordingSink {
@@ -6108,6 +6035,40 @@ mod context_pressure_tests {
                 "  tool line 1".to_string(),
                 "  tool line 2".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn recent_conversation_lines_keep_latest_user_and_assistant_messages() {
+        let messages = vec![
+            messages::Message::text(messages::Role::User, "old request"),
+            messages::Message::text(messages::Role::Assistant, "old response"),
+            messages::Message::text(messages::Role::Tool, "old tool output"),
+            messages::Message::text(messages::Role::User, "latest request"),
+            messages::Message::text(messages::Role::Assistant, "latest response"),
+        ];
+
+        assert_eq!(
+            recent_conversation_lines(&messages, 5),
+            vec![
+                "user:".to_string(),
+                "  latest request".to_string(),
+                "".to_string(),
+                "assistant:".to_string(),
+                "  latest response".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_conversation_lines_are_empty_for_empty_session() {
+        assert!(recent_conversation_lines(&[], 40).is_empty());
+        assert!(
+            recent_conversation_lines(
+                &[messages::Message::text(messages::Role::System, "runtime")],
+                40,
+            )
+            .is_empty()
         );
     }
 
@@ -7613,6 +7574,40 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn session_switch_loads_recent_user_and_assistant_preview() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentSession::new(&config).unwrap();
+        let mut target = AgentSession::new(&config).unwrap();
+        append_test_message(
+            &mut target,
+            messages::Message::text(messages::Role::User, "switched user message"),
+        );
+        append_test_message(
+            &mut target,
+            messages::Message::text(messages::Role::Assistant, "switched assistant message"),
+        );
+        let target_path = target.session.path().clone();
+        drop(target);
+        state.last_session_list =
+            vec![session::jsonl::session_info(&target_path).unwrap().unwrap()];
+
+        state.open_session_by_index(&mut config, 1).unwrap();
+
+        assert_eq!(state.session.path(), &target_path);
+        assert_eq!(
+            recent_conversation_lines(&state.messages, RECENT_CONVERSATION_LINE_LIMIT),
+            vec![
+                "user:".to_string(),
+                "  switched user message".to_string(),
+                "".to_string(),
+                "assistant:".to_string(),
+                "  switched assistant message".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn selecting_noninteractive_or_legacy_session_promotes_it_to_interactive() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
@@ -8449,7 +8444,7 @@ mod context_pressure_tests {
         state.messages.push(message);
     }
 
-    fn test_config(config_dir: std::path::PathBuf) -> Config {
+    pub(super) fn test_config(config_dir: std::path::PathBuf) -> Config {
         Config {
             data_dir: config_dir.clone(),
             config_dir,

@@ -10,6 +10,8 @@ For providers that support streaming, Ferrum streams provider events live. If th
 
 When a turn continues after tool execution, Ferrum prints a simple separator before the post-tool assistant response.
 
+Loop guards detect consecutive identical calls, repeated sequences with unchanged results, and verbatim repetition in model reasoning or answers. Sequence detection happens after execution; it does not ban individual reads or searches. Repeating model responses are discarded before their tool calls can execute, with bounded recovery. These guards do not change tool permissions or `/safety`. See [configuration](config.md#max_tool_rounds) for thresholds and exceptions.
+
 ## Tool exposure policy
 
 CLI:

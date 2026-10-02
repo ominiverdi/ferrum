@@ -895,6 +895,77 @@ fn acp_stdio_permission_policy_denials_never_become_client_choices() {
 }
 
 #[test]
+fn acp_stdio_stream_loop_recovers_without_protocol_noise() {
+    for script in ["repeat_text_recover", "repeat_thinking"] {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut acp = AcpProcess::spawn(cwd.path(), Some(script));
+        acp.initialize();
+        let session_id = acp.new_session(cwd.path());
+        acp.send(json!({
+            "jsonrpc":"2.0", "id":3, "method":"session/prompt",
+            "params":{"sessionId":session_id,"prompt":[{"type":"text","text":"check stream repetition"}]}
+        }));
+        let mut output = String::new();
+        let mut usages = 0;
+        loop {
+            let message = acp.recv();
+            if message["id"] == 3 {
+                assert_eq!(message["result"]["stopReason"], "end_turn");
+                break;
+            }
+            assert_eq!(message["method"], "session/update");
+            match message["params"]["update"]["sessionUpdate"].as_str() {
+                Some("agent_message_chunk" | "agent_thought_chunk") => {
+                    output.push_str(
+                        message["params"]["update"]["content"]["text"]
+                            .as_str()
+                            .unwrap(),
+                    );
+                }
+                Some("usage_update") => usages += 1,
+                _ => {}
+            }
+        }
+        assert!(output.len() < 1_000, "stream loop did not stop early");
+        assert!(output.ends_with("recovered concise response\n"));
+        assert_eq!(usages, 2);
+        let stderr = acp.finish();
+        assert!(stderr.contains("interrupted model response"), "{stderr}");
+    }
+}
+
+#[test]
+fn acp_stdio_persistent_stream_loop_returns_error_after_bounded_recovery() {
+    let cwd = tempfile::tempdir().unwrap();
+    let mut acp = AcpProcess::spawn(cwd.path(), Some("repeat_text"));
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+    acp.send(json!({
+        "jsonrpc":"2.0", "id":3, "method":"session/prompt",
+        "params":{"sessionId":session_id,"prompt":[{"type":"text","text":"check persistent repetition"}]}
+    }));
+    let mut usages = 0;
+    loop {
+        let message = acp.recv();
+        if message["id"] == 3 {
+            assert_eq!(message["error"]["code"], -32603);
+            assert_eq!(message["error"]["data"]["kind"], "agent_turn");
+            break;
+        }
+        assert_eq!(message["method"], "session/update");
+        if message["params"]["update"]["sessionUpdate"] == "usage_update" {
+            usages += 1;
+        }
+    }
+    let stderr = acp.finish();
+    assert_eq!(usages, 3, "{stderr}");
+    assert!(
+        stderr.contains("stopped without further retries"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn acp_stdio_streams_fake_provider_turn() {
     let cwd = tempfile::tempdir().unwrap();
     let mut acp = AcpProcess::spawn(cwd.path(), None);

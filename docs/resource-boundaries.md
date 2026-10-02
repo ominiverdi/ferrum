@@ -60,6 +60,11 @@ changes; it is not a directory sandbox.
 - Palette seeding considers each built-in independently and never replaces an existing
   palette.
 - Automatic color selection is evaluated for the actual output stream.
+- Tool-sequence detection stores at most 48 fixed-size SHA-256 fingerprints, not tool
+  arguments or output text. Its diagnostics omit arguments. Stream repetition detection
+  stores at most 6,144 Unicode characters and scans a bounded tail with a linear
+  prefix-match algorithm. Stream-loop recovery has one retry plus one final synthesis;
+  request-local interruption never clears user cancellation. See [config.md](config.md#max_tool_rounds).
 
 ## Regression matrix
 
@@ -79,6 +84,7 @@ changes; it is not a directory sandbox.
 | Ls | Huge directory memory is bounded by the requested result count and output remains sorted |
 | Palettes | Missing built-ins are repaired individually; existing custom files remain untouched; apply is atomic |
 | Color routing | Redirected stdout does not inherit stderr TTY color state |
+| Loop guards | Alternating calls stop; changed results, edits, and waits break sequence adjacency; stream detection is UTF-8/chunk safe and ignores fenced code; recovery is bounded, discards partial signed reasoning, and respects user cancellation |
 
 ## Finding disposition
 

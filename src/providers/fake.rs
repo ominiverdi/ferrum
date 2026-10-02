@@ -91,6 +91,17 @@ impl Provider for FakeProvider {
                 )));
             }
             #[cfg(test)]
+            if let Some(script) = last_user
+                .strip_prefix("__ferrum_test_loop_guard_")
+                .and_then(|script| script.strip_suffix("__"))
+            {
+                return Ok(ProviderResponse::message(scripted_response(
+                    script,
+                    messages,
+                    tools.is_empty(),
+                )));
+            }
+            #[cfg(test)]
             if last_user == "__ferrum_test_single_read__" {
                 return Ok(ProviderResponse::message(single_read_response(messages)));
             }
@@ -158,10 +169,20 @@ impl Provider for FakeProvider {
             for block in &response.message.content {
                 match block {
                     ContentBlock::Thinking { text, .. } if !text.is_empty() => {
-                        on_event(StreamEvent::ThinkingDelta(text.clone()));
+                        emit_fake_stream(
+                            text,
+                            StreamEvent::ThinkingDelta,
+                            on_event,
+                            cancelled.as_ref(),
+                        )?;
                     }
                     ContentBlock::Text { text } if !text.is_empty() => {
-                        on_event(StreamEvent::TextDelta(text.clone()));
+                        emit_fake_stream(
+                            text,
+                            StreamEvent::TextDelta,
+                            on_event,
+                            cancelled.as_ref(),
+                        )?;
                     }
                     _ => {}
                 }
@@ -169,6 +190,30 @@ impl Provider for FakeProvider {
             Ok(response)
         })
     }
+}
+
+fn emit_fake_stream(
+    text: &str,
+    event: fn(String) -> StreamEvent,
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
+    cancelled: Option<&Arc<AtomicBool>>,
+) -> Result<()> {
+    if text.len() <= 1_000 {
+        on_event(event(text.to_string()));
+    } else {
+        let mut start = 0;
+        for (count, (offset, ch)) in text.char_indices().enumerate() {
+            let end = offset + ch.len_utf8();
+            if (count + 1) % 128 == 0 || end == text.len() {
+                on_event(event(text[start..end].to_string()));
+                start = end;
+                if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+                    anyhow::bail!("aborted");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn image_inspection_response(messages: &[Message]) -> Message {
@@ -201,6 +246,12 @@ fn image_inspection_response(messages: &[Message]) -> Message {
 fn scripted_response(script: &str, messages: &[Message], final_response: bool) -> Message {
     match script {
         "repeat_read" => repeat_read_response(messages, final_response),
+        "loop_sequence" => sequence_read_response(messages, final_response),
+        "repeat_text"
+        | "repeat_text_recover"
+        | "repeat_thinking"
+        | "repeat_then_final"
+        | "repeat_with_tool" => repeating_stream_response(script, messages, final_response),
         "single_read" => single_read_response(messages),
         "cancel_bash" => cancel_bash_response(messages),
         "thought" => Message {
@@ -226,6 +277,63 @@ fn scripted_response(script: &str, messages: &[Message], final_response: bool) -
         "permission_protected" => permission_write_response(messages, "/etc/passwd"),
         "permission_bash_denied" => permission_bash_response(messages, "sh -c 'echo denied'"),
         _ => Message::text(Role::Assistant, format!("unknown fake script: {script}\n")),
+    }
+}
+
+fn sequence_read_response(messages: &[Message], final_response: bool) -> Message {
+    if final_response {
+        return Message::text(Role::Assistant, "final after tool sequence loop guard\n");
+    }
+    let round = messages
+        .iter()
+        .filter(|message| message.role == Role::Assistant)
+        .count();
+    Message {
+        role: Role::Assistant,
+        content: [1, 2]
+            .into_iter()
+            .map(|offset| ContentBlock::ToolUse {
+                id: format!("fake-sequence-{round}-{offset}"),
+                name: "read".to_string(),
+                input: serde_json::json!({"path": "loop.txt", "offset": offset, "limit": 1}),
+            })
+            .collect(),
+        usage: None,
+    }
+}
+
+fn repeating_stream_response(script: &str, messages: &[Message], final_response: bool) -> Message {
+    let recovering = messages.iter().any(|message| {
+        message.role == Role::System
+            && message
+                .text_content()
+                .contains("Its partial output was discarded")
+    });
+    if (recovering && matches!(script, "repeat_text_recover" | "repeat_thinking"))
+        || (final_response && script == "repeat_then_final")
+    {
+        return Message::text(Role::Assistant, "recovered concise response\n");
+    }
+    let text = "This response repeats the same explanation rather than checking a new result or making concrete progress on the requested task. ".repeat(100);
+    let mut content = vec![if script == "repeat_thinking" {
+        ContentBlock::Thinking {
+            text,
+            signature: Some("fake-interrupted-signature".to_string()),
+        }
+    } else {
+        ContentBlock::Text { text }
+    }];
+    if script == "repeat_with_tool" {
+        content.push(ContentBlock::ToolUse {
+            id: "fake-interrupted-write".to_string(),
+            name: "write".to_string(),
+            input: serde_json::json!({"path":"interrupted-write.txt", "content":"must not execute"}),
+        });
+    }
+    Message {
+        role: Role::Assistant,
+        content,
+        usage: None,
     }
 }
 
