@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/ayu.json
 
 prompt = "bold #59C2FF"
-hr = "#11151C"
+hr = "#8A9199"
 assistant = "#BFBDB6"
 thinking = "#565B66"
 tool = "bold #D2A6FF"

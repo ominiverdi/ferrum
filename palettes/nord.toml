@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/nord.json
 
 prompt = "bold #88C0D0"
-hr = "#434C5E"
+hr = "#81A1C1"
 assistant = "#ECEFF4"
 thinking = "#8B95A7"
 tool = "bold #81A1C1"

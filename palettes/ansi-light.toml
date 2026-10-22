@@ -1,6 +1,6 @@
 # Ferrum ANSI light palette. Uses terminal colors, tuned for light backgrounds.
 prompt = "bold blue"
-hr = "gray"
+hr = "bold"
 assistant = "default"
 thinking = "gray"
 tool = "bold purple"

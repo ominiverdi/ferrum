@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/monokai.json
 
 prompt = "bold #66d9ef"
-hr = "#1e1f1c"
+hr = "#a6a68c"
 assistant = "#f8f8f2"
 thinking = "#75715e"
 tool = "bold #ae81ff"

@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/one-dark.json
 
 prompt = "bold #61afef"
-hr = "#2c313a"
+hr = "#828997"
 assistant = "#abb2bf"
 thinking = "#5c6370"
 tool = "bold #c678dd"

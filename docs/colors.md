@@ -33,6 +33,25 @@ Interactive command:
 
 `/colors` opens the color-mode picker. Supplying a mode selects it directly.
 
+## Separator contrast
+
+The `------` separator uses the `hr` palette entry. The default and ANSI palettes
+use bold terminal foreground instead of dim or dark gray, so they follow the
+terminal's light/dark color scheme. Fixed-RGB built-in palettes use separator
+colors tested for at least 3:1 contrast against a dark reference background
+(`#202020`); the actual contrast depends on your terminal background.
+
+Existing `colors.toml` and saved palette files are never overwritten by a Ferrum
+upgrade. To brighten an existing Monokai setup, change only this entry in
+`~/.config/ferrum/colors.toml` and restart Ferrum:
+
+```toml
+hr = "#a6a68c"
+```
+
+Use `hr = "bold"` to follow the terminal's foreground instead. Custom separator
+colors are honored unchanged.
+
 ## Custom palette
 
 Create `~/.config/ferrum/colors.toml` to override any palette entry:

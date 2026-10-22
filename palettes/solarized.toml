@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/solarized.json
 
 prompt = "bold #268bd2"
-hr = "#073642"
+hr = "#839496"
 assistant = "#839496"
 thinking = "#586e75"
 tool = "bold #6c71c4"

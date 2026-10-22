@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/dracula.json
 
 prompt = "bold #bd93f9"
-hr = "#191a21"
+hr = "#a4a6c1"
 assistant = "#f8f8f2"
 thinking = "#6272a4"
 tool = "bold #ff79c6"

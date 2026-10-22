@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/tokyonight.json
 
 prompt = "bold #82aaff"
-hr = "#545c7e"
+hr = "#8992b1"
 assistant = "#c8d3f5"
 thinking = "#828bb8"
 tool = "bold #c099ff"

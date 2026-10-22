@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/rosepine.json
 
 prompt = "bold #9ccfd8"
-hr = "#21202e"
+hr = "#908caa"
 assistant = "#e0def4"
 thinking = "#6e6a86"
 tool = "bold #c4a7e7"

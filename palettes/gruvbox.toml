@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/gruvbox.json
 
 prompt = "bold #83a598"
-hr = "#504945"
+hr = "#a89984"
 assistant = "#ebdbb2"
 thinking = "#928374"
 tool = "bold #d3869b"

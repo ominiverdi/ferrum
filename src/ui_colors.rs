@@ -118,7 +118,7 @@ impl Default for ColorPalette {
     fn default() -> Self {
         Self {
             prompt: "cyan".to_string(),
-            hr: "dim".to_string(),
+            hr: "bold".to_string(),
             assistant: "default".to_string(),
             thinking: "dim".to_string(),
             tool: "cyan".to_string(),
@@ -718,6 +718,78 @@ mod tests {
     }
 
     #[test]
+    fn default_separator_is_bold_and_respects_color_mode() {
+        let palette = ColorPalette::default();
+        assert_eq!(palette.spec(ColorToken::Hr), "bold");
+        assert_eq!(
+            palette.paint_stdout(ColorToken::Hr, ColorMode::On, "------"),
+            "\x1b[1m------\x1b[0m"
+        );
+        assert_eq!(
+            palette.prefix_suffix_stdout(ColorToken::Hr, ColorMode::On),
+            ("\x1b[1m".to_string(), "\x1b[0m")
+        );
+        assert_eq!(
+            palette.paint_stdout(ColorToken::Hr, ColorMode::Off, "------"),
+            "------"
+        );
+        assert_eq!(
+            palette.prefix_suffix_stdout(ColorToken::Hr, ColorMode::Off),
+            (String::new(), "")
+        );
+    }
+
+    #[test]
+    fn custom_separator_color_is_not_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("colors.toml"), "hr = \"#1e1f1c\"\n").unwrap();
+        let palette = ColorPalette::load(temp.path()).unwrap();
+        assert_eq!(palette.hr, "#1e1f1c");
+        assert_eq!(
+            palette.paint_stdout(ColorToken::Hr, ColorMode::On, "------"),
+            "\x1b[38;2;30;31;28m------\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn built_in_separators_have_contrast_on_a_dark_reference_background() {
+        fn luminance((r, g, b): (u8, u8, u8)) -> f64 {
+            let linear = |channel: u8| {
+                let channel = f64::from(channel) / 255.0;
+                if channel <= 0.04045 {
+                    channel / 12.92
+                } else {
+                    ((channel + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+        }
+
+        let background = luminance((0x20, 0x20, 0x20));
+        for (name, content) in PALETTE_FILES {
+            let raw = toml::from_str(content).unwrap();
+            let palette = ColorPalette::from_raw_entries(raw, true).unwrap();
+            let style = AnsiStyle::parse(&palette.hr).unwrap();
+            assert!(
+                !style.codes.iter().any(|code| code == "2"),
+                "{name}: dim separator"
+            );
+            if let Some(hex) = palette.hr.strip_prefix('#') {
+                let foreground = luminance(parse_hex_rgb(hex).unwrap());
+                let contrast =
+                    (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05);
+                assert!(
+                    contrast >= 3.0,
+                    "{name}: separator contrast is {contrast:.2}:1"
+                );
+            } else if matches!(*name, "ansi-dark.toml" | "ansi-light.toml") {
+                // ANSI colors depend on the terminal palette; inherit its foreground.
+                assert_eq!(palette.hr, "bold", "{name}");
+            }
+        }
+    }
+
+    #[test]
     fn repairs_partial_palette_seed_without_overwriting_existing_files() {
         let temp = tempfile::tempdir().unwrap();
         let palette_dir = temp.path().join("color-palettes");
@@ -731,6 +803,12 @@ mod tests {
             "custom = true\n"
         );
         assert!(palette_dir.join("tokyonight.toml").is_file());
+        assert_eq!(
+            ColorPalette::load_palette_file(&palette_dir.join("monokai.toml"))
+                .unwrap()
+                .hr,
+            "#a6a68c"
+        );
     }
 
     #[test]

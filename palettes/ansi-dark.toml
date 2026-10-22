@@ -1,6 +1,6 @@
 # Ferrum ANSI dark palette. Uses terminal colors, not fixed RGB.
 prompt = "bold bright-cyan"
-hr = "gray"
+hr = "bold"
 assistant = "default"
 thinking = "gray"
 tool = "bold bright-blue"

@@ -1,5 +1,5 @@
 prompt = "bold #8abeb7"
-hr = "#666666"
+hr = "#8a8a8a"
 assistant = "#d4d4d4"
 thinking = "#808080"
 tool = "bold #d4d4d4"

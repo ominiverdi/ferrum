@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/flexoki.json
 
 prompt = "bold #DA702C"
-hr = "#403E3C"
+hr = "#9F9D96"
 assistant = "#CECDC3"
 thinking = "#6F6E69"
 tool = "bold #4385BE"

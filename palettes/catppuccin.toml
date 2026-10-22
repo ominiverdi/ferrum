@@ -2,7 +2,7 @@
 # Source: /home/ominiverdi/tmp/opencode-fork/packages/tui/src/theme/assets/catppuccin.json
 
 prompt = "bold #89b4fa"
-hr = "#585b70"
+hr = "#9399b2"
 assistant = "#cdd6f4"
 thinking = "#9399b2"
 tool = "bold #cba6f7"
