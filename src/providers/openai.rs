@@ -54,6 +54,7 @@ pub struct OpenAiCompatProvider {
     streaming: bool,
     stream_usage: bool,
     reasoning_history_field: ChatReasoningHistoryField,
+    timeout: Option<Duration>,
     client: Client,
 }
 
@@ -312,7 +313,9 @@ impl OpenAiCompatProvider {
         base_url: String,
         streaming: bool,
         stream_usage: bool,
+        timeout_seconds: Option<u64>,
     ) -> Result<Self> {
+        crate::config::validate_provider_timeout(timeout_seconds)?;
         let base_url = base_url.trim_end_matches('/').to_string();
         Ok(Self {
             api_key,
@@ -320,8 +323,47 @@ impl OpenAiCompatProvider {
             base_url,
             streaming,
             stream_usage,
+            timeout: timeout_seconds.map(Duration::from_secs),
             client: Client::builder().redirect(Policy::none()).build()?,
         })
+    }
+
+    fn initial_response_timeout(&self) -> Duration {
+        self.timeout.unwrap_or(PROVIDER_INITIAL_RESPONSE_TIMEOUT)
+    }
+
+    fn stream_idle_timeout(&self) -> Duration {
+        self.timeout.unwrap_or(PROVIDER_STREAM_IDLE_TIMEOUT)
+    }
+
+    fn initial_response_timeout_error(&self, label: &str) -> anyhow::Error {
+        provider_timeout_error(format!(
+            "{label} did not respond within {}s; for slow local inference, increase timeout_seconds in this provider's config",
+            self.initial_response_timeout().as_secs_f64()
+        ))
+    }
+
+    fn success_body_limits(&self) -> BodyLimits {
+        let defaults = success_body_limits();
+        BodyLimits {
+            idle_timeout: self.timeout.unwrap_or(defaults.idle_timeout),
+            total_timeout: self.timeout.unwrap_or(defaults.total_timeout),
+            ..defaults
+        }
+    }
+
+    async fn collect_body(
+        &self,
+        response: Response,
+        cancelled: Option<&Arc<AtomicBool>>,
+        label: &str,
+    ) -> Result<Vec<u8>> {
+        let limits = if response.status().is_success() {
+            self.success_body_limits()
+        } else {
+            error_body_limits()
+        };
+        collect_response_body(response, cancelled, limits, label).await
     }
 }
 
@@ -367,26 +409,21 @@ impl Provider for OpenAiCompatProvider {
             let response = cancel::race_timeout(
                 http_request.json(&request).send(),
                 None,
-                PROVIDER_INITIAL_RESPONSE_TIMEOUT,
+                self.initial_response_timeout(),
             )
             .await
             .map_err(|error| match error {
                 WaitError::Cancelled => anyhow::anyhow!("aborted"),
-                WaitError::TimedOut => provider_timeout_error(format!(
-                    "OpenAI-compatible provider did not respond within {}s",
-                    PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
-                )),
+                WaitError::TimedOut => {
+                    self.initial_response_timeout_error("OpenAI-compatible provider")
+                }
             })?
             .context("OpenAI-compatible request failed")?;
 
             let status = response.status();
-            let body = collect_provider_body(
-                response,
-                None,
-                status.is_success(),
-                "OpenAI-compatible response",
-            )
-            .await?;
+            let body = self
+                .collect_body(response, None, "OpenAI-compatible response")
+                .await?;
             let body = if !status.is_success() {
                 let text = utf8_body(&body, "OpenAI-compatible error response")?;
                 if reasoning_effort.is_some() && is_reasoning_effort_unsupported_error(text) {
@@ -403,25 +440,24 @@ impl Provider for OpenAiCompatProvider {
                     let retry_response = cancel::race_timeout(
                         retry_http_request.json(&retry_request).send(),
                         None,
-                        PROVIDER_INITIAL_RESPONSE_TIMEOUT,
+                        self.initial_response_timeout(),
                     )
                     .await
                     .map_err(|error| match error {
                         WaitError::Cancelled => anyhow::anyhow!("aborted"),
-                        WaitError::TimedOut => provider_timeout_error(format!(
-                            "OpenAI-compatible reasoning retry did not respond within {}s",
-                            PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
-                        )),
+                        WaitError::TimedOut => {
+                            self.initial_response_timeout_error("OpenAI-compatible reasoning retry")
+                        }
                     })?
                     .context("OpenAI-compatible reasoning retry failed")?;
                     let retry_status = retry_response.status();
-                    let retry_body = collect_provider_body(
-                        retry_response,
-                        None,
-                        retry_status.is_success(),
-                        "OpenAI-compatible reasoning retry response",
-                    )
-                    .await?;
+                    let retry_body = self
+                        .collect_body(
+                            retry_response,
+                            None,
+                            "OpenAI-compatible reasoning retry response",
+                        )
+                        .await?;
                     if !retry_status.is_success() {
                         return Err(provider_status_error(
                             "OpenAI-compatible provider",
@@ -512,13 +548,13 @@ impl Provider for OpenAiCompatProvider {
             .await?;
             let status = response.status();
             if !status.is_success() {
-                let body = collect_provider_body(
-                    response,
-                    cancelled.as_ref(),
-                    false,
-                    "OpenAI-compatible error response",
-                )
-                .await?;
+                let body = self
+                    .collect_body(
+                        response,
+                        cancelled.as_ref(),
+                        "OpenAI-compatible error response",
+                    )
+                    .await?;
                 let text = utf8_body(&body, "OpenAI-compatible error response")?;
                 if self.stream_usage && is_stream_usage_unsupported_error(text) {
                     response = send_openai_compat_stream_request(
@@ -536,13 +572,13 @@ impl Provider for OpenAiCompatProvider {
                     .await?;
                     let retry_status = response.status();
                     if !retry_status.is_success() {
-                        let retry_body = collect_provider_body(
-                            response,
-                            cancelled.as_ref(),
-                            false,
-                            "OpenAI-compatible retry error response",
-                        )
-                        .await?;
+                        let retry_body = self
+                            .collect_body(
+                                response,
+                                cancelled.as_ref(),
+                                "OpenAI-compatible retry error response",
+                            )
+                            .await?;
                         return Err(provider_status_error(
                             "OpenAI-compatible provider",
                             retry_status,
@@ -567,13 +603,13 @@ impl Provider for OpenAiCompatProvider {
                     .await?;
                     let retry_status = response.status();
                     if !retry_status.is_success() {
-                        let retry_body = collect_provider_body(
-                            response,
-                            cancelled.as_ref(),
-                            false,
-                            "OpenAI-compatible reasoning retry error response",
-                        )
-                        .await?;
+                        let retry_body = self
+                            .collect_body(
+                                response,
+                                cancelled.as_ref(),
+                                "OpenAI-compatible reasoning retry error response",
+                            )
+                            .await?;
                         return Err(provider_status_error(
                             "OpenAI-compatible provider",
                             retry_status,
@@ -593,7 +629,7 @@ impl Provider for OpenAiCompatProvider {
             consume_sse_response(
                 response,
                 cancelled.as_ref(),
-                PROVIDER_STREAM_IDLE_TIMEOUT,
+                self.stream_idle_timeout(),
                 "OpenAI-compatible stream",
                 |data| {
                     if parser.process_data(data, Some(on_event))? {
@@ -667,15 +703,14 @@ async fn send_openai_compat_stream_request(
     cancel::race_timeout(
         http_request.json(&request).send(),
         cancelled,
-        PROVIDER_INITIAL_RESPONSE_TIMEOUT,
+        provider.initial_response_timeout(),
     )
     .await
     .map_err(|error| match error {
         WaitError::Cancelled => anyhow::anyhow!("aborted"),
-        WaitError::TimedOut => provider_timeout_error(format!(
-            "OpenAI-compatible provider did not respond within {}s",
-            PROVIDER_INITIAL_RESPONSE_TIMEOUT.as_secs()
-        )),
+        WaitError::TimedOut => {
+            provider.initial_response_timeout_error("OpenAI-compatible provider")
+        }
     })?
     .context("OpenAI-compatible streaming request failed")
 }
@@ -3358,6 +3393,7 @@ data: {"type":"response.completed","response":{"output":[]}}
             base_url,
             false,
             false,
+            None,
         )
         .unwrap();
         let response = provider
@@ -3375,6 +3411,7 @@ data: {"type":"response.completed","response":{"output":[]}}
             base_url,
             true,
             false,
+            None,
         )
         .unwrap();
         let response = provider
@@ -3392,10 +3429,232 @@ data: {"type":"response.completed","response":{"output":[]}}
         assert!(streaming_server.join().unwrap());
     }
 
+    #[test]
+    fn compatible_provider_timeout_preserves_defaults_and_response_bounds() {
+        let provider = OpenAiCompatProvider::new(
+            None,
+            "http://localhost:8080/v1".to_string(),
+            true,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(provider.initial_response_timeout(), Duration::from_secs(60));
+        assert_eq!(provider.stream_idle_timeout(), Duration::from_secs(90));
+        assert_eq!(
+            provider.success_body_limits().idle_timeout,
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            provider.success_body_limits().total_timeout,
+            Duration::from_secs(120)
+        );
+        let extended = OpenAiCompatProvider::new(
+            None,
+            "http://localhost:8080/v1".to_string(),
+            true,
+            false,
+            Some(600),
+        )
+        .unwrap();
+        assert_eq!(
+            extended.initial_response_timeout(),
+            Duration::from_secs(600)
+        );
+        assert_eq!(extended.stream_idle_timeout(), Duration::from_secs(600));
+        assert_eq!(
+            extended.success_body_limits().idle_timeout,
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            extended.success_body_limits().total_timeout,
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            extended.success_body_limits().max_bytes,
+            provider.success_body_limits().max_bytes
+        );
+        assert!(
+            OpenAiCompatProvider::new(
+                None,
+                "http://localhost:8080/v1".to_string(),
+                true,
+                false,
+                Some(0),
+            )
+            .is_err()
+        );
+    }
+
+    // Every test server accepts at most one request. A timeout must not replay it.
+    fn spawn_delayed_compat_server(
+        streaming: bool,
+        header_delay: Duration,
+        body_delay: Duration,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "no provider request");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                }
+            };
+            // Drop the listening socket: accidental retries fail rather than hang.
+            drop(listener);
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut content_length = None;
+            loop {
+                let mut line = String::new();
+                assert!(std::io::BufRead::read_line(&mut reader, &mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = Some(value.trim().parse::<usize>().unwrap());
+                }
+            }
+            let content_length = content_length.expect("missing request length");
+            assert!(content_length <= 64 * 1024);
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).unwrap();
+            thread::sleep(header_delay);
+            let content_type = if streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
+            if write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n"
+            )
+            .and_then(|_| stream.flush())
+            .is_err()
+            {
+                return;
+            }
+            thread::sleep(body_delay);
+            let body: &[u8] = if streaming {
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"delayed\"}}]}\n\ndata: [DONE]\n\n"
+            } else {
+                br#"{"choices":[{"message":{"role":"assistant","content":"delayed"}}]}"#
+            };
+            let _ = stream.write_all(body);
+            let _ = stream.flush();
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    async fn delayed_compat_request(
+        streaming: bool,
+        header_delay: Duration,
+        body_delay: Duration,
+        timeout: Duration,
+        cancelled: Option<Arc<AtomicBool>>,
+    ) -> Result<ProviderResponse> {
+        let (base_url, server) = spawn_delayed_compat_server(streaming, header_delay, body_delay);
+        let mut provider = OpenAiCompatProvider::new(None, base_url, streaming, false, Some(600))?;
+        // Scale budgets down for regression tests; public config uses whole seconds.
+        provider.timeout = Some(timeout);
+        let response = provider
+            .complete_streaming(
+                "test-model",
+                &[],
+                &[],
+                ThinkingLevel::Off,
+                &mut |_| {},
+                cancelled,
+            )
+            .await;
+        tokio::task::spawn_blocking(move || server.join().unwrap())
+            .await
+            .unwrap();
+        response
+    }
+
+    #[tokio::test]
+    async fn compatible_provider_timeout_applies_to_headers_and_body_in_both_modes() {
+        for streaming in [false, true] {
+            for delayed_headers in [false, true] {
+                let (header_delay, body_delay) = if delayed_headers {
+                    (Duration::from_millis(150), Duration::ZERO)
+                } else {
+                    (Duration::ZERO, Duration::from_millis(150))
+                };
+                let response = delayed_compat_request(
+                    streaming,
+                    header_delay,
+                    body_delay,
+                    Duration::from_secs(2),
+                    None,
+                )
+                .await
+                .unwrap();
+                assert_eq!(response.message.display_text(), "delayed");
+
+                let error = delayed_compat_request(
+                    streaming,
+                    header_delay,
+                    body_delay,
+                    Duration::from_millis(30),
+                    None,
+                )
+                .await
+                .unwrap_err();
+                assert!(super::super::is_timeout_error(&error), "{error:#}");
+                if delayed_headers {
+                    assert!(error.to_string().contains("timeout_seconds"), "{error:#}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn extended_compatible_timeouts_still_allow_cancellation() {
+        for streaming in [false, true] {
+            for delayed_headers in [false, true] {
+                let cancelled = Arc::new(AtomicBool::new(false));
+                let trigger = Arc::clone(&cancelled);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    trigger.store(true, Ordering::Relaxed);
+                });
+                let (header_delay, body_delay) = if delayed_headers {
+                    (Duration::from_millis(200), Duration::ZERO)
+                } else {
+                    (Duration::ZERO, Duration::from_millis(200))
+                };
+                let error = delayed_compat_request(
+                    streaming,
+                    header_delay,
+                    body_delay,
+                    Duration::from_secs(600),
+                    Some(cancelled),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(error.to_string(), "aborted");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn streaming_cancellation_remains_an_abort() {
         let (base_url, server) = spawn_stream_server(b"", Duration::from_millis(200));
-        let provider = OpenAiCompatProvider::new(None, base_url, true, false).unwrap();
+        let provider = OpenAiCompatProvider::new(None, base_url, true, false, None).unwrap();
         let cancelled = Arc::new(AtomicBool::new(false));
         let trigger = Arc::clone(&cancelled);
         tokio::spawn(async move {
@@ -3421,7 +3680,7 @@ data: {"type":"response.completed","response":{"output":[]}}
     async fn stream_failure_after_partial_output_is_not_retried() {
         const BODY: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
         let (base_url, server) = spawn_stream_server(BODY, Duration::ZERO);
-        let provider = OpenAiCompatProvider::new(None, base_url, true, false).unwrap();
+        let provider = OpenAiCompatProvider::new(None, base_url, true, false, None).unwrap();
         let mut events = Vec::new();
         let error = provider
             .complete_streaming(
@@ -3447,7 +3706,7 @@ data: {"type":"response.completed","response":{"output":[]}}
         const BODY: &[u8] =
             b"data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata:[DONE]\n\n";
         let (base_url, server) = spawn_stream_server(BODY, Duration::from_millis(750));
-        let provider = OpenAiCompatProvider::new(None, base_url, true, false).unwrap();
+        let provider = OpenAiCompatProvider::new(None, base_url, true, false, None).unwrap();
         let mut events = Vec::new();
         let response = tokio::time::timeout(
             Duration::from_millis(500),

@@ -1186,7 +1186,7 @@ fn acp_stdio_persists_lists_loads_resumes_closes_and_deletes_sessions() {
 }
 
 #[test]
-fn acp_stdio_can_resume_a_print_mode_session() {
+fn acp_stdio_can_resume_a_perf_enabled_print_session_without_terminal_output() {
     let cwd = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();
     let config = storage.path().join("config");
@@ -1194,7 +1194,7 @@ fn acp_stdio_can_resume_a_print_mode_session() {
     std::fs::create_dir(&config).unwrap();
     std::fs::create_dir(&data).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_ferrum"))
-        .arg("-p")
+        .args(["--perf", "-p"])
         .arg("from print mode")
         .current_dir(cwd.path())
         .env("FERRUM_CONFIG_DIR", &config)
@@ -1225,7 +1225,22 @@ fn acp_stdio_can_resume_a_print_mode_session() {
     }));
     assert_eq!(acp.recv()["result"], json!({}));
     acp.assert_available_commands_update(session_id);
-    acp.finish();
+    acp.send(json!({
+        "jsonrpc": "2.0", "id": 22, "method": "session/prompt",
+        "params": {"sessionId": session_id, "prompt": [{"type": "text", "text": "still pipe safe"}]}
+    }));
+    loop {
+        let message = acp.recv();
+        if message["id"] == 22 {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+    }
+    let stderr = acp.finish();
+    assert!(
+        !stderr.contains("perf:"),
+        "ACP must not use the terminal perf renderer"
+    );
 }
 
 #[test]

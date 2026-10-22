@@ -90,6 +90,8 @@ pub enum SessionEntry {
         diff_mode: Option<String>,
         safety: Option<String>,
         tools: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        perf_enabled: Option<bool>,
         #[serde(default)]
         goal: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -409,6 +411,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            perf_enabled: None,
             goal: None,
             mode: None,
         })
@@ -427,6 +430,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            perf_enabled: None,
             goal: None,
             mode: None,
         })
@@ -445,6 +449,7 @@ impl JsonlSession {
             diff_mode: Some(diff_mode.to_string()),
             safety: None,
             tools: None,
+            perf_enabled: None,
             goal: None,
             mode: None,
         })
@@ -463,6 +468,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: Some(safety.to_string()),
             tools: None,
+            perf_enabled: None,
             goal: None,
             mode: None,
         })
@@ -481,6 +487,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: Some(tools.to_vec()),
+            perf_enabled: None,
             goal: None,
             mode: None,
         })
@@ -499,6 +506,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            perf_enabled: None,
             goal: None,
             mode: None,
         })
@@ -517,6 +525,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            perf_enabled: None,
             goal: None,
             mode: None,
         })
@@ -538,7 +547,27 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            perf_enabled: None,
             goal: Some(goal.to_string()),
+            mode: None,
+        })
+    }
+
+    pub fn append_perf_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.append(&SessionEntry::Metadata {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            timestamp_ms: now_ms(),
+            title: None,
+            provider: None,
+            model: None,
+            thinking: None,
+            color_mode: None,
+            diff_mode: None,
+            safety: None,
+            tools: None,
+            perf_enabled: Some(enabled),
+            goal: None,
             mode: None,
         })
     }
@@ -556,6 +585,7 @@ impl JsonlSession {
             diff_mode: None,
             safety: None,
             tools: None,
+            perf_enabled: None,
             goal: None,
             mode: Some(mode),
         })
@@ -775,6 +805,7 @@ pub struct SessionInfo {
     pub diff_mode: Option<String>,
     pub safety: Option<String>,
     pub tools: Option<Vec<String>>,
+    pub perf_enabled: Option<bool>,
     pub goal: Option<String>,
     pub mode: Option<SessionMode>,
     pub title: String,
@@ -788,7 +819,10 @@ pub struct SessionInfo {
 pub fn latest_session_for_cwd(dir: &Path, cwd: &Path) -> Result<Option<PathBuf>> {
     let sessions = list_sessions_for_cwd(dir, cwd)?;
     let is_resumable = |info: &&SessionInfo| {
-        info.message_count > 0 || info.title != "(empty session)" || info.goal.is_some()
+        info.message_count > 0
+            || info.title != "(empty session)"
+            || info.goal.is_some()
+            || info.perf_enabled.is_some()
     };
     Ok(sessions
         .iter()
@@ -1256,6 +1290,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
     let mut explicit_diff_mode = None;
     let mut explicit_safety = None;
     let mut explicit_tools = None;
+    let mut explicit_perf_enabled = None;
     let mut explicit_goal = None;
     let mut explicit_mode = None;
     let mut total_message_count = 0usize;
@@ -1311,6 +1346,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
                 diff_mode,
                 safety,
                 tools,
+                perf_enabled,
                 goal,
                 mode,
                 ..
@@ -1353,6 +1389,9 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
                 if let Some(tools) = tools {
                     explicit_tools = Some(tools);
                 }
+                if let Some(enabled) = perf_enabled {
+                    explicit_perf_enabled = Some(enabled);
+                }
                 if let Some(goal) = goal {
                     let goal = goal.trim();
                     if goal.len() <= MAX_GOAL_BYTES {
@@ -1391,6 +1430,7 @@ fn session_info_with_diagnostics(path: &Path, diagnose: bool) -> Result<Option<S
         diff_mode: explicit_diff_mode,
         safety: explicit_safety,
         tools: explicit_tools,
+        perf_enabled: explicit_perf_enabled,
         goal: explicit_goal,
         mode: explicit_mode,
         title: explicit_title
@@ -2208,6 +2248,63 @@ mod tests {
     }
 
     #[test]
+    fn perf_metadata_preserves_false_and_survives_other_updates_and_compaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut session = JsonlSession::create(
+            temp.path().to_path_buf(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            session_info(session.path()).unwrap().unwrap().perf_enabled,
+            None
+        );
+
+        session.append_perf_enabled(true).unwrap();
+        session.append_title("keep preferences").unwrap();
+        session.append_compaction("summary checkpoint").unwrap();
+        assert_eq!(
+            session_info(session.path()).unwrap().unwrap().perf_enabled,
+            Some(true)
+        );
+
+        session.append_perf_enabled(false).unwrap();
+        session.append_thinking("high").unwrap();
+        let path = session.path().clone();
+        drop(session);
+        let session = JsonlSession::open(path).unwrap();
+        let info = session_info(session.path()).unwrap().unwrap();
+        assert_eq!(info.perf_enabled, Some(false));
+        assert_eq!(info.title, "keep preferences");
+        assert_eq!(info.thinking.as_deref(), Some("high"));
+        assert_eq!(info.compaction_count, 1);
+        assert_eq!(info.message_count, 1);
+        assert_eq!(load_messages(session.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_metadata_without_perf_still_loads() {
+        let entry: SessionEntry = serde_json::from_str(
+            r#"{"type":"metadata","id":"legacy","timestamp_ms":1,"thinking":"high"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            entry,
+            SessionEntry::Metadata {
+                perf_enabled: None,
+                ..
+            }
+        ));
+        let serialized = serde_json::to_value(entry).unwrap();
+        assert!(serialized.get("perf_enabled").is_none());
+    }
+
+    #[test]
     fn goal_storage_rejects_oversized_notes() {
         let temp = tempfile::tempdir().unwrap();
         let mut session = JsonlSession::create(
@@ -2442,6 +2539,31 @@ mod tests {
             latest_session_for_cwd(temp.path(), &cwd).unwrap(),
             Some(goal_path)
         );
+    }
+
+    #[test]
+    fn latest_session_keeps_perf_only_session() {
+        for enabled in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let cwd = std::env::current_dir().unwrap();
+            let mut session = JsonlSession::create(
+                temp.path().to_path_buf(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            session.append_perf_enabled(enabled).unwrap();
+            let path = session.path().clone();
+            drop(session);
+            assert_eq!(
+                latest_session_for_cwd(temp.path(), &cwd).unwrap(),
+                Some(path)
+            );
+        }
     }
 
     #[test]

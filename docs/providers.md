@@ -142,6 +142,36 @@ ferrum --provider local-infer --model qwen3.6-27b -p "hello"
 
 This is useful for local OpenAI-compatible servers that do not require authentication.
 
+### Slow local inference and timeouts
+
+Local model loading and prompt processing can take longer than the default
+60-second wait for response headers. Some servers send headers immediately but
+then produce no body data while working; those waits have separate defaults
+(90 seconds between streaming chunks, or 30-second idle / 120-second total body
+limits for non-streaming replies).
+
+Set `timeout_seconds` in the existing OpenAI-compatible provider entry to override
+all four inference deadlines:
+
+```toml
+[providers.local-infer]
+type = "openai-compatible"
+base_url = "http://localhost:8192"
+default_model = "qwen3.6-27b"
+timeout_seconds = 600
+```
+
+This allows up to 600 seconds for response headers, between streaming chunks,
+and for idle/total non-streaming body collection. A continuously active stream
+still has no total duration limit. Use an integer from 1 to 86400; zero does not
+disable timeouts. Without this setting, the existing defaults remain unchanged.
+
+The override applies only to that provider's inference requests, including
+compatibility retries. It does not change model listing, OAuth, error-body
+limits, or Codex timeouts. Cancellation remains responsive, response-size limits
+remain enforced, and inference timeouts are not automatically retried.
+Restart Ferrum after changing the provider configuration.
+
 ### Generic OpenAI-compatible example
 
 ```toml

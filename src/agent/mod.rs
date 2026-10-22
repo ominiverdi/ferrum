@@ -943,7 +943,9 @@ pub async fn run_print(
     } else {
         AgentSession::new_print(&effective_config)?
     };
-    state.perf_enabled = perf;
+    if perf {
+        state.set_perf_enabled(true)?;
+    }
     print_implicit_fake_provider_notice(&effective_config);
     if let Some(title) = title {
         state.set_title(title)?;
@@ -999,7 +1001,9 @@ pub async fn run_interactive(
         )?,
         (None, None, false) => AgentSession::new(config)?,
     };
-    state.perf_enabled = perf;
+    if perf {
+        state.set_perf_enabled(true)?;
+    }
     print_implicit_fake_provider_notice(config);
     if let Some(title) = title {
         state.set_title(title)?;
@@ -2803,19 +2807,23 @@ impl AgentSession {
         )?;
         let messages = immutable_system_messages(config, &cwd, &skills)?;
         let readable_roots = readable_roots_with_skills(config.readable_roots.clone(), &skills);
+        let mut session = session::JsonlSession::create_with_color_mode_and_mode_at_cwd(
+            config.sessions_dir(),
+            Some(config.provider_name.clone()),
+            Some(config.model.clone()),
+            Some(config.thinking.as_str().to_string()),
+            Some(config.color_mode.as_str().to_string()),
+            Some(config.diff_mode.as_str().to_string()),
+            Some(config.safety.as_str().to_string()),
+            None,
+            &cwd,
+            mode,
+        )?;
+        if config.perf_enabled {
+            session.append_perf_enabled(true)?;
+        }
         Ok(Self {
-            session: session::JsonlSession::create_with_color_mode_and_mode_at_cwd(
-                config.sessions_dir(),
-                Some(config.provider_name.clone()),
-                Some(config.model.clone()),
-                Some(config.thinking.as_str().to_string()),
-                Some(config.color_mode.as_str().to_string()),
-                Some(config.diff_mode.as_str().to_string()),
-                Some(config.safety.as_str().to_string()),
-                None,
-                &cwd,
-                mode,
-            )?,
+            session,
             messages,
             skills,
             cwd,
@@ -2832,7 +2840,7 @@ impl AgentSession {
             active_tool_names: HashSet::new(),
             saved_tool_names: None,
             last_context_warning_bucket: None,
-            perf_enabled: false,
+            perf_enabled: config.perf_enabled,
             last_performance: None,
         })
     }
@@ -2916,7 +2924,10 @@ impl AgentSession {
                 Ok(state)
             }
             session::jsonl::SessionRefResolution::Created(path) => {
-                let state = Self::open_session_with_preview(config, path.clone(), false)?;
+                let mut state = Self::open_session_with_preview(config, path.clone(), false)?;
+                if config.perf_enabled {
+                    state.set_perf_enabled(true)?;
+                }
                 println!("started named session {}", path.display());
                 Ok(state)
             }
@@ -2956,7 +2967,12 @@ impl AgentSession {
             anyhow::bail!("session cwd is not a directory: {}", cwd.display());
         }
         let session = session::JsonlSession::open(path.clone())?;
-        let saved_tool_names = session::jsonl::session_info(&path)?.and_then(|info| info.tools);
+        let info = session::jsonl::session_info(&path)?;
+        let perf_enabled = info
+            .as_ref()
+            .and_then(|info| info.perf_enabled)
+            .unwrap_or(config.perf_enabled);
+        let saved_tool_names = info.and_then(|info| info.tools);
         let mut messages = session::jsonl::load_messages(&path)?;
         if show_preview {
             print_session_preview(&messages, 2);
@@ -2989,9 +3005,15 @@ impl AgentSession {
             active_tool_names: HashSet::new(),
             saved_tool_names,
             last_context_warning_bucket: None,
-            perf_enabled: false,
+            perf_enabled,
             last_performance: None,
         })
+    }
+
+    fn set_perf_enabled(&mut self, enabled: bool) -> Result<()> {
+        self.session.append_perf_enabled(enabled)?;
+        self.perf_enabled = enabled;
+        Ok(())
     }
 
     async fn run_turn(&mut self, prompt: String, config: &Config, interactive: bool) -> Result<()> {
@@ -4409,6 +4431,7 @@ impl AgentSession {
                         || session.path == *self.session.path()
                         || session.title != "(empty session)"
                         || session.goal.is_some()
+                        || session.perf_enabled.is_some()
                 })
                 .collect(),
         )
@@ -4430,7 +4453,6 @@ impl AgentSession {
         let _restored_tools =
             restore_session_preferences(&mut candidate, &path, true, true, true, true, true)?;
         let mut next = Self::open_session(&candidate, path)?;
-        next.perf_enabled = self.perf_enabled;
         self.checkpoint_session()?;
         next.promote_to_interactive()?;
         *self = next;
@@ -4460,7 +4482,9 @@ impl AgentSession {
 
     fn new_session(&mut self, config: &Config) -> Result<()> {
         let mut next = Self::new(config)?;
-        next.perf_enabled = self.perf_enabled;
+        if !next.perf_enabled || next.perf_enabled != self.perf_enabled {
+            next.set_perf_enabled(self.perf_enabled)?;
+        }
         self.checkpoint_session()?;
         println!("started new session {}", next.session.path().display());
         *self = next;
@@ -7713,22 +7737,138 @@ mod context_pressure_tests {
     }
 
     #[test]
-    fn perf_command_toggles_runtime_display_across_new_sessions() {
+    fn perf_command_persists_display_across_new_sessions_and_resume() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         let mut state = AgentSession::new(&config).unwrap();
 
         assert!(!state.perf_enabled);
+        assert!(
+            !AgentSession::open_session(&config, state.session.path().clone())
+                .unwrap()
+                .perf_enabled
+        );
         assert!(matches!(
             handle_command("/perf on", &mut config, &mut state).unwrap(),
             CommandAction::Continue
         ));
         assert!(state.perf_enabled);
+        let original_path = state.session.path().clone();
+        assert!(
+            AgentSession::open_session(&config, original_path)
+                .unwrap()
+                .perf_enabled
+        );
         handle_command("/new", &mut config, &mut state).unwrap();
         assert!(state.perf_enabled);
+        let new_path = state.session.path().clone();
+        assert!(
+            AgentSession::open_session(&config, new_path.clone())
+                .unwrap()
+                .perf_enabled
+        );
         handle_command("/perf off", &mut config, &mut state).unwrap();
         assert!(!state.perf_enabled);
         assert!(handle_command("/perf sometimes", &mut config, &mut state).is_err());
+        assert!(handle_command("/perf on extra", &mut config, &mut state).is_err());
+        assert!(handle_command("/perf off extra", &mut config, &mut state).is_err());
+        assert!(
+            !AgentSession::open_session(&config, new_path)
+                .unwrap()
+                .perf_enabled
+        );
+        handle_command("/new", &mut config, &mut state).unwrap();
+        assert!(!state.perf_enabled);
+        assert_eq!(
+            session::jsonl::session_info(state.session.path())
+                .unwrap()
+                .unwrap()
+                .perf_enabled,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn perf_command_reports_global_save_failure_after_saving_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentSession::new(&config).unwrap();
+        let target = temp.path().join("unrelated.toml");
+        fs::write(&target, "# do not replace\n").unwrap();
+        std::os::unix::fs::symlink(&target, temp.path().join("config.toml")).unwrap();
+        let error = handle_command("/perf on", &mut config, &mut state)
+            .err()
+            .expect("global save must reject symlink target");
+        assert!(error.to_string().contains("session preference saved"));
+        assert!(state.perf_enabled);
+        assert!(!config.perf_enabled);
+        assert_eq!(
+            session::jsonl::session_info(state.session.path())
+                .unwrap()
+                .unwrap()
+                .perf_enabled,
+            Some(true)
+        );
+        assert_eq!(fs::read_to_string(target).unwrap(), "# do not replace\n");
+    }
+
+    #[test]
+    fn saved_perf_setting_wins_over_global_default_and_legacy_uses_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut saved = AgentSession::new(&config).unwrap();
+        saved.set_perf_enabled(false).unwrap();
+        let legacy = AgentSession::new(&config).unwrap();
+        config.perf_enabled = true;
+        let saved = AgentSession::open_session(&config, saved.session.path().clone()).unwrap();
+        assert!(!saved.perf_enabled);
+        let legacy = AgentSession::open_session(&config, legacy.session.path().clone()).unwrap();
+        assert!(legacy.perf_enabled);
+        let fresh = AgentSession::new(&config).unwrap();
+        assert!(fresh.perf_enabled);
+        assert_eq!(
+            session::jsonl::session_info(fresh.session.path())
+                .unwrap()
+                .unwrap()
+                .perf_enabled,
+            Some(true)
+        );
+        config.perf_enabled = false;
+        let fresh = AgentSession::open_session(&config, fresh.session.path().clone()).unwrap();
+        assert!(fresh.perf_enabled);
+    }
+
+    #[test]
+    fn session_switch_restores_its_own_perf_setting_and_clears_samples() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = test_config(temp.path().to_path_buf());
+        let mut state = AgentSession::new(&config).unwrap();
+        let mut other = AgentSession::new(&config).unwrap();
+        state.set_perf_enabled(true).unwrap();
+        other.set_perf_enabled(false).unwrap();
+        let on_path = state.session.path().clone();
+        let off_path = other.session.path().clone();
+        drop(other);
+        assert!(
+            state
+                .visible_sessions(&config, false)
+                .unwrap()
+                .iter()
+                .any(|info| info.path == off_path)
+        );
+
+        state.last_performance =
+            Some(TurnPerformanceRecorder::start("fake", "actual-model").finish());
+        state.last_session_list = vec![session::jsonl::session_info(&off_path).unwrap().unwrap()];
+        state.open_session_by_index(&mut config, 1).unwrap();
+        assert!(!state.perf_enabled);
+        assert!(state.last_performance.is_none());
+        state.last_performance =
+            Some(TurnPerformanceRecorder::start("fake", "actual-model").finish());
+        state.last_session_list = vec![session::jsonl::session_info(&on_path).unwrap().unwrap()];
+        state.open_session_by_index(&mut config, 1).unwrap();
+        assert!(state.perf_enabled);
+        assert!(state.last_performance.is_none());
     }
 
     #[tokio::test]
@@ -7738,6 +7878,7 @@ mod context_pressure_tests {
         config.max_context_tokens = 100_000;
         config.base_max_context_tokens = 100_000;
         let mut state = AgentSession::new(&config).unwrap();
+        state.set_perf_enabled(true).unwrap();
         let mut sink = events::IgnoreAgentEvents;
 
         let outcome = state
@@ -7770,6 +7911,9 @@ mod context_pressure_tests {
                 .compact_summary()
                 .contains("ctx ")
         );
+        let resumed = AgentSession::open_session(&config, state.session.path().clone()).unwrap();
+        assert!(resumed.perf_enabled);
+        assert!(resumed.last_performance.is_none());
     }
 
     #[test]
@@ -8523,6 +8667,7 @@ mod context_pressure_tests {
             base_max_context_tokens: 1234,
             max_tool_rounds: 0,
             thinking: crate::config::ThinkingLevel::Off,
+            perf_enabled: false,
             mcp_enabled: true,
             mcp_server_allow: None,
             color_mode: crate::config::ColorMode::Auto,
@@ -9987,14 +10132,20 @@ fn handle_command(
                     if let Some(extra) = parts.next() {
                         anyhow::bail!("usage: /perf [on|off], got extra argument: {extra}");
                     }
-                    state.perf_enabled = true;
+                    state.set_perf_enabled(true)?;
+                    config.save_perf_enabled(true).context(
+                        "session preference saved, but failed to save the default for new sessions",
+                    )?;
                     println!("performance display: on");
                 }
                 Some("off") => {
                     if let Some(extra) = parts.next() {
                         anyhow::bail!("usage: /perf [on|off], got extra argument: {extra}");
                     }
-                    state.perf_enabled = false;
+                    state.set_perf_enabled(false)?;
+                    config.save_perf_enabled(false).context(
+                        "session preference saved, but failed to save the default for new sessions",
+                    )?;
                     println!("performance display: off");
                 }
                 Some(other) => anyhow::bail!("usage: /perf [on|off], got: {other}"),

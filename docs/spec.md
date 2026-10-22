@@ -63,7 +63,7 @@ Behavior:
 - Alt+S, Alt+P, and Alt+M open the `/sessions`, `/provider`, and `/model` pickers while preserving the current draft and cursor position.
 - Alt+C runs `/compact`; Alt+T and Alt+D open the `/thinking` and `/diff` pickers; Alt+G shows the current `/goal`. The current draft and cursor position are preserved.
 - Input beginning with `/` in column zero is always handled locally. Unknown slash commands never reach the provider. Leading whitespace escapes slash-command handling and is removed before the prompt is sent.
-- `/perf` reports the last completed turn's process-local model timings. `/perf on|off` toggles automatic summaries, and `--perf` enables them at startup. Print-mode summaries use stderr.
+- `/perf` reports the last completed turn's process-local model timings. `/perf on|off` saves the automatic-summary preference in session metadata and the user-config default for fresh sessions. Resume and session switching prefer the session's saved setting; older sessions use `perf_enabled` from config (off if unset), and `/new` inherits the current setting. `--perf` enables and saves it only in the opened session; omitting the flag preserves the saved preference. Print-mode summaries use stderr; ACP emits no terminal summaries.
 
 Slash commands:
 
@@ -303,7 +303,7 @@ struct Message {
 
 ## Providers
 
-Provider HTTP status bodies and non-streaming responses use bounded collectors with idle and total deadlines. Streaming uses incremental bounded SSE decoding, a 60-second initial-response deadline, a 90-second chunk-idle deadline, and no total duration cap while data remains active. UTF-8 is preserved across network chunks; malformed framing, parser failures, missing terminal events, and exceeded field/response budgets fail the turn. Context-overflow recovery is triggered only by typed provider status/event signals.
+Provider HTTP status bodies and non-streaming responses use bounded collectors with idle and total deadlines. Streaming uses incremental bounded SSE decoding, a 60-second initial-response deadline, a 90-second chunk-idle deadline, and no total duration cap while data remains active. OpenAI-compatible providers can override initial-response, stream-idle, and successful buffered-body idle/total deadlines with provider-scoped `timeout_seconds` (1–86400); omitted values preserve defaults, and error-body/model-listing/OAuth/Codex limits are unchanged. UTF-8 is preserved across network chunks; malformed framing, parser failures, missing terminal events, and exceeded field/response budgets fail the turn. Context-overflow recovery is triggered only by typed provider status/event signals.
 
 Authenticated non-loopback `http://` base URLs are rejected unless the provider explicitly sets `allow_insecure_http = true`. Loopback and authless HTTP providers remain supported.
 

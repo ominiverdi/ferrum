@@ -460,11 +460,13 @@ pub fn from_config(config: &ProviderConfig) -> Result<Box<dyn Provider>> {
             base_url,
             streaming,
             stream_usage,
+            timeout_seconds,
         } => Ok(Box::new(openai::OpenAiCompatProvider::new(
             api_key.clone(),
             base_url.clone(),
             *streaming,
             *stream_usage,
+            *timeout_seconds,
         )?)),
         ProviderConfig::OpenAiCodex {
             base_url,
@@ -515,6 +517,7 @@ mod tests {
             base_url: format!("http://{address}"),
             streaming: true,
             stream_usage: true,
+            timeout_seconds: None,
         };
 
         let ModelList::Live { models, .. } = list_models(&config).await.unwrap();

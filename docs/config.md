@@ -25,6 +25,10 @@ Override config directory:
 export FERRUM_CONFIG_DIR=/path/to/config
 ```
 
+## Performance preference
+
+`perf_enabled = true` enables compact performance summaries by default (off if unset). Interactive `/perf on|off` saves this default and the current session's preference immediately, preserving config comments and unrelated settings. Resumed sessions prefer their own saved setting. `--perf` enables summaries for the opened session without changing the default. Timing samples are not saved. Print-mode summaries use stderr; ACP emits no terminal summaries.
+
 ## Project-local restrictive policy
 
 Ferrum also loads the nearest `.ferrum/config.toml` from the current working directory or one of its ancestors. A bare project `config.toml` is ignored. ACP resolves this file independently for each session from the canonical `cwd` supplied by the client.
@@ -185,6 +189,7 @@ Fields:
 - `default_model`: model selected when `/provider <name>` switches to this provider, and used at startup when top-level `model` is omitted
 - `streaming`: optional OpenAI-compatible streaming toggle; defaults to `true`
 - `stream_usage`: optional `stream_options.include_usage` toggle for OpenAI-compatible streaming; defaults to `true`
+- `timeout_seconds`: optional OpenAI-compatible inference timeout override, an integer from 1 to 86400. Sets the wait for response headers, the idle gap between streaming chunks, and idle/total non-streaming body deadlines. When omitted, defaults remain 60s / 90s / 30s / 120s respectively. Model listing, OAuth, Codex, error-body limits, cancellation, and response-size limits are unchanged. See [slow local inference](providers.md#slow-local-inference-and-timeouts).
 - `allow_insecure_http`: explicit opt-in for sending credentials to a non-loopback `http://` base URL; defaults to `false`
 
 When both `api_key_env` and `api_key` are omitted, Ferrum sends no `Authorization` header. Inline keys are stored as plaintext in `config.toml`; environment variables are safer. Never commit or share a configuration containing an inline key, and restrict its permissions with `chmod 600 ~/.config/ferrum/config.toml`.

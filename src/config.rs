@@ -30,6 +30,8 @@ pub struct Config {
     pub base_max_context_tokens: usize,
     pub max_tool_rounds: usize,
     pub thinking: ThinkingLevel,
+    #[serde(default)]
+    pub perf_enabled: bool,
     pub mcp_enabled: bool,
     pub mcp_server_allow: Option<Vec<String>>,
     pub color_mode: ColorMode,
@@ -275,6 +277,8 @@ pub enum ProviderConfig {
         base_url: String,
         streaming: bool,
         stream_usage: bool,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
     },
     OpenAiCodex {
         base_url: String,
@@ -292,6 +296,7 @@ pub struct ProviderDefinition {
     pub default_model: Option<String>,
     pub streaming: Option<bool>,
     pub stream_usage: Option<bool>,
+    pub timeout_seconds: Option<u64>,
     #[serde(default)]
     pub allow_insecure_http: bool,
 }
@@ -311,6 +316,7 @@ struct FileConfig {
     max_context_tokens: Option<usize>,
     max_tool_rounds: Option<usize>,
     thinking: Option<String>,
+    perf_enabled: Option<bool>,
     mcp_enabled: Option<bool>,
     color: Option<String>,
     diff_mode: Option<String>,
@@ -560,6 +566,7 @@ impl Config {
                 .map(ThinkingLevel::parse)
                 .transpose()?
                 .unwrap_or(ThinkingLevel::Off),
+            perf_enabled: file_config.perf_enabled.unwrap_or(false),
             mcp_enabled: file_config.mcp_enabled.unwrap_or(true),
             mcp_server_allow: None,
             color_mode: file_config
@@ -959,6 +966,40 @@ impl Config {
         Ok(path)
     }
 
+    pub fn save_perf_enabled(&mut self, enabled: bool) -> Result<()> {
+        let path = self.config_dir.join("config.toml");
+        let (text, expected) = match atomic_file::target_identity(&path)? {
+            Some(_) => {
+                let (text, identity) = atomic_file::read_text_with_identity(&path)?;
+                (text, Some(identity))
+            }
+            None => (String::new(), None),
+        };
+        let mut document = text
+            .parse::<DocumentMut>()
+            .map_err(|_| anyhow::anyhow!("failed to parse {} as editable TOML", path.display()))?;
+        let root = document.as_table_mut();
+        if let Some(existing) = root.get_mut("perf_enabled") {
+            let decor = existing.as_value().map(|value| value.decor().clone());
+            *existing = value(enabled);
+            if let (Some(decor), Some(value)) = (decor, existing.as_value_mut()) {
+                *value.decor_mut() = decor;
+            }
+        } else {
+            root.insert("perf_enabled", value(enabled));
+        }
+        atomic_file::replace(&path, document.to_string().as_bytes(), expected).with_context(
+            || {
+                format!(
+                    "failed to save performance preference in {}",
+                    path.display()
+                )
+            },
+        )?;
+        self.perf_enabled = enabled;
+        Ok(())
+    }
+
     pub fn sessions_dir(&self) -> PathBuf {
         self.data_dir.join("sessions")
     }
@@ -1156,6 +1197,7 @@ fn default_openai_codex_definition() -> ProviderDefinition {
         default_model: None,
         streaming: None,
         stream_usage: None,
+        timeout_seconds: None,
         allow_insecure_http: false,
     }
 }
@@ -1256,11 +1298,25 @@ fn provider_api_key(name: &str, definition: &ProviderDefinition) -> Result<Optio
     }
 }
 
+pub(crate) fn validate_provider_timeout(timeout_seconds: Option<u64>) -> Result<()> {
+    if let Some(seconds) = timeout_seconds
+        && !(1..=86_400).contains(&seconds)
+    {
+        anyhow::bail!("timeout_seconds must be between 1 and 86400, got {seconds}");
+    }
+    Ok(())
+}
+
 fn provider_from_definition(
     name: &str,
     definition: &ProviderDefinition,
     config_dir: &std::path::Path,
 ) -> Result<ProviderConfig> {
+    validate_provider_timeout(definition.timeout_seconds)
+        .with_context(|| format!("invalid providers.{name}.timeout_seconds"))?;
+    if definition.timeout_seconds.is_some() && definition.kind != "openai-compatible" {
+        anyhow::bail!("providers.{name}.timeout_seconds requires type = \"openai-compatible\"");
+    }
     match definition.kind.as_str() {
         "fake" => Ok(ProviderConfig::Fake),
         "openai-compatible" => {
@@ -1280,6 +1336,7 @@ fn provider_from_definition(
                 base_url,
                 streaming: definition.streaming.unwrap_or(true),
                 stream_usage: definition.stream_usage.unwrap_or(true),
+                timeout_seconds: definition.timeout_seconds,
             })
         }
         "openai-codex" => {
@@ -1309,6 +1366,7 @@ fn legacy_provider_from_name(name: &str, config_dir: &std::path::Path) -> Result
                 base_url,
                 streaming: true,
                 stream_usage: true,
+                timeout_seconds: None,
             })
         }
         "openai-codex" => {
@@ -1369,6 +1427,7 @@ fn home_dir() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     #[test]
@@ -1605,6 +1664,83 @@ deny = ["chrome"]
     }
 
     #[test]
+    fn perf_preference_persists_true_and_false_without_changing_other_config() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# keep this comment\nperf_enabled = false # keep preference comment\nthinking = \"high\" # keep thinking\n\n[providers.local]\ntype = \"openai-compatible\"\nbase_url = \"http://localhost:8098\"\napi_key = \"test-only-sentinel\"\n";
+        fs::write(&path, original).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!config.perf_enabled);
+        config.save_perf_enabled(true).unwrap();
+        assert!(config.perf_enabled);
+        assert!(
+            Config::load_from_dir(dir.path().to_path_buf())
+                .unwrap()
+                .perf_enabled
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            original.replacen("perf_enabled = false", "perf_enabled = true", 1)
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        config.save_perf_enabled(false).unwrap();
+        assert!(
+            !Config::load_from_dir(dir.path().to_path_buf())
+                .unwrap()
+                .perf_enabled
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn perf_preference_creates_config_and_preserves_new_unrelated_edits() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let path = dir.path().join("config.toml");
+        assert!(!path.exists());
+        config.save_perf_enabled(true).unwrap();
+        let saved = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            format!("{saved}thinking = \"high\" # changed after loading\n"),
+        )
+        .unwrap();
+        config.save_perf_enabled(false).unwrap();
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("thinking = \"high\" # changed after loading")
+        );
+        let reloaded = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(!reloaded.perf_enabled);
+        assert_eq!(reloaded.thinking, ThinkingLevel::High);
+    }
+
+    #[test]
+    fn perf_preference_rejects_symlink_and_malformed_config_without_changing_runtime() {
+        let dir = TempDir::new().unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        let path = dir.path().join("config.toml");
+        let target = dir.path().join("target.toml");
+        fs::write(&target, "# untouched\n").unwrap();
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(config.save_perf_enabled(true).is_err());
+        assert!(!config.perf_enabled);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "# untouched\n");
+        fs::remove_file(&path).unwrap();
+        let malformed = "api_key = \"test-only-sentinel\n";
+        fs::write(&path, malformed).unwrap();
+        let error = config.save_perf_enabled(true).unwrap_err();
+        assert!(!format!("{error:#}").contains("test-only-sentinel"));
+        assert!(!config.perf_enabled);
+        assert_eq!(fs::read_to_string(&path).unwrap(), malformed);
+    }
+
+    #[test]
     fn login_setup_configures_implicit_provider_and_preserves_comments() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.toml");
@@ -1808,6 +1944,88 @@ writable_roots = [".", "/tmp/ferrum-output"]
     }
 
     #[test]
+    fn openai_compatible_timeout_is_optional_and_provider_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("config.toml"),
+            r#"
+provider = "local"
+model = "test-model"
+
+[providers.local]
+type = "openai-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+timeout_seconds = 600
+
+[providers.remote]
+type = "openai-compatible"
+base_url = "https://example.test/v1"
+"#,
+        )
+        .unwrap();
+        let mut config = Config::load_from_dir(dir.path().to_path_buf()).unwrap();
+        assert!(matches!(
+            config.provider,
+            ProviderConfig::OpenAiCompat {
+                timeout_seconds: Some(600),
+                ..
+            }
+        ));
+        config.set_provider("remote").unwrap();
+        assert!(matches!(
+            config.provider,
+            ProviderConfig::OpenAiCompat {
+                timeout_seconds: None,
+                ..
+            }
+        ));
+        config.set_provider("local").unwrap();
+        assert!(matches!(
+            config.provider,
+            ProviderConfig::OpenAiCompat {
+                timeout_seconds: Some(600),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn provider_timeout_rejects_invalid_values_and_unsupported_types() {
+        for value in ["0", "86401", "9223372036854775807"] {
+            let definition: ProviderDefinition = toml::from_str(&format!(
+                "type = \"openai-compatible\"\nbase_url = \"http://localhost:8080/v1\"\ntimeout_seconds = {value}\n"
+            ))
+            .unwrap();
+            let error = provider_from_definition("local", &definition, std::path::Path::new("."))
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("providers.local.timeout_seconds")
+            );
+            assert!(format!("{error:#}").contains("between 1 and 86400"));
+        }
+        for value in ["-1", "1.5", "\"600\""] {
+            assert!(
+                toml::from_str::<ProviderDefinition>(&format!(
+                    "type = \"openai-compatible\"\ntimeout_seconds = {value}\n"
+                ))
+                .is_err()
+            );
+        }
+        for kind in ["fake", "openai-codex"] {
+            let definition: ProviderDefinition =
+                toml::from_str(&format!("type = \"{kind}\"\ntimeout_seconds = 600\n")).unwrap();
+            let error = provider_from_definition("example", &definition, std::path::Path::new("."))
+                .unwrap_err();
+            assert!(error.to_string().contains("requires type"));
+        }
+        for seconds in [1, 86_400] {
+            assert!(validate_provider_timeout(Some(seconds)).is_ok());
+        }
+    }
+
+    #[test]
     fn inline_provider_api_key_loads_and_debug_output_is_redacted() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
@@ -1898,6 +2116,7 @@ api_key = "test-inline-key"
             default_model: None,
             streaming: None,
             stream_usage: None,
+            timeout_seconds: None,
             allow_insecure_http: false,
         };
         let error = provider_from_definition(
@@ -1931,6 +2150,7 @@ api_key = "test-inline-key"
             default_model: None,
             streaming: None,
             stream_usage: None,
+            timeout_seconds: None,
             allow_insecure_http: false,
         };
         assert!(

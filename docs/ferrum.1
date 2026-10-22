@@ -113,8 +113,9 @@ Supported values are \f[B]low\f[R], \f[B]medium\f[R], and
 Set the session title.
 .TP
 \f[B]\[en]perf\f[R]
-Print a compact model-performance summary to stderr after each completed
-turn.
+Enable compact model-performance summaries on stderr after each completed
+turn, and save that preference in the opened session.
+Omitting the flag preserves a saved setting.
 This keeps print-mode stdout pipe-safe.
 .TP
 \f[B]\[en]image\f[R] PATH
@@ -299,7 +300,11 @@ Show token usage summary.
 .TP
 \f[B]/perf\f[R] [on|off]
 Show model performance for the last completed turn, or toggle automatic
-summaries for the current process.
+summaries and save the setting in the current session and user-config
+default for fresh sessions.
+Resume and session switching prefer the session's saved setting;
+\f[V]/new\f[R] inherits the current setting.
+Timing samples remain process-local.
 Compact TTFT and t/s triplets are low/average/high across measured completed
 requests; a single measured request shows one value.
 TTFT includes the first non-empty reasoning, text, or tool-call activity;

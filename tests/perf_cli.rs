@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -57,6 +57,146 @@ fn print_perf_is_opt_in_and_keeps_stdout_pipe_safe() {
     assert!(!perf.contains("Speed"));
     assert!(!perf.contains("output"));
     assert!(perf.contains("turn "));
+}
+
+#[test]
+fn print_perf_restores_saved_session_setting_across_processes() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    let data = root.path().join("data");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let run = |perf: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ferrum"));
+        if perf {
+            command.arg("--perf");
+        }
+        let output = command
+            .args(["--session", "remember-perf", "-p", "hello"])
+            .current_dir(root.path())
+            .env("FERRUM_CONFIG_DIR", &config)
+            .env("FERRUM_DATA_DIR", &data)
+            .env("FERRUM_OFFLINE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.ends_with("fake provider response: hello\n"));
+        assert!(!stdout.contains("perf:"));
+        String::from_utf8(output.stderr).unwrap().contains("perf:")
+    };
+    assert!(run(true));
+    assert!(
+        !config.join("config.toml").exists(),
+        "--perf must not change the global default"
+    );
+    assert!(
+        run(false),
+        "missing flag must not override a saved on setting"
+    );
+
+    let session_path = data.join("sessions/remember-perf.jsonl");
+    let append_saved_setting = |enabled: bool| {
+        let entry = json!({
+            "type": "metadata", "id": "saved-perf", "timestamp_ms": 1,
+            "perf_enabled": enabled
+        });
+        let mut session = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&session_path)
+            .unwrap();
+        writeln!(session, "{entry}").unwrap();
+        session.sync_data().unwrap();
+    };
+    append_saved_setting(false);
+    assert!(!run(false), "explicit saved false must survive restart");
+    assert!(run(true), "--perf must override a saved off setting");
+    assert!(run(false), "--perf must save the override to the session");
+
+    let entries = std::fs::read_to_string(&session_path).unwrap();
+    let settings = entries
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter_map(|entry| entry["perf_enabled"].as_bool())
+        .collect::<Vec<_>>();
+    assert_eq!(settings, [true, false, true]);
+}
+
+#[test]
+fn interactive_perf_survives_continue_new_and_off_across_restarts() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().join("config");
+    let data = root.path().join("data");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
+    let run = |args: &[&str], input: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ferrum"))
+            .args(args)
+            .current_dir(root.path())
+            .env("FERRUM_CONFIG_DIR", &config)
+            .env("FERRUM_DATA_DIR", &data)
+            .env("FERRUM_OFFLINE", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    let (stdout, _) = run(&[], "/perf on\n/quit\n");
+    assert!(stdout.contains("performance display: on"));
+    assert!(
+        std::fs::read_to_string(config.join("config.toml"))
+            .unwrap()
+            .contains("perf_enabled = true")
+    );
+    let (_, stderr) = run(&["--continue"], "hello\n/quit\n");
+    assert!(
+        stderr.contains("perf:"),
+        "toggle-only session must resume enabled"
+    );
+    let (stdout, _) = run(&["--continue"], "/new\n/quit\n");
+    assert!(stdout.contains("started new session"));
+    let (_, stderr) = run(&["--continue"], "hello\n/perf off\n/quit\n");
+    assert!(
+        stderr.contains("perf:"),
+        "new session must inherit and save on"
+    );
+    let (_, stderr) = run(&["--continue"], "hello\n/quit\n");
+    assert!(
+        !stderr.contains("perf:"),
+        "off must survive another restart"
+    );
+    let (_, stderr) = run(&[], "hello\n/quit\n");
+    assert!(
+        !stderr.contains("perf:"),
+        "off must also apply to unrelated fresh sessions"
+    );
+    run(&[], "/perf on\n/quit\n");
+    let (_, stderr) = run(&[], "hello\n/quit\n");
+    assert!(
+        stderr.contains("perf:"),
+        "on must survive restart into an unrelated fresh session"
+    );
 }
 
 #[test]

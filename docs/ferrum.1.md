@@ -97,7 +97,7 @@ prompt.
 : Set the session title.
 
 **--perf**
-: Print a compact model-performance summary to stderr after each completed turn. This keeps print-mode stdout pipe-safe.
+: Enable compact model-performance summaries on stderr after each completed turn, and save that preference in the opened session. Omitting the flag preserves a saved setting. This keeps print-mode stdout pipe-safe.
 
 **--image** PATH
 : Attach a local image file. Repeatable. Supported formats are png, jpg, jpeg,
@@ -225,7 +225,7 @@ Common slash commands:
 : Show token usage summary.
 
 **/perf** [on|off]
-: Show model performance for the last completed turn, or toggle automatic summaries for the current process. Compact TTFT and t/s triplets are low/average/high across measured completed requests; a single measured request shows one value. TTFT includes the first non-empty reasoning, text, or tool-call activity; its average is arithmetic. Each rate covers first output to request completion; average t/s is generation-time weighted. `tot` sums output tokens across recorded requests, including thinking and tool calls; provider totals are not counted twice. Interrupted requests contribute to `tot` but not to completed-request timing statistics. Unavailable timings are `n/a`; estimated token counts and rates use `~`. `ctx` shows current context tokens over the configured window after the turn, using the same boundary-aware accounting as `/session`; local estimates are marked with `~` and detailed output names the accounting source. Detailed output includes measured counts and per-request values.
+: Show model performance for the last completed turn, or toggle automatic summaries and save the setting in the current session and user-config default for fresh sessions. Resume and session switching prefer the session's saved setting; `/new` inherits the current setting. Timing samples remain process-local. Compact TTFT and t/s triplets are low/average/high across measured completed requests; a single measured request shows one value. TTFT includes the first non-empty reasoning, text, or tool-call activity; its average is arithmetic. Each rate covers first output to request completion; average t/s is generation-time weighted. `tot` sums output tokens across recorded requests, including thinking and tool calls; provider totals are not counted twice. Interrupted requests contribute to `tot` but not to completed-request timing statistics. Unavailable timings are `n/a`; estimated token counts and rates use `~`. `ctx` shows current context tokens over the configured window after the turn, using the same boundary-aware accounting as `/session`; local estimates are marked with `~` and detailed output names the accounting source. Detailed output includes measured counts and per-request values.
 
 **/skills**
 : List discovered skills.
