@@ -300,10 +300,23 @@ Show token usage summary.
 \f[B]/perf\f[R] [on|off]
 Show model performance for the last completed turn, or toggle automatic
 summaries for the current process.
-TTFT is measured to the first non-empty streamed model output, and
-throughput covers the interval from first output to request completion.
-Non-streaming values are shown as \f[V]n/a\f[R]; estimated token counts
-and rates use a \f[V]\[ti]\f[R] prefix.
+Compact TTFT and t/s triplets are low/average/high across measured completed
+requests; a single measured request shows one value.
+TTFT includes the first non-empty reasoning, text, or tool-call activity;
+its average is arithmetic.
+Each rate covers first output to request completion; average t/s is
+generation-time weighted.
+\f[V]tot\f[R] sums output tokens across recorded requests, including thinking
+and tool calls; provider totals are not counted twice.
+Interrupted requests contribute to \f[V]tot\f[R] but not to completed-request
+timing statistics.
+Unavailable timings are \f[V]n/a\f[R]; estimated token counts and rates use
+\f[V]\[ti]\f[R].
+\f[V]ctx\f[R] shows current context tokens over the configured window after
+the turn, using the same boundary-aware accounting as \f[V]/session\f[R];
+local estimates are marked with \f[V]\[ti]\f[R] and detailed output names the
+accounting source.
+Detailed output includes measured counts and per-request values.
 .TP
 \f[B]/skills\f[R]
 List discovered skills.

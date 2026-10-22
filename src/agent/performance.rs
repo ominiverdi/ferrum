@@ -25,7 +25,7 @@ impl ModelPerformance {
     fn tokens_per_second(&self) -> Option<f64> {
         let tokens = self.output_tokens?;
         let seconds = self.generation_duration()?.as_secs_f64();
-        (seconds > 0.0).then_some(tokens as f64 / seconds)
+        (seconds > 0.0).then(|| tokens as f64 / seconds)
     }
 }
 
@@ -35,9 +35,50 @@ pub(super) struct TurnPerformance {
     model: String,
     total: Duration,
     requests: Vec<ModelPerformance>,
+    context: Option<ContextSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ContextSnapshot {
+    pub(super) tokens: usize,
+    pub(super) max: usize,
+    pub(super) estimated: bool,
+    pub(super) source: &'static str,
+}
+
+impl ContextSnapshot {
+    fn percent(&self) -> usize {
+        super::context_usage_percent(self.tokens, self.max)
+    }
+
+    fn compact(&self) -> String {
+        let prefix = if self.estimated { "~" } else { "" };
+        format!(
+            "ctx {prefix}{}/{} {}%",
+            format_compact_token_count(self.tokens),
+            format_compact_token_count(self.max),
+            self.percent()
+        )
+    }
+
+    fn detailed(&self) -> String {
+        let prefix = if self.estimated { "~" } else { "" };
+        format!(
+            "{prefix}{}/{} ({}%, {})",
+            format_token_count(self.tokens as u64),
+            format_token_count(self.max as u64),
+            self.percent(),
+            self.source
+        )
+    }
 }
 
 impl TurnPerformance {
+    pub(super) fn with_context(mut self, context: ContextSnapshot) -> Self {
+        self.context = Some(context);
+        self
+    }
+
     pub(super) fn compact_summary(&self) -> String {
         let request_label = if self.requests.len() == 1 {
             "request"
@@ -45,27 +86,41 @@ impl TurnPerformance {
             "requests"
         };
         let mut output = format!("perf: {} {request_label}", self.requests.len());
-        if let Some(final_request) = self.requests.last() {
+        if !self.requests.is_empty() {
             let _ = write!(
                 output,
-                " | final ttft {} | final {} | output {}",
-                format_optional_duration(final_request.time_to_first_output),
-                format_throughput(
-                    final_request.tokens_per_second(),
-                    final_request.estimated_tokens,
+                " | TTFT {} | {} | tot {}",
+                format_ttft_summary(self.ttft_summary().as_ref()),
+                self.throughput_summary().map_or_else(
+                    || "n/a t/s".to_string(),
+                    |(summary, estimated)| format_throughput_summary(&summary, estimated),
                 ),
                 format_total_output_tokens(&self.requests),
             );
         }
-        let _ = write!(output, " | turn {}", format_duration(self.total));
+        if let Some(context) = &self.context {
+            let _ = write!(output, " | {}", context.compact());
+        }
+        let duration = if self.total < Duration::from_secs(1) {
+            format_duration(self.total)
+        } else {
+            format!("{:.1}s", self.total.as_secs_f64())
+        };
+        let _ = write!(output, " | turn {duration}");
         output
     }
 
     pub(super) fn detailed_summary(&self) -> String {
         let mut output = format!(
-            "performance:\n  provider: {}\n  model: {}\n  turn: {}\n  completed_requests: {}",
-            self.provider,
-            self.model,
+            "performance:\n  provider: {}\n  model: {}",
+            self.provider, self.model
+        );
+        if let Some(context) = &self.context {
+            let _ = write!(output, "\n  context: {}", context.detailed());
+        }
+        let _ = write!(
+            output,
+            "\n  turn: {}\n  completed_requests: {}",
             format_duration(self.total),
             self.requests
                 .iter()
@@ -84,6 +139,27 @@ impl TurnPerformance {
             output.push_str("\n  model requests: none");
             return output;
         }
+        let completed = self
+            .requests
+            .iter()
+            .filter(|request| !request.interrupted)
+            .count();
+        let ttft = self.ttft_summary();
+        let throughput = self.throughput_summary();
+        let _ = write!(
+            output,
+            "\n  tot: {}\n  TTFT: {} ({}/{completed} measured)\n  {} ({}/{completed} measured)\n  timing order: low/avg/high; t/s avg is generation-time weighted",
+            format_total_output_tokens(&self.requests),
+            format_ttft_summary(ttft.as_ref()),
+            ttft.as_ref().map_or(0, |summary| summary.samples),
+            throughput.as_ref().map_or_else(
+                || "n/a t/s".to_string(),
+                |(summary, estimated)| format_throughput_summary(summary, *estimated),
+            ),
+            throughput
+                .as_ref()
+                .map_or(0, |(summary, _)| summary.samples),
+        );
         for request in &self.requests {
             let source = if request.estimated_tokens {
                 "estimated"
@@ -94,15 +170,15 @@ impl TurnPerformance {
                 || "n/a".to_string(),
                 |tokens| {
                     if request.estimated_tokens {
-                        format!("~{tokens}")
+                        format!("~{}", format_token_count(tokens))
                     } else {
-                        tokens.to_string()
+                        format_token_count(tokens)
                     }
                 },
             );
             let _ = write!(
                 output,
-                "\n  request {} ({}): ttft {}, generation {}, throughput {}, output_tokens {} ({}), total {}",
+                "\n  request {} ({}): TTFT {}, generation {}, {}, tot {} tok ({}), total {}",
                 request.request,
                 if request.interrupted {
                     "interrupted"
@@ -118,6 +194,101 @@ impl TurnPerformance {
             );
         }
         output
+    }
+
+    fn ttft_summary(&self) -> Option<ValueSummary> {
+        ValueSummary::from_values(
+            self.requests
+                .iter()
+                .filter(|request| !request.interrupted)
+                .filter_map(|request| request.time_to_first_output.map(|time| time.as_secs_f64())),
+        )
+    }
+
+    fn throughput_summary(&self) -> Option<(ValueSummary, bool)> {
+        let mut tokens = 0.0;
+        let mut seconds = 0.0;
+        let mut estimated = false;
+        let mut summary = ValueSummary::from_values(
+            self.requests
+                .iter()
+                .filter(|request| !request.interrupted)
+                .filter_map(|request| {
+                    let rate = request.tokens_per_second()?;
+                    tokens += request.output_tokens? as f64;
+                    seconds += request.generation_duration()?.as_secs_f64();
+                    estimated |= request.estimated_tokens;
+                    Some(rate)
+                }),
+        )?;
+        // Use exactly the requests contributing a valid rate, not token totals
+        // from buffered or interrupted requests without matching generation time.
+        summary.average = tokens / seconds;
+        Some((summary, estimated))
+    }
+}
+
+#[derive(Debug)]
+struct ValueSummary {
+    samples: usize,
+    low: f64,
+    average: f64,
+    high: f64,
+}
+
+impl ValueSummary {
+    fn from_values(mut values: impl Iterator<Item = f64>) -> Option<Self> {
+        let first = values.next()?;
+        let (mut samples, mut low, mut total, mut high) = (1, first, first, first);
+        for value in values {
+            samples += 1;
+            low = low.min(value);
+            total += value;
+            high = high.max(value);
+        }
+        Some(Self {
+            samples,
+            low,
+            average: total / samples as f64,
+            high,
+        })
+    }
+}
+
+fn format_ttft_summary(summary: Option<&ValueSummary>) -> String {
+    let Some(summary) = summary else {
+        return "n/a".to_string();
+    };
+    if summary.high < 1.0 {
+        if summary.samples == 1 {
+            format!("{:.0}ms", summary.average * 1_000.0)
+        } else {
+            format!(
+                "{:.0}/{:.0}/{:.0}ms",
+                summary.low * 1_000.0,
+                summary.average * 1_000.0,
+                summary.high * 1_000.0
+            )
+        }
+    } else if summary.samples == 1 {
+        format!("{:.2}s", summary.average)
+    } else {
+        format!(
+            "{:.2}/{:.2}/{:.2}s",
+            summary.low, summary.average, summary.high
+        )
+    }
+}
+
+fn format_throughput_summary(summary: &ValueSummary, estimated: bool) -> String {
+    let prefix = if estimated { "~" } else { "" };
+    if summary.samples == 1 {
+        format!("{prefix}{:.1} t/s", summary.average)
+    } else {
+        format!(
+            "{prefix}{:.1}/{:.1}/{:.1} t/s",
+            summary.low, summary.average, summary.high
+        )
     }
 }
 
@@ -149,6 +320,7 @@ impl TurnPerformanceRecorder {
             model: self.model,
             total: self.started.elapsed(),
             requests: self.requests,
+            context: None,
         }
     }
 }
@@ -236,10 +408,10 @@ fn format_optional_duration(duration: Option<Duration>) -> String {
 
 fn format_throughput(value: Option<f64>, estimated: bool) -> String {
     value.map_or_else(
-        || "n/a".to_string(),
+        || "n/a t/s".to_string(),
         |value| {
             let prefix = if estimated { "~" } else { "" };
-            format!("{prefix}{value:.1} tok/s")
+            format!("{prefix}{value:.1} t/s")
         },
     )
 }
@@ -256,7 +428,27 @@ fn format_total_output_tokens(requests: &[ModelPerformance]) -> String {
     } else {
         ""
     };
-    format!("{prefix}{tokens} tok")
+    format!("{prefix}{} tok", format_token_count(tokens))
+}
+
+fn format_token_count(tokens: u64) -> String {
+    let digits = tokens.to_string();
+    let mut output = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            output.push(',');
+        }
+        output.push(digit);
+    }
+    output
+}
+
+fn format_compact_token_count(tokens: usize) -> String {
+    if tokens < 10_000 {
+        return format_token_count(tokens as u64);
+    }
+    let kilo = tokens.div_euclid(1_000) + usize::from(tokens.rem_euclid(1_000) >= 500);
+    format!("{kilo}k")
 }
 
 #[cfg(test)]
@@ -306,11 +498,12 @@ mod tests {
                     false,
                 ),
             ],
+            context: None,
         };
 
         assert_eq!(
             performance.compact_summary(),
-            "perf: 2 requests | final ttft 1.18s | final 67.3 tok/s | output 302 tok | turn 21.40s"
+            "perf: 2 requests | TTFT 1.00/1.09/1.18s | 50.0/60.4/67.3 t/s | tot 302 tok | turn 21.4s"
         );
     }
 
@@ -321,14 +514,15 @@ mod tests {
             model: "fake".to_string(),
             total: Duration::from_millis(8),
             requests: vec![request(1, ModelRequestKind::Agent, 7, None, Some(12), true)],
+            context: None,
         };
 
         assert_eq!(
             performance.compact_summary(),
-            "perf: 1 request | final ttft n/a | final n/a | output ~12 tok | turn 8ms"
+            "perf: 1 request | TTFT n/a | n/a t/s | tot ~12 tok | turn 8ms"
         );
         assert!(performance.detailed_summary().contains(
-            "request 1 (agent): ttft n/a, generation n/a, throughput n/a, output_tokens ~12 (estimated), total 7ms"
+            "request 1 (agent): TTFT n/a, generation n/a, n/a t/s, tot ~12 tok (estimated), total 7ms"
         ));
     }
 
@@ -346,9 +540,90 @@ mod tests {
                 Some(20),
                 true,
             )],
+            context: None,
         };
 
-        assert!(performance.compact_summary().contains("final ~20.0 tok/s"));
+        assert_eq!(
+            performance.compact_summary(),
+            "perf: 1 request | TTFT 100ms | ~20.0 t/s | tot ~20 tok | turn 2.0s"
+        );
+    }
+
+    #[test]
+    fn context_snapshot_appends_to_compact_and_detailed_summaries() {
+        let performance = turn(vec![request(
+            1,
+            ModelRequestKind::Agent,
+            1_000,
+            Some(100),
+            Some(50),
+            false,
+        )])
+        .with_context(ContextSnapshot {
+            tokens: 23_971,
+            max: 256_000,
+            estimated: true,
+            source: "estimate_after_compaction",
+        });
+
+        assert!(
+            performance
+                .compact_summary()
+                .contains("| ctx ~24k/256k 9% | turn")
+        );
+        assert!(
+            performance
+                .detailed_summary()
+                .contains("context: ~23,971/256,000 (9%, estimate_after_compaction)")
+        );
+    }
+
+    #[test]
+    fn usage_informed_context_has_no_estimate_marker() {
+        let performance = turn(vec![request(
+            1,
+            ModelRequestKind::Agent,
+            1_000,
+            Some(100),
+            Some(50),
+            false,
+        )])
+        .with_context(ContextSnapshot {
+            tokens: 237_351,
+            max: 256_000,
+            estimated: false,
+            source: "usage+estimate",
+        });
+
+        assert!(
+            performance
+                .compact_summary()
+                .contains("| ctx 237k/256k 92% | turn")
+        );
+    }
+
+    #[test]
+    fn compact_context_counts_stay_exact_below_ten_thousand() {
+        let performance = turn(vec![request(
+            1,
+            ModelRequestKind::Agent,
+            1_000,
+            Some(100),
+            Some(50),
+            false,
+        )])
+        .with_context(ContextSnapshot {
+            tokens: 9_999,
+            max: 10_000,
+            estimated: false,
+            source: "usage+estimate",
+        });
+
+        assert!(
+            performance
+                .compact_summary()
+                .contains("| ctx 9,999/10k 99% | turn")
+        );
     }
 
     #[test]
@@ -370,13 +645,238 @@ mod tests {
                 timer.finish_interrupted(1, ModelRequestKind::Agent, &usage),
                 request(2, ModelRequestKind::Agent, 100, Some(10), Some(5), false),
             ],
+            context: None,
         };
         assert!(performance.compact_summary().contains("2 requests"));
-        assert!(performance.compact_summary().contains("output ~25 tok"));
+        assert!(performance.compact_summary().contains("tot ~25 tok"));
         let detail = performance.detailed_summary();
         assert!(detail.contains("completed_requests: 1"));
         assert!(detail.contains("interrupted_requests: 1"));
         assert!(detail.contains("request 1 (interrupted)"));
+    }
+
+    fn turn(requests: Vec<ModelPerformance>) -> TurnPerformance {
+        TurnPerformance {
+            provider: "mock".to_string(),
+            model: "mock".to_string(),
+            total: Duration::from_secs(10),
+            requests,
+            context: None,
+        }
+    }
+
+    #[test]
+    fn totals_all_requests_and_formats_thousands() {
+        let performance = turn(vec![
+            request(
+                1,
+                ModelRequestKind::Agent,
+                2_000,
+                Some(500),
+                Some(1_000),
+                false,
+            ),
+            request(
+                2,
+                ModelRequestKind::FinalSynthesis,
+                1_500,
+                Some(500),
+                Some(574),
+                false,
+            ),
+        ]);
+        assert!(performance.compact_summary().contains("tot 1,574 tok"));
+        assert!(performance.detailed_summary().contains("tot: 1,574 tok"));
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(1_000), "1,000");
+        assert_eq!(format_token_count(u64::MAX), "18,446,744,073,709,551,615");
+    }
+
+    #[test]
+    fn interrupted_requests_contribute_to_total_but_not_timing_statistics() {
+        let mut interrupted = request(
+            1,
+            ModelRequestKind::Agent,
+            10_000,
+            Some(9_000),
+            Some(1_000),
+            true,
+        );
+        interrupted.interrupted = true;
+        let performance = turn(vec![
+            interrupted,
+            request(
+                2,
+                ModelRequestKind::Agent,
+                2_000,
+                Some(500),
+                Some(150),
+                false,
+            ),
+        ]);
+        assert_eq!(
+            performance.compact_summary(),
+            "perf: 2 requests | TTFT 500ms | 100.0 t/s | tot ~1,150 tok | turn 10.0s"
+        );
+        let detail = performance.detailed_summary();
+        assert!(detail.contains("TTFT: 500ms (1/1 measured)"));
+        assert!(detail.contains("100.0 t/s (1/1 measured)"));
+        assert!(detail.contains("request 1 (interrupted): TTFT 9.00s"));
+    }
+
+    #[test]
+    fn excludes_unmeasured_rates_without_losing_their_tokens() {
+        let performance = turn(vec![
+            request(1, ModelRequestKind::Agent, 1_000, None, Some(100), true),
+            request(
+                2,
+                ModelRequestKind::Agent,
+                1_000,
+                Some(100),
+                Some(90),
+                false,
+            ),
+            request(3, ModelRequestKind::Agent, 500, Some(500), Some(10), true),
+        ]);
+        assert_eq!(
+            performance.compact_summary(),
+            "perf: 3 requests | TTFT 100/300/500ms | 100.0 t/s | tot ~200 tok | turn 10.0s"
+        );
+        let detail = performance.detailed_summary();
+        assert!(detail.contains("TTFT: 100/300/500ms (2/3 measured)"));
+        assert!(detail.contains("100.0 t/s (1/3 measured)"));
+        assert!(!detail.contains("NaN"));
+        assert!(!detail.contains("inf"));
+    }
+
+    #[test]
+    fn estimates_in_measured_rates_mark_the_whole_range() {
+        let performance = turn(vec![
+            request(
+                1,
+                ModelRequestKind::Agent,
+                2_000,
+                Some(1_000),
+                Some(100),
+                false,
+            ),
+            request(
+                2,
+                ModelRequestKind::Agent,
+                3_000,
+                Some(1_000),
+                Some(100),
+                true,
+            ),
+        ]);
+        assert_eq!(
+            performance.compact_summary(),
+            "perf: 2 requests | TTFT 1.00/1.00/1.00s | ~50.0/66.7/100.0 t/s | tot ~200 tok | turn 10.0s"
+        );
+    }
+
+    #[test]
+    fn missing_token_usage_does_not_invent_a_total_or_rate() {
+        let performance = turn(vec![
+            request(
+                1,
+                ModelRequestKind::Agent,
+                1_000,
+                Some(100),
+                Some(90),
+                false,
+            ),
+            request(2, ModelRequestKind::Agent, 1_000, Some(300), None, false),
+        ]);
+        assert_eq!(
+            performance.compact_summary(),
+            "perf: 2 requests | TTFT 100/200/300ms | 100.0 t/s | tot n/a | turn 10.0s"
+        );
+        assert!(
+            performance
+                .detailed_summary()
+                .contains("100.0 t/s (1/2 measured)")
+        );
+    }
+
+    #[test]
+    fn zero_generation_duration_is_unavailable_not_infinite() {
+        for total in [0, 5, 10] {
+            let performance = turn(vec![request(
+                1,
+                ModelRequestKind::Agent,
+                total,
+                Some(10),
+                Some(1),
+                false,
+            )]);
+            assert_eq!(performance.requests[0].tokens_per_second(), None);
+            assert_eq!(
+                performance.compact_summary(),
+                "perf: 1 request | TTFT 10ms | n/a t/s | tot 1 tok | turn 10.0s"
+            );
+        }
+    }
+
+    #[test]
+    fn all_interrupted_requests_have_no_completed_timing_statistics() {
+        let mut interrupted = request(
+            1,
+            ModelRequestKind::Agent,
+            1_000,
+            Some(100),
+            Some(90),
+            false,
+        );
+        interrupted.interrupted = true;
+        let performance = turn(vec![interrupted]);
+        assert_eq!(
+            performance.compact_summary(),
+            "perf: 1 request | TTFT n/a | n/a t/s | tot 90 tok | turn 10.0s"
+        );
+        assert!(
+            performance
+                .detailed_summary()
+                .contains("TTFT: n/a (0/0 measured)")
+        );
+    }
+
+    #[test]
+    fn no_requests_have_no_invented_metrics() {
+        let performance = turn(Vec::new());
+        assert_eq!(
+            performance.compact_summary(),
+            "perf: 0 requests | turn 10.0s"
+        );
+        assert!(
+            performance
+                .detailed_summary()
+                .contains("model requests: none")
+        );
+    }
+
+    #[test]
+    fn reasoning_is_the_first_output_and_provider_tokens_are_not_recounted() {
+        let mut timer = ModelPerformanceTimer::start(true);
+        timer.observe(&StreamEvent::ThinkingDelta(
+            "displayable provider reasoning".to_string(),
+        ));
+        let ttft = timer.time_to_first_output;
+        assert!(ttft.is_some());
+        timer.observe(&StreamEvent::TextDelta("answer".to_string()));
+        assert_eq!(timer.time_to_first_output, ttft);
+        let usage = TokenUsage {
+            input_tokens: Some(20),
+            output_tokens: Some(150),
+            total_tokens: Some(170),
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            source: "provider".to_string(),
+        };
+        let performance = turn(vec![timer.finish(1, ModelRequestKind::Agent, &usage)]);
+        assert!(performance.compact_summary().contains("tot 150 tok"));
+        assert!(!performance.compact_summary().contains('~'));
     }
 
     #[test]

@@ -225,7 +225,7 @@ Common slash commands:
 : Show token usage summary.
 
 **/perf** [on|off]
-: Show model performance for the last completed turn, or toggle automatic summaries for the current process. TTFT is measured to the first non-empty streamed model output, and throughput covers the interval from first output to request completion. Non-streaming values are shown as `n/a`; estimated token counts and rates use a `~` prefix.
+: Show model performance for the last completed turn, or toggle automatic summaries for the current process. Compact TTFT and t/s triplets are low/average/high across measured completed requests; a single measured request shows one value. TTFT includes the first non-empty reasoning, text, or tool-call activity; its average is arithmetic. Each rate covers first output to request completion; average t/s is generation-time weighted. `tot` sums output tokens across recorded requests, including thinking and tool calls; provider totals are not counted twice. Interrupted requests contribute to `tot` but not to completed-request timing statistics. Unavailable timings are `n/a`; estimated token counts and rates use `~`. `ctx` shows current context tokens over the configured window after the turn, using the same boundary-aware accounting as `/session`; local estimates are marked with `~` and detailed output names the accounting source. Detailed output includes measured counts and per-request values.
 
 **/skills**
 : List discovered skills.

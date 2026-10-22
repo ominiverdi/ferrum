@@ -3078,7 +3078,8 @@ impl AgentSession {
             result => result,
         };
         if matches!(result, Ok(TurnOutcome::Completed)) {
-            self.last_performance = Some(performance.finish());
+            let context = self.context_snapshot(config);
+            self.last_performance = Some(performance.finish().with_context(context));
         }
         result
     }
@@ -4248,6 +4249,16 @@ impl AgentSession {
             estimated_tokens,
             context_source,
             file_bytes,
+        }
+    }
+
+    fn context_snapshot(&self, config: &Config) -> performance::ContextSnapshot {
+        let stats = self.stats();
+        performance::ContextSnapshot {
+            tokens: stats.estimated_tokens,
+            max: config.max_context_tokens,
+            estimated: !matches!(stats.context_source, ContextTokenSource::UsagePlusEstimate),
+            source: stats.context_source.as_str(),
         }
     }
 
@@ -6209,6 +6220,49 @@ mod context_pressure_tests {
     }
 
     #[test]
+    fn output_usage_includes_reasoning_and_tool_calls_without_counting_signatures() {
+        let response = messages::Message {
+            role: messages::Role::Assistant,
+            content: vec![
+                messages::ContentBlock::Thinking {
+                    text: "t".repeat(80),
+                    signature: Some("s".repeat(1_000)),
+                },
+                messages::ContentBlock::Text {
+                    text: "a".repeat(40),
+                },
+                messages::ContentBlock::ToolUse {
+                    id: "test-tool".to_string(),
+                    name: "read".to_string(),
+                    input: serde_json::json!({"path":"fixture.txt"}),
+                },
+            ],
+            usage: None,
+        };
+        let request = [messages::Message::text(
+            messages::Role::User,
+            "i".repeat(400),
+        )];
+        let tool_tokens = estimated_tokens_for_content_block(&response.content[2]) as u64;
+        let estimated = usage_for_response(None, &request, &[], &response);
+        assert_eq!(estimated.output_tokens, Some(20 + 10 + tool_tokens));
+        assert_eq!(estimated.input_tokens, Some(101));
+        assert_eq!(estimated.source, "estimated");
+        let provider = messages::TokenUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(200),
+            total_tokens: Some(300),
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            source: "provider".to_string(),
+        };
+        assert_eq!(
+            usage_for_response(Some(provider.clone()), &request, &[], &response),
+            provider
+        );
+    }
+
+    #[test]
     fn image_blocks_have_pessimistic_context_cost() {
         let image = messages::Message {
             role: messages::Role::User,
@@ -7705,8 +7759,17 @@ mod context_pressure_tests {
         assert!(summary.contains("provider: fake"));
         assert!(summary.contains("model: actual-model"));
         assert!(summary.contains("completed_requests: 1"));
-        assert!(summary.contains("ttft n/a"));
+        assert!(summary.contains("TTFT n/a"));
         assert!(summary.contains("(estimated)"));
+        assert!(summary.contains("context: "));
+        assert!(
+            state
+                .last_performance
+                .as_ref()
+                .expect("missing turn performance")
+                .compact_summary()
+                .contains("ctx ")
+        );
     }
 
     #[test]

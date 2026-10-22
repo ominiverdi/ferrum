@@ -61,6 +61,16 @@ fn print_stream_loop_recovers_and_counts_interrupted_usage() {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0]["source"], "estimated");
         assert!(records[0]["output_tokens"].as_u64().unwrap() > 0);
+        let total = records
+            .iter()
+            .map(|record| record["output_tokens"].as_u64().unwrap())
+            .sum::<u64>();
+        let summary = stderr
+            .lines()
+            .find(|line| line.starts_with("perf:"))
+            .unwrap();
+        assert!(summary.contains(&format!("tot ~{total} tok")), "{summary}");
+        assert!(!summary.contains("final"));
     }
 }
 

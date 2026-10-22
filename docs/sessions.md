@@ -109,6 +109,18 @@ Header-only and metadata-only sessions are retained so a failed start or state t
 
 `/perf` shows model-request performance for the last completed turn in the current process. `/perf on|off` toggles compact summaries, while `--perf` starts with summaries enabled. Timing data is not persisted to JSONL, and switching sessions clears the previous session's last-turn measurement while preserving the display toggle.
 
+Compact summaries cover the whole turn:
+
+```text
+perf: 2 requests | TTFT 1.00/1.09/1.18s | 50.0/60.4/67.3 t/s | tot 302 tok | ctx ~24k/256k 9% | turn 21.4s
+```
+
+`ctx` shows the current context size over the configured window after the completed turn, using the same boundary-aware accounting as `/session`: provider usage plus a trailing estimate when available, otherwise a local estimate marked with `~`. The percentage is context usage against `max_context_tokens`. Compact counts round to whole thousands (`k`) at 10,000 tokens and above; detailed `/perf` output keeps exact numbers and names the accounting source (`usage+estimate`, `estimate`, or `estimate_after_compaction`).
+
+Triplets are **low / average / high**; a single measured request shows one value. TTFT measures the first non-empty streamed model output, including provider-supplied thinking or tool-call activity. Its average is the arithmetic mean across measured completed requests. Each request's t/s uses its output tokens divided by the interval from first output to request completion; the aggregate average is generation-time weighted (sum of measured tokens divided by sum of generation times), not an arithmetic mean of rates. Buffered requests and zero-duration generation have no rate; unavailable values are `n/a`. Detailed `/perf` reports measured-request counts and per-request values. Interrupted requests appear in details and contribute to `tot`, but not to completed-request timing statistics.
+
+`tot` sums model output tokens across all recorded requests, including thinking and generated tool calls, not input tokens or tool results. Provider totals are used unchanged, so reasoning already included is not counted twice. Without provider usage, visible text, reasoning, and tool calls are estimated; hidden reasoning cannot be estimated from visible output. Estimates use `~`, including an aggregate rate or total containing estimated values. Missing token counts produce `tot n/a` rather than a misleading partial sum. Response/thinking breakdowns are not fabricated when the provider supplies only a combined count.
+
 Thinking level is stored in session metadata. New sessions record the current thinking level, and `/thinking <level>` appends an updated level. Resuming or switching sessions restores the session thinking level unless the process was started with an explicit `--thinking` override. Provider-supplied thinking content and replay signatures are stored in message history when the provider sends them.
 
 Safety level is stored in session metadata. New sessions record the current safety level, and `/safety <level>` appends an updated level. Resuming restores the session safety level unless the process was started with an explicit `--safety` override.
