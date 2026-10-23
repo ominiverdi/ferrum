@@ -68,6 +68,15 @@ impl Provider for FakeProvider {
                 .map(Message::text_content)
                 .unwrap_or_default();
             #[cfg(test)]
+            if last_user == "__ferrum_test_read_image__"
+                || last_user == "__ferrum_test_read_images__"
+            {
+                return Ok(ProviderResponse::message(read_images_response(
+                    messages,
+                    last_user.ends_with("images__"),
+                )));
+            }
+            #[cfg(test)]
             if last_user == "__ferrum_test_event_stream__" {
                 return Ok(ProviderResponse::message(Message {
                     role: Role::Assistant,
@@ -243,8 +252,36 @@ fn image_inspection_response(messages: &[Message]) -> Message {
     )
 }
 
+fn read_images_response(messages: &[Message], parallel: bool) -> Message {
+    if messages.iter().any(|message| message.content.iter().any(|block| {
+        matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id.starts_with("image-read-"))
+    })) {
+        return image_inspection_response(messages);
+    }
+    let paths = if parallel {
+        vec!["image.png", "second.webp"]
+    } else {
+        vec!["image.png"]
+    };
+    Message {
+        role: Role::Assistant,
+        content: paths
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| ContentBlock::ToolUse {
+                id: format!("image-read-{index}"),
+                name: "read".to_string(),
+                input: serde_json::json!({"path":path}),
+            })
+            .collect(),
+        usage: None,
+    }
+}
+
 fn scripted_response(script: &str, messages: &[Message], final_response: bool) -> Message {
     match script {
+        "read_image" => read_images_response(messages, false),
+        "read_images" => read_images_response(messages, true),
         "repeat_read" => repeat_read_response(messages, final_response),
         "loop_sequence" => sequence_read_response(messages, final_response),
         "repeat_text"

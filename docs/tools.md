@@ -52,6 +52,16 @@ If a provider emits a call for a non-exposed tool, Ferrum returns a tool error s
 
 Interactive shell shortcuts are separate from model tools: `!cmd` and `!!cmd` are user-invoked commands handled by Ferrum, not tools exposed to the model.
 
+## read
+
+Read text with optional 1-based `offset` and line `limit`, or inspect a PNG, JPEG, or WebP image:
+
+```json
+{"path":"/tmp/screenshots/page.png"}
+```
+
+Images are detected from file content and returned to the model as actual image content. Omit line arguments for images. Existing readable-root restrictions apply. Image validation and per-turn/session limits are shared with prompt attachments; unsupported models receive a tool error. Text reads retain their 50 KiB bound. See [images](images.md#model-requested-reads).
+
 ## history_search
 
 Search the current session history. This includes active messages and messages archived before compaction.

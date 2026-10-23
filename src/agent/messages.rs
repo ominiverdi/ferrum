@@ -357,7 +357,7 @@ fn validate_decodable_image(data: &[u8], mime_type: &str) -> Result<()> {
     Ok(())
 }
 
-fn detect_image_mime(data: &[u8]) -> Result<String> {
+pub(crate) fn detect_image_mime(data: &[u8]) -> Result<String> {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Ok("image/png".to_string());
     }

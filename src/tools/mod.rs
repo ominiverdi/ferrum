@@ -11,7 +11,10 @@ pub mod wait;
 pub mod write;
 pub mod write_policy;
 
-use crate::{agent::tools::ToolDefinition, config::SafetyLevel};
+use crate::{
+    agent::tools::{ToolDefinition, ToolOutput},
+    config::SafetyLevel,
+};
 use anyhow::{Context, Result};
 use serde_json::json;
 use std::{
@@ -29,7 +32,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "read".to_string(),
-            description: "Read a text file with optional 1-based line offset and line limit. Input lines and output are bounded while reading."
+            description: "Read a text file or view a PNG, JPEG, or WebP image. Images return actual image content to the model, not just a path. Optional 1-based offset and limit apply only to text. Input lines, output, and image sizes are bounded."
                 .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -303,6 +306,7 @@ pub async fn execute_with_cancel_and_safety(
         writable_roots,
     )
     .await
+    .map(|output| output.content)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -315,8 +319,8 @@ pub async fn execute_with_cancel_and_policy(
     safety: SafetyLevel,
     readable_roots: Option<&[std::path::PathBuf]>,
     writable_roots: &[std::path::PathBuf],
-) -> Result<String> {
-    match name {
+) -> Result<ToolOutput> {
+    let output = match name {
         "read" => {
             let path = required_str(input, "path")?;
             let offset = input.get("offset").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
@@ -326,9 +330,25 @@ pub async fn execute_with_cancel_and_policy(
                 .map(|v| v as usize);
             let resolved = path::resolve_to_cwd(path, cwd)?;
             validate_native_read_path(path, cwd, readable_roots)?;
-            tokio::task::spawn_blocking(move || read::read_text(&resolved, offset, limit))
-                .await
-                .context("read worker failed")?
+            if cancel
+                .as_ref()
+                .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+            {
+                anyhow::bail!("aborted");
+            }
+            let output =
+                tokio::task::spawn_blocking(move || read::read_file(&resolved, offset, limit))
+                    .await
+                    .context("read worker failed")??;
+            // Keep completed text reads after cancellation, but never attach cancelled images.
+            if !output.images.is_empty()
+                && cancel
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+            {
+                anyhow::bail!("aborted");
+            }
+            return Ok(output);
         }
         "ls" => {
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -485,7 +505,8 @@ pub async fn execute_with_cancel_and_policy(
             .context("find worker failed")?
         }
         other => anyhow::bail!("unknown tool: {other}"),
-    }
+    };
+    output.map(ToolOutput::from)
 }
 
 fn validate_native_read_path(
@@ -835,6 +856,81 @@ mod tests {
                 .to_string()
                 .contains("outside configured readable roots")
         );
+    }
+
+    #[tokio::test]
+    async fn read_images_obey_readable_roots_and_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let path = outside.path().join("screenshot.png");
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, bytes.into_inner()).unwrap();
+        let input = json!({"path": path});
+        let link = root.path().join("escape.png");
+        std::os::unix::fs::symlink(&path, &link).unwrap();
+        let error = execute_with_cancel_and_policy(
+            "read",
+            &json!({"path": link}),
+            root.path(),
+            None,
+            false,
+            SafetyLevel::High,
+            Some(&[std::path::PathBuf::from(".")]),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured readable roots")
+        );
+        let error = execute_with_cancel_and_policy(
+            "read",
+            &input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::High,
+            Some(&[std::path::PathBuf::from(".")]),
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("outside configured readable roots")
+        );
+        let allowed = execute_with_cancel_and_policy(
+            "read",
+            &input,
+            root.path(),
+            None,
+            false,
+            SafetyLevel::High,
+            Some(&[outside.path().to_path_buf()]),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(allowed.images.len(), 1);
+        let error = execute_with_cancel_and_policy(
+            "read",
+            &input,
+            root.path(),
+            Some(Arc::new(AtomicBool::new(true))),
+            false,
+            SafetyLevel::High,
+            None,
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "aborted");
     }
 
     #[tokio::test]

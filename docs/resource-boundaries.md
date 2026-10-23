@@ -46,8 +46,11 @@ changes; it is not a directory sandbox.
 - Clipboard helpers have a 5-second deadline and a 10 MiB + 1 output cap. Preview helpers
   consume a private copy of validated bytes, have a 10-second deadline, and have a 2 MiB
   output cap.
-- Native `read` consumes lines incrementally and retains at most 50 KiB plus one bounded
-  line buffer. Leading blank lines count toward the line limit.
+- Native `read` consumes text lines incrementally and retains at most 50 KiB plus one bounded
+  line buffer. Leading blank lines count toward the line limit. Image reads use the same
+  bounded validation and aggregate budgets as attachments, including earlier reads in the
+  current turn. Parallel results are budgeted in tool-call order in bounded worker batches;
+  rejected image payloads are discarded before completion events or session persistence.
 - Native `grep` has a true global match limit, a 50 KiB output budget, bounded event/line
   buffers, cancellation, and a 10-second deadline. Its fallback streams files and rejects
   file symlinks and canonical escapes.

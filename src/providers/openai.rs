@@ -1211,15 +1211,46 @@ fn normalized_chat_messages(
         ));
     }
 
-    normalized.extend(
-        messages
-            .iter()
-            .filter(|message| !matches!(message.role, Role::System))
-            .map(|message| {
-                ChatMessage::from_message_with_reasoning_field(message, reasoning_history_field)
-            }),
-    );
+    let mut tool_images = Vec::new();
+    for message in messages
+        .iter()
+        .filter(|message| !matches!(message.role, Role::System))
+    {
+        if !matches!(message.role, Role::Tool) && !tool_images.is_empty() {
+            normalized.push(ChatMessage::from_message_with_reasoning_field(
+                &tool_images_message(std::mem::take(&mut tool_images)),
+                reasoning_history_field,
+            ));
+        }
+        normalized.push(ChatMessage::from_message_with_reasoning_field(
+            message,
+            reasoning_history_field,
+        ));
+        if matches!(message.role, Role::Tool) {
+            tool_images.extend(
+                message
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, ContentBlock::Image { .. }))
+                    .cloned(),
+            );
+        }
+    }
+    if !tool_images.is_empty() {
+        normalized.push(ChatMessage::from_message_with_reasoning_field(
+            &tool_images_message(tool_images),
+            reasoning_history_field,
+        ));
+    }
     normalized
+}
+
+fn tool_images_message(images: Vec<ContentBlock>) -> Message {
+    Message::with_images(
+        Role::User,
+        "Image content returned by the preceding tool calls, in tool-call order.",
+        images,
+    )
 }
 
 impl ChatMessage {
@@ -1241,10 +1272,11 @@ impl ChatMessage {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
-        let has_images = message
-            .content
-            .iter()
-            .any(|block| matches!(block, ContentBlock::Image { .. }));
+        let has_images = !matches!(message.role, Role::Tool)
+            && message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }));
         let text = message
             .content
             .iter()
@@ -1872,9 +1904,18 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
         .collect::<std::collections::HashSet<_>>();
 
     let mut inputs = Vec::new();
+    let mut tool_images = Vec::new();
     for message in messages {
         if matches!(message.role, Role::System) {
             continue;
+        }
+        if !matches!(message.role, Role::Tool) && !tool_images.is_empty() {
+            inputs.push(ResponsesInput::Message {
+                role: "user",
+                content: codex_message_content(&tool_images_message(std::mem::take(
+                    &mut tool_images,
+                ))),
+            });
         }
         for block in &message.content {
             match block {
@@ -1918,12 +1959,19 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
                         });
                     }
                 }
+                ContentBlock::Image { .. } if matches!(message.role, Role::Tool) => {
+                    tool_images.push(block.clone());
+                }
                 ContentBlock::Text { .. }
                 | ContentBlock::Image { .. }
                 | ContentBlock::Thinking { .. } => {}
             }
         }
-        if has_codex_message_content(message) {
+        let tool_text = matches!(message.role, Role::Tool).then(|| message.text_content());
+        if tool_text.as_ref().map_or_else(
+            || has_codex_message_content(message),
+            |text| !text.is_empty(),
+        ) {
             let role = match message.role {
                 Role::System => "system",
                 Role::User => "user",
@@ -1932,9 +1980,17 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
             };
             inputs.push(ResponsesInput::Message {
                 role,
-                content: codex_message_content(message),
+                content: tool_text
+                    .map(serde_json::Value::String)
+                    .unwrap_or_else(|| codex_message_content(message)),
             });
         }
+    }
+    if !tool_images.is_empty() {
+        inputs.push(ResponsesInput::Message {
+            role: "user",
+            content: codex_message_content(&tool_images_message(tool_images)),
+        });
     }
     inputs
 }
@@ -3863,6 +3919,89 @@ data: {"type":"response.completed","response":{"output":[]}}
                 codex[1]["image_url"],
                 format!("data:{mime_type};base64,{encoded}")
             );
+        }
+    }
+
+    #[test]
+    fn tool_images_follow_all_tool_replies_and_survive_history_replay() {
+        let image = ContentBlock::Image {
+            mime_type: "image/png".to_string(),
+            data_base64: "test-image-payload".to_string(),
+            sha256: "test-hash".to_string(),
+            source: "screenshot.png".to_string(),
+        };
+        let mut messages = vec![
+            Message::text(Role::User, "Inspect the screenshots"),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "read1|fc_read1".into(),
+                        name: "read".into(),
+                        input: json!({"path":"one.png"}),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "read2|fc_read2".into(),
+                        name: "read".into(),
+                        input: json!({"path":"two.txt"}),
+                    },
+                ],
+                usage: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "read1|fc_read1".into(),
+                        content: "image attached".into(),
+                        is_error: false,
+                    },
+                    image,
+                ],
+                usage: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "read2|fc_read2".into(),
+                    content: "text result".into(),
+                    is_error: false,
+                }],
+                usage: None,
+            },
+        ];
+        for replay in [false, true] {
+            if replay {
+                messages.push(Message::text(Role::Assistant, "I can see the image."));
+            }
+            let chat =
+                normalized_chat_messages(&messages, ChatReasoningHistoryField::ReasoningContent);
+            assert_eq!(chat[2].role, "tool");
+            assert_eq!(chat[2].content, "image attached");
+            assert_eq!(chat[3].role, "tool");
+            assert_eq!(chat[3].content, "text result");
+            assert_eq!(chat[4].role, "user");
+            assert_eq!(chat[4].content[1]["type"], "image_url");
+            assert_eq!(
+                chat[4].content[1]["image_url"]["url"],
+                "data:image/png;base64,test-image-payload"
+            );
+            assert_eq!(chat.iter().filter(|m| m.content.is_array()).count(), 1);
+            let codex = serde_json::to_value(codex_inputs(&messages)).unwrap();
+            assert_eq!(codex[3]["type"], "function_call_output");
+            assert_eq!(codex[3]["output"], "image attached");
+            assert_eq!(codex[4]["type"], "function_call_output");
+            assert_eq!(codex[4]["output"], "text result");
+            assert_eq!(codex[5]["role"], "user");
+            assert_eq!(codex[5]["content"][1]["type"], "input_image");
+            assert_eq!(
+                codex[5]["content"][1]["image_url"],
+                "data:image/png;base64,test-image-payload"
+            );
+            if replay {
+                assert_eq!(chat[5].role, "assistant");
+                assert_eq!(codex[6]["role"], "assistant");
+            }
         }
     }
 

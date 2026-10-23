@@ -364,7 +364,7 @@ The history tools are current-session only and include archived pre-compaction J
 
 ### `read`
 
-Read a text file with optional offset/limit. Reading is bounded to 50 KiB even for one giant line; leading blank lines are preserved and counted.
+Read a text file with optional offset/limit, or return validated PNG/JPEG/WebP content to the model. Image detection uses file content; line arguments apply only to text. Images share attachment capability checks and per-image, per-turn, and retained-session limits. Text reading is bounded to 50 KiB even for one giant line; leading blank lines are preserved and counted.
 
 ### `write`
 

@@ -1244,6 +1244,54 @@ fn acp_stdio_can_resume_a_perf_enabled_print_session_without_terminal_output() {
 }
 
 #[test]
+fn acp_stdio_read_images_reach_provider_without_payload_in_tool_updates() {
+    let cwd = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let png = generated_image_base64(image::ImageFormat::Png);
+    let webp = generated_image_base64(image::ImageFormat::WebP);
+    std::fs::write(cwd.path().join("image.png"), STANDARD.decode(&png).unwrap()).unwrap();
+    std::fs::write(
+        cwd.path().join("second.webp"),
+        STANDARD.decode(&webp).unwrap(),
+    )
+    .unwrap();
+    let mut acp = AcpProcess::spawn_in(cwd.path(), Some("read_images"), storage.path());
+    acp.initialize();
+    let session_id = acp.new_session(cwd.path());
+    acp.send(json!({
+        "jsonrpc":"2.0", "id":3, "method":"session/prompt",
+        "params":{"sessionId":session_id,"prompt":[{"type":"text","text":"Inspect generated screenshots"}]}
+    }));
+    let mut response = String::new();
+    let mut completed_tools = 0;
+    loop {
+        let message = acp.recv();
+        let encoded = message.to_string();
+        assert!(!encoded.contains(&png));
+        assert!(!encoded.contains(&webp));
+        if message["id"] == 3 {
+            assert_eq!(message["result"]["stopReason"], "end_turn");
+            break;
+        }
+        let update = &message["params"]["update"];
+        if update["sessionUpdate"] == "agent_message_chunk" {
+            response.push_str(update["content"]["text"].as_str().unwrap());
+        }
+        if update["sessionUpdate"] == "tool_call_update" && update["status"] == "completed" {
+            completed_tools += 1;
+            assert!(update.to_string().contains("image content attached"));
+        }
+    }
+    assert!(response.contains("provider image blocks=2"));
+    assert!(response.contains("mime=image/png"));
+    assert!(response.contains("mime=image/webp"));
+    assert_eq!(completed_tools, 2);
+    let stderr = acp.finish();
+    assert!(!stderr.contains(&png));
+    assert!(!stderr.contains(&webp));
+}
+
+#[test]
 fn acp_stdio_preserves_image_prompts_through_provider_session_and_resume() {
     let cwd = tempfile::tempdir().unwrap();
     let storage = tempfile::tempdir().unwrap();

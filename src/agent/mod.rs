@@ -1,4 +1,6 @@
 pub mod events;
+#[cfg(test)]
+mod image_tests;
 mod loop_guard;
 #[cfg(test)]
 mod loop_tests;
@@ -1616,12 +1618,65 @@ struct ExecutedToolBatch {
     cancelled: bool,
 }
 
+struct ToolImageBudget {
+    enabled: bool,
+    turn: (usize, usize, usize),
+    retained: (usize, usize, usize),
+}
+
+impl ToolImageBudget {
+    fn new(enabled: bool, images: &[messages::ContentBlock]) -> Self {
+        Self {
+            enabled,
+            turn: image_totals(images.iter()),
+            retained: (0, 0, 0),
+        }
+    }
+
+    fn accept(&mut self, result: &mut ExecutedToolUse) {
+        if result.images.is_empty() {
+            return;
+        }
+        if result.is_error || result.aborted {
+            result.images.clear();
+            return;
+        }
+        let added = image_totals(result.images.iter());
+        let turn = (
+            self.turn.0.saturating_add(added.0),
+            self.turn.1.saturating_add(added.1),
+            self.turn.2.saturating_add(added.2),
+        );
+        let validation = if self.enabled {
+            validate_image_totals(turn, (0, 0, 0))
+                .and_then(|()| validate_image_totals(added, self.retained))
+        } else {
+            Err(anyhow::anyhow!(
+                "selected provider/model does not support image input; image was not attached"
+            ))
+        };
+        if let Err(error) = validation {
+            result.content = error.to_string();
+            result.images.clear();
+            result.is_error = true;
+        } else {
+            self.turn = turn;
+            self.retained = (
+                self.retained.0.saturating_add(added.0),
+                self.retained.1.saturating_add(added.1),
+                self.retained.2.saturating_add(added.2),
+            );
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ExecutedToolUse {
     id: String,
     name: String,
     input: serde_json::Value,
     content: String,
+    images: Vec<messages::ContentBlock>,
     is_error: bool,
     aborted: bool,
     duration_ms: u128,
@@ -1639,6 +1694,7 @@ fn aborted_tool_uses(
             name,
             input,
             content: content.to_string(),
+            images: Vec::new(),
             is_error: true,
             aborted: true,
             duration_ms: 0,
@@ -3115,6 +3171,7 @@ impl AgentSession {
         sink: &mut dyn AgentEventSink,
         performance: &mut TurnPerformanceRecorder,
     ) -> Result<TurnOutcome> {
+        let mut image_budget = ToolImageBudget::new(config.supports_image_input(), &images);
         let user = if images.is_empty() {
             messages::Message::text(messages::Role::User, prompt)
         } else {
@@ -3333,6 +3390,7 @@ impl AgentSession {
             let executed_batch = self
                 .execute_tool_batch(
                     tool_uses,
+                    &mut image_budget,
                     options.monitor_terminal_cancel,
                     Arc::clone(&turn_cancel),
                     options.permission_handler.as_ref(),
@@ -3348,13 +3406,15 @@ impl AgentSession {
                     &executed.content,
                     executed.is_error,
                 ));
+                let mut content = vec![messages::ContentBlock::ToolResult {
+                    tool_use_id: executed.id,
+                    content: executed.content,
+                    is_error: executed.is_error,
+                }];
+                content.extend(executed.images);
                 let result = messages::Message {
                     role: messages::Role::Tool,
-                    content: vec![messages::ContentBlock::ToolResult {
-                        tool_use_id: executed.id,
-                        content: executed.content,
-                        is_error: executed.is_error,
-                    }],
+                    content,
                     usage: None,
                 };
                 self.session.append_message(&result)?;
@@ -3760,15 +3820,22 @@ impl AgentSession {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool_batch(
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
+        image_budget: &mut ToolImageBudget,
         interactive: bool,
         cancel: Arc<AtomicBool>,
         permission_handler: Option<&Arc<dyn events::ToolPermissionHandler>>,
         cancellation: &events::TurnCancellation,
         sink: &mut dyn AgentEventSink,
     ) -> Result<ExecutedToolBatch> {
+        image_budget.retained = image_totals(
+            self.messages
+                .iter()
+                .flat_map(|message| message.content.iter()),
+        );
         let can_parallelize = tool_uses
             .iter()
             .all(|(_, name, _)| self.is_parallel_safe_builtin_tool(name));
@@ -3781,24 +3848,37 @@ impl AgentSession {
                 })?;
             }
             let mut abort = ActiveTurnAbort::start_with_token(interactive, Arc::clone(&cancel));
-            let results = self
-                .run_parallel_builtin_tools(tool_uses, Some(Arc::clone(&cancel)))
-                .await;
+            let mut pending = tool_uses.into_iter();
+            let mut results = Vec::new();
+            loop {
+                let chunk = pending
+                    .by_ref()
+                    .take(MAX_PARALLEL_BUILTIN_TOOLS)
+                    .collect::<Vec<_>>();
+                if chunk.is_empty() {
+                    break;
+                }
+                let mut completed = self
+                    .run_parallel_builtin_tools(chunk, Some(Arc::clone(&cancel)))
+                    .await;
+                for result in &mut completed {
+                    image_budget.accept(result);
+                    sink.emit(AgentEvent::ToolCallCompleted {
+                        id: result.id.clone(),
+                        name: result.name.clone(),
+                        input: result.input.clone(),
+                        content: result.content.clone(),
+                        is_error: result.is_error,
+                        aborted: result.aborted,
+                        duration_ms: result.duration_ms,
+                    })?;
+                    emit_tool_metrics_if_enabled(result);
+                }
+                results.extend(completed);
+            }
             abort.stop();
             let cancelled =
                 cancel.load(Ordering::Acquire) || results.iter().any(|result| result.aborted);
-            for result in &results {
-                sink.emit(AgentEvent::ToolCallCompleted {
-                    id: result.id.clone(),
-                    name: result.name.clone(),
-                    input: result.input.clone(),
-                    content: result.content.clone(),
-                    is_error: result.is_error,
-                    aborted: result.aborted,
-                    duration_ms: result.duration_ms,
-                })?;
-                emit_tool_metrics_if_enabled(result);
-            }
             return Ok(ExecutedToolBatch {
                 tools: results,
                 cancelled,
@@ -3806,6 +3886,7 @@ impl AgentSession {
         }
         self.execute_sequential_tools_with_cancel_and_events(
             tool_uses,
+            image_budget,
             interactive,
             cancel,
             permission_handler,
@@ -3841,11 +3922,11 @@ impl AgentSession {
                 let writable_roots = writable_roots.clone();
                 async move {
                     let started = Instant::now();
-                    let (content, is_error, aborted) = if cancel
+                    let (output, is_error, aborted) = if cancel
                         .as_ref()
                         .is_some_and(|flag| flag.load(Ordering::Relaxed))
                     {
-                        ("aborted".to_string(), true, true)
+                        (tools::ToolOutput::from("aborted".to_string()), true, true)
                     } else if !active_tool_names.contains(&name) {
                         let content = if active_tool_names.is_empty() {
                             format!(
@@ -3854,7 +3935,7 @@ impl AgentSession {
                         } else {
                             format!("Tool '{name}' is not in the active tool set")
                         };
-                        (content, true, false)
+                        (tools::ToolOutput::from(content), true, false)
                     } else {
                         match builtin_tools::execute_with_cancel_and_policy(
                             &name,
@@ -3870,9 +3951,9 @@ impl AgentSession {
                         {
                             Ok(output) => (output, false, false),
                             Err(error) if error.to_string() == "aborted" => {
-                                ("aborted".to_string(), true, true)
+                                (tools::ToolOutput::from("aborted".to_string()), true, true)
                             }
-                            Err(error) => (error.to_string(), true, false),
+                            Err(error) => (tools::ToolOutput::from(error.to_string()), true, false),
                         }
                     };
                     (
@@ -3881,7 +3962,8 @@ impl AgentSession {
                             id,
                             name,
                             input,
-                            content,
+                            content: output.content,
+                            images: output.images,
                             is_error,
                             aborted,
                             duration_ms: started.elapsed().as_millis(),
@@ -3905,6 +3987,7 @@ impl AgentSession {
         let mut sink = events::IgnoreAgentEvents;
         self.execute_sequential_tools_with_cancel_and_events(
             tool_uses,
+            &mut ToolImageBudget::new(true, &[]),
             interactive,
             cancel.clone(),
             None,
@@ -3915,9 +3998,11 @@ impl AgentSession {
         .expect("ignore event sink cannot fail")
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn execute_sequential_tools_with_cancel_and_events(
         &mut self,
         tool_uses: Vec<(String, String, serde_json::Value)>,
+        image_budget: &mut ToolImageBudget,
         interactive: bool,
         cancel: Arc<AtomicBool>,
         permission_handler: Option<&Arc<dyn events::ToolPermissionHandler>>,
@@ -3933,8 +4018,12 @@ impl AgentSession {
                 input: input.clone(),
             })?;
             let started = Instant::now();
-            let (content, is_error, aborted) = if batch_cancelled {
-                ("aborted before execution".to_string(), true, true)
+            let (output, is_error, aborted) = if batch_cancelled {
+                (
+                    tools::ToolOutput::from("aborted before execution".to_string()),
+                    true,
+                    true,
+                )
             } else if let Some(handler) = permission_handler {
                 match self
                     .request_tool_permission(handler.as_ref(), &id, &name, &input, cancellation)
@@ -3949,25 +4038,28 @@ impl AgentSession {
                         abort.stop();
                         match result {
                             Ok(output) => {
-                                let is_error = bash_preview_indicates_failure(&name, &output);
+                                let is_error =
+                                    bash_preview_indicates_failure(&name, &output.content);
                                 (output, is_error, false)
                             }
                             Err(error) if error.to_string() == "aborted" => {
-                                ("aborted".to_string(), true, true)
+                                (tools::ToolOutput::from("aborted".to_string()), true, true)
                             }
-                            Err(error) => (error.to_string(), true, false),
+                            Err(error) => (tools::ToolOutput::from(error.to_string()), true, false),
                         }
                     }
                     Ok(events::ToolPermissionDecision::Reject) => (
-                        "tool execution rejected by client permission policy".to_string(),
+                        tools::ToolOutput::from(
+                            "tool execution rejected by client permission policy".to_string(),
+                        ),
                         true,
                         false,
                     ),
                     Ok(events::ToolPermissionDecision::Cancelled) => {
                         cancel.store(true, Ordering::Release);
-                        ("aborted".to_string(), true, true)
+                        (tools::ToolOutput::from("aborted".to_string()), true, true)
                     }
-                    Err(error) => (error.to_string(), true, false),
+                    Err(error) => (tools::ToolOutput::from(error.to_string()), true, false),
                 }
             } else {
                 let mut abort = ActiveTurnAbort::start_with_token(interactive, Arc::clone(&cancel));
@@ -3977,25 +4069,27 @@ impl AgentSession {
                 abort.stop();
                 match result {
                     Ok(output) => {
-                        let is_error = bash_preview_indicates_failure(&name, &output);
+                        let is_error = bash_preview_indicates_failure(&name, &output.content);
                         (output, is_error, false)
                     }
                     Err(error) if error.to_string() == "aborted" => {
-                        ("aborted".to_string(), true, true)
+                        (tools::ToolOutput::from("aborted".to_string()), true, true)
                     }
-                    Err(error) => (error.to_string(), true, false),
+                    Err(error) => (tools::ToolOutput::from(error.to_string()), true, false),
                 }
             };
             batch_cancelled = batch_cancelled || aborted || cancel.load(Ordering::Acquire);
-            let result = ExecutedToolUse {
+            let mut result = ExecutedToolUse {
                 id,
                 name,
                 input,
-                content,
+                content: output.content,
+                images: output.images,
                 is_error,
                 aborted,
                 duration_ms: started.elapsed().as_millis(),
             };
+            image_budget.accept(&mut result);
             sink.emit(AgentEvent::ToolCallCompleted {
                 id: result.id.clone(),
                 name: result.name.clone(),
@@ -4066,7 +4160,7 @@ impl AgentSession {
         input: &serde_json::Value,
         interactive: bool,
         cancel: Option<Arc<AtomicBool>>,
-    ) -> Result<String> {
+    ) -> Result<tools::ToolOutput> {
         if !self.active_tool_names.contains(name) {
             let message = if self.active_tool_names.is_empty() {
                 format!("Tool '{name}' is not available because tools are disabled (--no-tools)")
@@ -4076,13 +4170,18 @@ impl AgentSession {
             anyhow::bail!(message);
         }
         if matches!(name, "history_search" | "history_read") {
-            return self.execute_history_tool(name, input);
+            return self
+                .execute_history_tool(name, input)
+                .map(tools::ToolOutput::from);
         }
         if self.mcp_enabled
             && let Some(mcp) = &mut self.mcp
             && mcp.has_tool(name)
         {
-            return mcp.call(name, input, cancel.as_ref()).await;
+            return mcp
+                .call(name, input, cancel.as_ref())
+                .await
+                .map(tools::ToolOutput::from);
         }
         builtin_tools::execute_with_cancel_and_policy(
             name,
@@ -8144,6 +8243,7 @@ mod context_pressure_tests {
                         serde_json::json!({"path":"two", "content":"unexpected"}),
                     ),
                 ],
+                &mut ToolImageBudget::new(true, &[]),
                 false,
                 cancel,
                 None,
@@ -9361,6 +9461,17 @@ fn validate_image_attachment_budget_iter<'a>(
     let turn_count = pending_count.saturating_add(incoming_count);
     let turn_decoded = pending_decoded.saturating_add(incoming_decoded);
     let turn_encoded = pending_encoded.saturating_add(incoming_encoded);
+    let historical = messages.iter().flat_map(|message| message.content.iter());
+    validate_image_totals(
+        (turn_count, turn_decoded, turn_encoded),
+        image_totals(historical),
+    )
+}
+
+fn validate_image_totals(
+    (turn_count, turn_decoded, turn_encoded): (usize, usize, usize),
+    (history_count, history_decoded, history_encoded): (usize, usize, usize),
+) -> Result<()> {
     if turn_count > MAX_IMAGES_PER_TURN {
         anyhow::bail!(
             "image attachment count exceeds per-turn limit: {turn_count} > {MAX_IMAGES_PER_TURN}; attach fewer images in this turn"
@@ -9372,8 +9483,6 @@ fn validate_image_attachment_budget_iter<'a>(
         );
     }
 
-    let historical = messages.iter().flat_map(|message| message.content.iter());
-    let (history_count, history_decoded, history_encoded) = image_totals(historical);
     let session_count = history_count.saturating_add(turn_count);
     let session_decoded = history_decoded.saturating_add(turn_decoded);
     let session_encoded = history_encoded.saturating_add(turn_encoded);

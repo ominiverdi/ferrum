@@ -18,6 +18,18 @@ Per-image decoded and encoded payload limit:
 
 Per-turn limits are 8 images and 20 MiB decoded plus the corresponding base64 budget. Retained session context is limited to 32 images and 64 MiB decoded plus base64. A multi-image attachment is transactional: Ferrum queues none of the batch unless every image and the aggregate pass validation.
 
+## Model-requested reads
+
+The existing `read` tool reads PNG, JPEG, and WebP files as images. Format detection uses file content, not the extension. For example, after a screenshot tool returns a path, the model can call:
+
+```json
+{"path":"/tmp/screenshots/page.png"}
+```
+
+Ferrum validates and attaches the actual image content to the next model request. No separate image-viewing tool is needed. Omit `offset` and `limit` for images; they apply only to text files.
+
+Image reads obey readable-root restrictions, per-image validation, model image support, and aggregate limits. The per-turn budget includes prompt attachments and all image reads across tool rounds. Each rejected image becomes a tool error without an attachment. Session history retains accepted image content for resume; tool logs and terminal/ACP updates contain only a short textual status, never base64 payloads.
+
 ## CLI
 
 Attach one image:
