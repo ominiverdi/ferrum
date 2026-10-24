@@ -65,19 +65,21 @@ async fn run() -> Result<()> {
         tool_selection,
     )?;
 
+    let restore = agent::SessionRestorePolicy {
+        thinking: args.thinking.is_none(),
+        safety: args.safety.is_none(),
+        tools: !tools_overridden,
+        provider: args.provider.is_none(),
+        model: args.model.is_none(),
+    };
+
     if let Some(command) = &args.command {
         match command {
             cli::Command::Acp { permissions } => {
                 acp::run(
                     config,
                     acp::AcpPolicy {
-                        restore: acp::SessionRestorePolicy {
-                            thinking: args.thinking.is_none(),
-                            safety: args.safety.is_none(),
-                            tools: !tools_overridden,
-                            provider: args.provider.is_none(),
-                            model: args.model.is_none(),
-                        },
+                        restore,
                         permissions: *permissions,
                     },
                 )
@@ -130,6 +132,7 @@ async fn run() -> Result<()> {
                 .and_then(|reference| reference.as_deref())),
             args.title.as_deref(),
             args.perf,
+            restore,
             &config,
         )
         .await?;

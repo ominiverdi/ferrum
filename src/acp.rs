@@ -1,6 +1,6 @@
 use crate::{
     agent::{
-        AgentSession, HeadlessCommandInvocation, HeadlessCommandOutcome,
+        AgentSession, HeadlessCommandInvocation, HeadlessCommandOutcome, SessionRestorePolicy,
         events::{
             AgentEvent, AgentEventSink, ToolPermissionDecision, ToolPermissionHandler,
             ToolPermissionRequest, TurnCancellation, TurnOptions, TurnOutcome,
@@ -129,15 +129,6 @@ struct SessionEntry {
 pub(crate) struct AcpPolicy {
     pub restore: SessionRestorePolicy,
     pub permissions: AcpPermissionPolicy,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SessionRestorePolicy {
-    pub thinking: bool,
-    pub safety: bool,
-    pub tools: bool,
-    pub provider: bool,
-    pub model: bool,
 }
 
 #[derive(Clone)]

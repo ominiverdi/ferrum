@@ -55,6 +55,12 @@ ferrum --session auth-scan -p "second prompt with prior context"
 
 If `auth-scan` exists, Ferrum loads it before running the prompt. If it does not exist, Ferrum creates `auth-scan.jsonl` in the session data directory. User-defined session ids may contain only letters, digits, `.`, `_`, and `-`; they must not start with `.`.
 
+On print-mode resume (`--session REF` or `--resume REF`), explicit `--model`, `--provider`, `--thinking`, and `--safety` options take precedence over saved settings, subject to project safety restrictions. `--model` also selects that alias's context budget. A provider-less model override uses the saved provider; a provider-bound alias selects its own provider. `--provider` without `--model` keeps the model selected by that provider override (normally its configured default), not the saved session model. With neither option, the saved provider/model is restored. These runtime provider/model overrides do not rewrite the session's saved preference.
+
+```bash
+ferrum --session auth-scan --provider local --model qwen38-27b-q4-mtp -p "continue with this model"
+```
+
 This is useful for recurring jobs that need memory across runs:
 
 ```bash

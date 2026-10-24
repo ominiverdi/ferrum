@@ -931,17 +931,27 @@ fn expand_tilde_path(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-pub async fn run_print(
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SessionRestorePolicy {
+    pub thinking: bool,
+    pub safety: bool,
+    pub tools: bool,
+    pub provider: bool,
+    pub model: bool,
+}
+
+pub(crate) async fn run_print(
     prompt: String,
     images: Vec<String>,
     session_ref: Option<&str>,
     title: Option<&str>,
     perf: bool,
+    restore: SessionRestorePolicy,
     config: &Config,
 ) -> Result<()> {
     let mut effective_config = config.clone();
     let mut state = if let Some(reference) = session_ref {
-        AgentSession::resume_or_create_ref(&mut effective_config, reference)?
+        AgentSession::resume_or_create_ref(&mut effective_config, reference, restore)?
     } else {
         AgentSession::new_print(&effective_config)?
     };
@@ -1499,11 +1509,25 @@ pub(crate) fn restore_session_preferences(
     let Some(info) = session::jsonl::session_info(path)? else {
         return Ok(None);
     };
-    if restore_provider && let Some(provider) = info.provider.as_deref() {
-        config.set_provider(provider)?;
+    let explicit_model = (!restore_model).then(|| config.model.clone());
+    let model_selects_provider = explicit_model
+        .as_ref()
+        .and_then(|model| config.models.get(model))
+        .is_some_and(|definition| definition.provider.is_some());
+    // An explicit provider keeps its selected/default model instead of restoring
+    // a saved model that may route back to a different provider.
+    if restore_provider && !model_selects_provider {
+        if let Some(provider) = info.provider.as_deref() {
+            config.set_provider(provider)?;
+        }
+        if restore_model && let Some(model) = info.model.as_deref() {
+            config.set_model(model)?;
+        }
     }
-    if restore_model && let Some(model) = info.model.as_deref() {
-        config.set_model(model)?;
+    // Restoring a provider can select its default model; reapply the explicit alias
+    // and its context budget. Provider-bound aliases also select their own provider.
+    if let Some(model) = explicit_model {
+        config.set_model(&model)?;
     }
     if restore_thinking && let Some(thinking) = info.thinking.as_deref() {
         config.thinking = crate::config::ThinkingLevel::parse(thinking)?;
@@ -2942,7 +2966,11 @@ impl AgentSession {
         Ok(state)
     }
 
-    fn resume_or_create_ref(config: &mut Config, reference: &str) -> Result<Self> {
+    fn resume_or_create_ref(
+        config: &mut Config,
+        reference: &str,
+        restore: SessionRestorePolicy,
+    ) -> Result<Self> {
         let cwd = std::env::current_dir()?;
         let resolution = session::jsonl::resolve_or_create_session_ref(
             &config.sessions_dir(),
@@ -2963,11 +2991,11 @@ impl AgentSession {
                 let _restored_tools = restore_session_preferences(
                     &mut candidate,
                     &path,
-                    true,
-                    true,
-                    true,
-                    true,
-                    true,
+                    restore.thinking,
+                    restore.safety,
+                    restore.tools,
+                    restore.provider,
+                    restore.model,
                 )?;
                 let state = Self::open_session(&candidate, path.clone())?;
                 *config = candidate;
