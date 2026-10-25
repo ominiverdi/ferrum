@@ -61,6 +61,8 @@ Required frontmatter:
 - `name`
 - `description`
 
+Frontmatter uses YAML. Quoted strings, folded/literal blocks, comments, and bounded anchors/aliases are supported. Additional metadata is ignored; YAML merge keys do not supply required fields. Duplicate keys, multiple documents, unsupported tags (including `!include`), and excessive nesting or alias expansion are rejected. Environment-variable placeholders remain literal; parsing never loads included files or substitutes environment values.
+
 Name rules:
 
 - lowercase letters, numbers, hyphens

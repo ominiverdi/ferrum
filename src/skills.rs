@@ -513,7 +513,36 @@ struct SkillFrontmatter {
 }
 
 fn parse_frontmatter_fields(frontmatter: &str) -> Result<HashMap<String, String>> {
-    let parsed: SkillFrontmatter = serde_yaml::from_str(frontmatter)?;
+    if frontmatter.len() > MAX_SKILL_FRONTMATTER_BYTES {
+        anyhow::bail!("skill frontmatter exceeds {MAX_SKILL_FRONTMATTER_BYTES} bytes");
+    }
+    // Skill metadata is untrusted. Bound parsing and alias replay as well as input
+    // size; keep merge keys as ordinary ignored metadata, matching serde_yaml.
+    // Only deserialization is enabled: no includes or property interpolation.
+    let options = serde_saphyr::options! {
+        with_snippet: false,
+        reject_unsupported_tags: true,
+        merge_keys: serde_saphyr::options::MergeKeyPolicy::AsOrdinary,
+        duplicate_keys: serde_saphyr::options::DuplicateKeyPolicy::Error,
+        budget: serde_saphyr::budget! {
+            max_documents: 1,
+            max_depth: 32,
+            flow_nesting_limit: 32,
+            max_events: 16_384,
+            max_nodes: 8_192,
+            max_anchors: 64,
+            max_aliases: 256,
+            max_total_scalar_bytes: MAX_SKILL_FRONTMATTER_BYTES,
+            max_recorded_anchor_events: 4_096,
+            max_recorded_anchor_bytes: 4 * MAX_SKILL_FRONTMATTER_BYTES,
+        },
+        alias_limits: serde_saphyr::alias_limits! {
+            max_total_replayed_events: 4_096,
+            max_replay_stack_depth: 16,
+            max_alias_expansions_per_anchor: 64,
+        },
+    };
+    let parsed: SkillFrontmatter = serde_saphyr::from_str_with_options(frontmatter, options)?;
     let mut fields = HashMap::new();
     if let Some(name) = parsed.name {
         fields.insert("name".to_string(), name);
@@ -813,6 +842,127 @@ mod tests {
         let fm = "name: yaml-skill\ndescription: \"does: parse: colons\"\n";
         let fields = parse_frontmatter_fields(fm).unwrap();
         assert_eq!(fields.get("description").unwrap(), "does: parse: colons");
+    }
+
+    #[test]
+    fn skill_yaml_preserves_strings_blocks_and_additional_metadata() {
+        for (description, expected) in [
+            ("plain text # ignored comment", "plain text"),
+            ("'does: parse # literally'", "does: parse # literally"),
+            ("\"escaped\\nline and \\u03bb\"", "escaped\nline and λ"),
+            (">-\n  folded\n  description", "folded description"),
+            ("|-\n  literal\n  description", "literal\ndescription"),
+            ("true", "true"),
+            ("123", "123"),
+            ("!!str null", "null"),
+            ("${HOME} $USER", "${HOME} $USER"),
+        ] {
+            let yaml = format!(
+                "name: yaml-skill\ndescription: {description}\nmetadata:\n  nested: [one, two]\n"
+            );
+            let fields = parse_frontmatter_fields(&yaml).unwrap();
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields["name"], "yaml-skill");
+            assert_eq!(fields["description"], expected);
+        }
+    }
+
+    #[test]
+    fn skill_yaml_supports_bounded_aliases_without_implicit_merges() {
+        let fields =
+            parse_frontmatter_fields("name: &skill yaml-skill\ndescription: *skill\n").unwrap();
+        assert_eq!(fields["description"], "yaml-skill");
+        let fields = parse_frontmatter_fields(
+            "defaults: &defaults {name: hidden, description: hidden}\n<<: *defaults\n",
+        )
+        .unwrap();
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn skill_yaml_rejects_invalid_types_duplicates_and_multiple_documents() {
+        for yaml in [
+            "name: one\nname: two\ndescription: test\n",
+            "name: skill\ndescription: one\ndescription: two\n",
+            "name: [invalid]\ndescription: test\n",
+            "name: skill\ndescription: {invalid: mapping}\n",
+            "name: skill\ndescription: [unterminated\n",
+            "name: skill\ndescription: test\n---\nname: other\n",
+            "name: skill\ndescription: *undefined\n",
+        ] {
+            assert!(parse_frontmatter_fields(yaml).is_err(), "accepted {yaml:?}");
+        }
+        let fields = parse_frontmatter_fields("name: null\ndescription: ~\n").unwrap();
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn skill_yaml_rejects_include_and_custom_tags_without_snippets() {
+        for yaml in [
+            "name: skill\ndescription: !include /not-a-skill-file\n",
+            "name: skill\ndescription: !custom value\n",
+            "name: skill\ndescription: test\nmetadata: !include /not-a-skill-file\n",
+        ] {
+            assert!(parse_frontmatter_fields(yaml).is_err(), "accepted {yaml:?}");
+        }
+        let error = parse_frontmatter_fields(
+            "metadata: do-not-render-this-neighbor\nname: [invalid]\ndescription: test\n",
+        )
+        .unwrap_err();
+        assert!(!error.to_string().contains("do-not-render-this-neighbor"));
+    }
+
+    #[test]
+    fn skill_yaml_bounds_input_and_nested_ignored_metadata() {
+        let oversized = format!(
+            "name: skill\ndescription: {}",
+            "a".repeat(MAX_SKILL_FRONTMATTER_BYTES)
+        );
+        let error = parse_frontmatter_fields(&oversized).unwrap_err();
+        assert!(error.to_string().contains("frontmatter exceeds"));
+        for metadata in [
+            format!("{}0{}", "[".repeat(64), "]".repeat(64)),
+            (0..64)
+                .map(|n| format!("\n{}nested:", " ".repeat(n + 1)))
+                .collect(),
+        ] {
+            let yaml = format!("name: skill\ndescription: test\nmetadata: {metadata}\n");
+            assert!(yaml.len() < MAX_SKILL_FRONTMATTER_BYTES);
+            assert!(parse_frontmatter_fields(&yaml).is_err());
+        }
+    }
+
+    #[test]
+    fn skill_yaml_bounds_alias_amplification_and_cycles() {
+        let aliases = format!(
+            "name: skill\ndescription: test\nanchor: &a value\nmetadata: [{}]\n",
+            vec!["*a"; 257].join(",")
+        );
+        let anchors = (0..65)
+            .map(|n| format!("a{n}: &a{n} value\n"))
+            .collect::<String>();
+        let nested = "name: skill\ndescription: test\na: &a [*a]\nmetadata: *a\n";
+        for yaml in [aliases.as_str(), anchors.as_str(), nested] {
+            assert!(yaml.len() < MAX_SKILL_FRONTMATTER_BYTES);
+            assert!(parse_frontmatter_fields(yaml).is_err());
+        }
+    }
+
+    #[test]
+    fn skill_yaml_invalid_file_does_not_hide_valid_sibling() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        write_skill(&root.join("bad/SKILL.md"), "bad", "[invalid", "body");
+        write_skill(
+            &root.join("good/SKILL.md"),
+            "good",
+            "valid description",
+            "body",
+        );
+        let mut discovery = Discovery::default();
+        discovery.add_root(root, false, false).unwrap();
+        assert_eq!(discovery.skills.len(), 1);
+        assert_eq!(discovery.skills[0].name, "good");
     }
 
     #[test]

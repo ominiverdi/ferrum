@@ -1,6 +1,6 @@
 [package]
 name = "ferrum"
-version = "0.7.11"
+version = "0.7.12"
 edition = "2024"
 description = "A small Rust-native Linux coding agent"
 license = "MIT"
@@ -30,12 +30,12 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 url = "2"
 serde_json = "1"
-serde_yaml = "0.9"
+serde-saphyr = { version = "2", default-features = false, features = ["deserialize"] }
 regex = "1"
 similar = "3"
 time = { version = "0.3", features = ["formatting"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "time", "fs", "sync"] }
+tokio = { version = "1.53.3", features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "time", "fs", "sync"] }
 toml = "0.8"
 toml_edit = "0.22"
 unicode-segmentation = "1"
