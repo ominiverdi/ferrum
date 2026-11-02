@@ -168,22 +168,22 @@ Common slash commands:
 : Show Ferrum version.
 
 **/session**
-: Show current session information.
-
-**/new**
-: Start a new session. This is the short alias for **/sessions new**.
-
-**/sessions**
 : Open the numbered, searchable interactive-session picker. Up/Down move the highlight and Enter opens it; press Esc to return to the prompt without switching.
 
-**/sessions all**
+**/session all**
 : Include print, ACP, and legacy sessions. Selecting one marks it interactive.
 
-**/sessions del**
+**/session new**
+: Start a new session.
+
+**/session delete**
 : Open an interactive session deletion picker.
 
-**/sessions new**
-: Start a new session.
+**/session info**
+: Show detailed current-session information.
+
+**/new**
+: Start a new session. This is the short alias for **/session new**.
 
 **/title** TEXT
 : Set session title.
@@ -225,7 +225,7 @@ Common slash commands:
 : Show token usage summary.
 
 **/perf** [on|off]
-: Show model performance for the last completed turn, or toggle automatic summaries and save the setting in the current session and user-config default for fresh sessions. Resume and session switching prefer the session's saved setting; `/new` inherits the current setting. Timing samples remain process-local. Compact TTFT and t/s triplets are low/average/high across measured completed requests; a single measured request shows one value. TTFT includes the first non-empty reasoning, text, or tool-call activity; its average is arithmetic. Each rate covers first output to request completion; average t/s is generation-time weighted. `tot` sums output tokens across recorded requests, including thinking and tool calls; provider totals are not counted twice. Interrupted requests contribute to `tot` but not to completed-request timing statistics. Unavailable timings are `n/a`; estimated token counts and rates use `~`. `ctx` shows current context tokens over the configured window after the turn, using the same boundary-aware accounting as `/session`; local estimates are marked with `~` and detailed output names the accounting source. Detailed output includes measured counts and per-request values.
+: Show model performance for the last completed turn, or toggle automatic summaries and save the setting in the current session and user-config default for fresh sessions. Resume and session switching prefer the session's saved setting; `/new` inherits the current setting. Timing samples remain process-local. Compact TTFT and t/s triplets are low/average/high across measured completed requests; a single measured request shows one value. TTFT includes the first non-empty reasoning, text, or tool-call activity; its average is arithmetic. Each rate covers first output to request completion; average t/s is generation-time weighted. `tot` sums output tokens across recorded requests, including thinking and tool calls; provider totals are not counted twice. Interrupted requests contribute to `tot` but not to completed-request timing statistics. Provider-reported cached input is shown as a weighted `cached/input` percentage; missing cache data is not estimated. Unavailable timings are `n/a`; estimated token counts and rates use `~`. `ctx` shows current context tokens over the configured window after the turn, using the same boundary-aware accounting as `/session info`; local estimates are marked with `~` and detailed output names the accounting source. Detailed output includes measured counts and per-request values.
 
 **/skills**
 : List discovered skills.
@@ -355,9 +355,9 @@ configuration directory.
 Download the release tarball from Codeberg, extract it, and install the binary and man page:
 
 ```sh
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.7.12-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.7.12-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.7.13-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.7.13-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -366,9 +366,9 @@ man ferrum
 Optional checksum verification:
 
 ```sh
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 ## From source

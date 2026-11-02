@@ -1,5 +1,6 @@
 use super::{
-    Provider, ProviderFailure, ProviderResponse, StreamEvent, TokenUsage,
+    CacheDiagnosticContext, Provider, ProviderFailure, ProviderRequestOptions, ProviderResponse,
+    StreamEvent, TokenUsage,
     transport::{
         BodyLimits, MAX_PROVIDER_ERROR_BODY_BYTES, MAX_PROVIDER_JSON_BODY_BYTES, RetryableSseError,
         SseControl, collect_response_body, consume_sse_response,
@@ -17,15 +18,18 @@ use crate::{
     text_truncate::truncate_to_max_bytes,
 };
 use anyhow::{Context, Result};
+use rand::{RngCore, rngs::OsRng};
 use reqwest::{Client, Response, StatusCode, header, redirect::Policy};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
+    io::Write as IoWrite,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -377,7 +381,7 @@ impl Provider for OpenAiCompatProvider {
         model: &'a str,
         messages: &'a [Message],
         _tools: &'a [ToolDefinition],
-        thinking: ThinkingLevel,
+        options: ProviderRequestOptions,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             let api_key = self
@@ -385,20 +389,17 @@ impl Provider for OpenAiCompatProvider {
                 .as_ref()
                 .map(ApiKeySource::resolve)
                 .transpose()?;
-            let reasoning_effort = thinking.as_openai();
+            let reasoning_effort = options.thinking.as_openai();
             let request = ChatRequest {
                 model,
                 messages: normalized_chat_messages(messages, self.reasoning_history_field),
                 tools: openai_tools(_tools),
-                tool_choice: if _tools.is_empty() {
-                    None
-                } else {
-                    Some("auto")
-                },
+                tool_choice: chat_tool_choice(_tools, options.tool_choice),
                 reasoning_effort,
                 stream: false,
                 stream_options: None,
             };
+            emit_cache_diagnostics(options.cache_diagnostics, &request.messages, &request.tools);
 
             let mut http_request = self
                 .client
@@ -498,7 +499,7 @@ impl Provider for OpenAiCompatProvider {
         model: &'a str,
         messages: &'a [Message],
         tools: &'a [ToolDefinition],
-        thinking: ThinkingLevel,
+        options: ProviderRequestOptions,
         on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
         cancelled: Option<Arc<AtomicBool>>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
@@ -511,7 +512,7 @@ impl Provider for OpenAiCompatProvider {
                     anyhow::bail!("aborted");
                 }
                 let response = cancel::race(
-                    self.complete(model, messages, tools, thinking),
+                    self.complete(model, messages, tools, options),
                     cancelled.as_ref(),
                 )
                 .await
@@ -540,7 +541,8 @@ impl Provider for OpenAiCompatProvider {
                 messages,
                 tools,
                 CompatStreamOptions {
-                    thinking,
+                    thinking: options.thinking,
+                    request: options,
                     include_usage: self.stream_usage,
                     cancelled: cancelled.as_ref(),
                 },
@@ -564,7 +566,11 @@ impl Provider for OpenAiCompatProvider {
                         messages,
                         tools,
                         CompatStreamOptions {
-                            thinking,
+                            thinking: options.thinking,
+                            request: ProviderRequestOptions {
+                                cache_diagnostics: None,
+                                ..options
+                            },
                             include_usage: false,
                             cancelled: cancelled.as_ref(),
                         },
@@ -585,7 +591,7 @@ impl Provider for OpenAiCompatProvider {
                             &retry_body,
                         ));
                     }
-                } else if thinking.as_openai().is_some()
+                } else if options.thinking.as_openai().is_some()
                     && is_reasoning_effort_unsupported_error(text)
                 {
                     response = send_openai_compat_stream_request(
@@ -596,6 +602,10 @@ impl Provider for OpenAiCompatProvider {
                         tools,
                         CompatStreamOptions {
                             thinking: ThinkingLevel::Off,
+                            request: ProviderRequestOptions {
+                                cache_diagnostics: None,
+                                ..options
+                            },
                             include_usage: self.stream_usage,
                             cancelled: cancelled.as_ref(),
                         },
@@ -664,6 +674,7 @@ fn emit_message_stream_events(message: &Message, on_event: &mut (dyn FnMut(Strea
 
 struct CompatStreamOptions<'a> {
     thinking: ThinkingLevel,
+    request: ProviderRequestOptions,
     include_usage: bool,
     cancelled: Option<&'a Arc<AtomicBool>>,
 }
@@ -678,6 +689,7 @@ async fn send_openai_compat_stream_request(
 ) -> Result<Response> {
     let CompatStreamOptions {
         thinking,
+        request: request_options,
         include_usage,
         cancelled,
     } = options;
@@ -686,13 +698,18 @@ async fn send_openai_compat_stream_request(
         model,
         messages: normalized_chat_messages(messages, provider.reasoning_history_field),
         tools: openai_tools(tools),
-        tool_choice: if tools.is_empty() { None } else { Some("auto") },
+        tool_choice: chat_tool_choice(tools, request_options.tool_choice),
         reasoning_effort: thinking.as_openai(),
         stream: true,
         stream_options: include_usage.then_some(ChatStreamOptions {
             include_usage: true,
         }),
     };
+    emit_cache_diagnostics(
+        request_options.cache_diagnostics,
+        &request.messages,
+        &request.tools,
+    );
 
     let mut http_request = provider
         .client
@@ -771,7 +788,7 @@ impl Provider for OpenAiCodexProvider {
         model: &'a str,
         messages: &'a [Message],
         _tools: &'a [ToolDefinition],
-        thinking: ThinkingLevel,
+        options: ProviderRequestOptions,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
             let instructions = codex_instructions(messages);
@@ -784,16 +801,13 @@ impl Provider for OpenAiCodexProvider {
                 text: CodexText { verbosity: "low" },
                 include: vec!["reasoning.encrypted_content"],
                 tools: codex_tools(_tools),
-                tool_choice: if _tools.is_empty() {
-                    None
-                } else {
-                    Some("auto")
-                },
-                reasoning: thinking.as_codex().map(|effort| CodexReasoning {
+                tool_choice: chat_tool_choice(_tools, options.tool_choice),
+                reasoning: options.thinking.as_codex().map(|effort| CodexReasoning {
                     effort,
                     summary: "detailed",
                 }),
-                parallel_tool_calls: !_tools.is_empty(),
+                parallel_tool_calls: !_tools.is_empty()
+                    && options.tool_choice == super::ToolChoice::Auto,
             };
 
             let mut stream_retries = 0usize;
@@ -843,7 +857,7 @@ impl Provider for OpenAiCodexProvider {
         model: &'a str,
         messages: &'a [Message],
         _tools: &'a [ToolDefinition],
-        thinking: ThinkingLevel,
+        options: ProviderRequestOptions,
         on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
         cancelled: Option<Arc<AtomicBool>>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
@@ -858,16 +872,13 @@ impl Provider for OpenAiCodexProvider {
                 text: CodexText { verbosity: "low" },
                 include: vec!["reasoning.encrypted_content"],
                 tools: codex_tools(_tools),
-                tool_choice: if _tools.is_empty() {
-                    None
-                } else {
-                    Some("auto")
-                },
-                reasoning: thinking.as_codex().map(|effort| CodexReasoning {
+                tool_choice: chat_tool_choice(_tools, options.tool_choice),
+                reasoning: options.thinking.as_codex().map(|effort| CodexReasoning {
                     effort,
                     summary: "detailed",
                 }),
-                parallel_tool_calls: !_tools.is_empty(),
+                parallel_tool_calls: !_tools.is_empty()
+                    && options.tool_choice == super::ToolChoice::Auto,
             };
 
             let mut stream_retries = 0usize;
@@ -1159,6 +1170,201 @@ struct ChatToolFunction {
     arguments: String,
 }
 
+const MAX_CACHE_DIAGNOSTIC_SCOPES: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CacheDiagnosticSegment {
+    label: String,
+    bytes: usize,
+    digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CacheDiagnosticManifest {
+    segments: Vec<CacheDiagnosticSegment>,
+}
+
+struct CacheDiagnosticState {
+    key: [u8; 32],
+    previous: HashMap<[u8; 32], CacheDiagnosticManifest>,
+}
+
+impl CacheDiagnosticState {
+    fn new() -> Self {
+        let mut key = [0u8; 32];
+        OsRng.fill_bytes(&mut key);
+        Self {
+            key,
+            previous: HashMap::new(),
+        }
+    }
+}
+
+static CACHE_DIAGNOSTICS: OnceLock<Mutex<CacheDiagnosticState>> = OnceLock::new();
+
+fn emit_cache_diagnostics(
+    context: Option<CacheDiagnosticContext>,
+    messages: &[ChatMessage],
+    tools: &[OpenAiTool],
+) {
+    let Some(context) = context else {
+        return;
+    };
+    let state = CACHE_DIAGNOSTICS.get_or_init(|| Mutex::new(CacheDiagnosticState::new()));
+    let mut state = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let manifest = match cache_diagnostic_manifest(&state.key, messages, tools) {
+        Ok(manifest) => manifest,
+        Err(_) => {
+            eprintln!(
+                "[cache:prefix] request={} comparison=unavailable reason=serialization-error",
+                context.request
+            );
+            return;
+        }
+    };
+    let previous = state.previous.get(&context.scope);
+    for line in format_cache_diagnostics(context, previous, &manifest) {
+        eprintln!("{line}");
+    }
+    if !state.previous.contains_key(&context.scope)
+        && state.previous.len() >= MAX_CACHE_DIAGNOSTIC_SCOPES
+    {
+        state.previous.clear();
+    }
+    state.previous.insert(context.scope, manifest);
+}
+
+fn cache_diagnostic_manifest(
+    key: &[u8; 32],
+    messages: &[ChatMessage],
+    tools: &[OpenAiTool],
+) -> Result<CacheDiagnosticManifest> {
+    let mut segments = Vec::with_capacity(messages.len().saturating_add(2));
+    if let Some(system) = messages.first().filter(|message| message.role == "system") {
+        segments.push(cache_diagnostic_segment(
+            key,
+            "leading-system".to_string(),
+            &system.content,
+        )?);
+    }
+    segments.push(cache_diagnostic_segment(key, "tools".to_string(), &tools)?);
+    for (index, message) in messages.iter().enumerate() {
+        segments.push(cache_diagnostic_segment(
+            key,
+            format!("message[{index}]:{}", message.role),
+            message,
+        )?);
+    }
+    Ok(CacheDiagnosticManifest { segments })
+}
+
+fn cache_diagnostic_segment<T: Serialize>(
+    key: &[u8; 32],
+    label: String,
+    value: &T,
+) -> Result<CacheDiagnosticSegment> {
+    struct DigestWriter<'a> {
+        hasher: &'a mut Sha256,
+        bytes: usize,
+    }
+
+    impl IoWrite for DigestWriter<'_> {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.hasher.update(buffer);
+            self.bytes = self.bytes.saturating_add(buffer.len());
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(key);
+    let mut writer = DigestWriter {
+        hasher: &mut hasher,
+        bytes: 0,
+    };
+    serde_json::to_writer(&mut writer, value)?;
+    let bytes = writer.bytes;
+    let digest = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(CacheDiagnosticSegment {
+        label,
+        bytes,
+        digest,
+    })
+}
+
+fn format_cache_diagnostics(
+    context: CacheDiagnosticContext,
+    previous: Option<&CacheDiagnosticManifest>,
+    current: &CacheDiagnosticManifest,
+) -> Vec<String> {
+    let first_change =
+        previous.and_then(|previous| first_cache_diagnostic_change(previous, current));
+    let comparison = if context.expected_reset.is_some() {
+        "expected-reset"
+    } else if previous.is_none() {
+        "baseline"
+    } else if first_change.is_none() {
+        "unchanged"
+    } else if previous.is_some_and(|previous| {
+        previous.segments.len() < current.segments.len()
+            && previous
+                .segments
+                .iter()
+                .zip(&current.segments)
+                .all(|(left, right)| left == right)
+    }) {
+        "append-only"
+    } else {
+        "diverged"
+    };
+    let mut summary = format!(
+        "[cache:prefix] request={} comparison={comparison}",
+        context.request
+    );
+    if let Some(reason) = context.expected_reset {
+        summary.push_str(&format!(" expected_reason={}", reason.as_str()));
+    }
+    if let Some(change) = first_change {
+        summary.push_str(&format!(" first_changed={change}"));
+    }
+    let mut lines = vec![summary];
+    lines.extend(current.segments.iter().map(|segment| {
+        format!(
+            "[cache:segment] request={} segment={} bytes={} digest={}",
+            context.request, segment.label, segment.bytes, segment.digest
+        )
+    }));
+    lines
+}
+
+fn first_cache_diagnostic_change(
+    previous: &CacheDiagnosticManifest,
+    current: &CacheDiagnosticManifest,
+) -> Option<String> {
+    for (left, right) in previous.segments.iter().zip(&current.segments) {
+        if left != right {
+            return Some(right.label.clone());
+        }
+    }
+    if previous.segments.len() == current.segments.len() {
+        None
+    } else if let Some(segment) = current.segments.get(previous.segments.len()) {
+        Some(segment.label.clone())
+    } else {
+        Some(format!("removed-after-{}", current.segments.len()))
+    }
+}
+
 /// Cerebras documents historical assistant reasoning as `messages[].reasoning`. Keep the existing
 /// `reasoning_content` extension for other OpenAI-compatible providers.
 fn chat_reasoning_history_field(base_url: &str) -> ChatReasoningHistoryField {
@@ -1175,32 +1381,31 @@ fn chat_reasoning_history_field(base_url: &str) -> ChatReasoningHistoryField {
 
 /// Keep chat requests compatible with templates that accept exactly one leading system message.
 ///
-/// Ferrum can add immutable context and later runtime guidance as separate system messages. Merge
-/// those instructions in their original order and move the result ahead of the conversation while
-/// leaving every non-system message in place.
+/// Only the initial contiguous system block is immutable request context. Later system messages
+/// are transient runtime guidance, so keep them at their original position as tagged user input
+/// instead of rewriting the leading prefix.
 fn normalized_chat_messages(
     messages: &[Message],
     reasoning_history_field: ChatReasoningHistoryField,
 ) -> Vec<ChatMessage> {
-    let mut system_content = Vec::new();
-    let system_count = messages
-        .iter()
-        .filter(|message| matches!(message.role, Role::System))
-        .count();
-    let mut normalized = Vec::with_capacity(messages.len().saturating_sub(system_count) + 1);
+    let leading_system_count = leading_system_message_count(messages);
+    let mut normalized = Vec::with_capacity(
+        messages
+            .len()
+            .saturating_sub(leading_system_count)
+            .saturating_add(usize::from(leading_system_count > 0)),
+    );
 
-    for message in messages
-        .iter()
-        .filter(|message| matches!(message.role, Role::System))
-    {
-        if !system_content.is_empty() && !message.content.is_empty() {
-            system_content.push(ContentBlock::Text {
-                text: "\n\n".to_string(),
-            });
+    if leading_system_count > 0 {
+        let mut system_content = Vec::new();
+        for message in &messages[..leading_system_count] {
+            if !system_content.is_empty() && !message.content.is_empty() {
+                system_content.push(ContentBlock::Text {
+                    text: "\n\n".to_string(),
+                });
+            }
+            system_content.extend(message.content.iter().cloned());
         }
-        system_content.extend(message.content.iter().cloned());
-    }
-    if system_count > 0 {
         normalized.push(ChatMessage::from_message_with_reasoning_field(
             &Message {
                 role: Role::System,
@@ -1212,10 +1417,10 @@ fn normalized_chat_messages(
     }
 
     let mut tool_images = Vec::new();
-    for message in messages
-        .iter()
-        .filter(|message| !matches!(message.role, Role::System))
-    {
+    for message in &messages[leading_system_count..] {
+        let late_guidance =
+            matches!(message.role, Role::System).then(|| late_system_guidance_message(message));
+        let message = late_guidance.as_ref().unwrap_or(message);
         if !matches!(message.role, Role::Tool) && !tool_images.is_empty() {
             normalized.push(ChatMessage::from_message_with_reasoning_field(
                 &tool_images_message(std::mem::take(&mut tool_images)),
@@ -1243,6 +1448,26 @@ fn normalized_chat_messages(
         ));
     }
     normalized
+}
+
+fn leading_system_message_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .take_while(|message| matches!(message.role, Role::System))
+        .count()
+}
+
+fn late_system_guidance_message(message: &Message) -> Message {
+    let mut content = Vec::with_capacity(message.content.len().saturating_add(1));
+    content.push(ContentBlock::Text {
+        text: "Ferrum runtime guidance:\n".to_string(),
+    });
+    content.extend(message.content.iter().cloned());
+    Message {
+        role: Role::User,
+        content,
+        usage: None,
+    }
 }
 
 fn tool_images_message(images: Vec<ContentBlock>) -> Message {
@@ -1404,6 +1629,11 @@ impl OpenAiUsage {
                 .as_ref()
                 .and_then(|details| details.cached_tokens)
                 .unwrap_or(0),
+            cache_read_tokens_reported: self
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|details| details.cached_tokens)
+                .is_some(),
             cache_write_tokens: 0,
             source: "provider".to_string(),
         }
@@ -1449,18 +1679,42 @@ struct OpenAiToolFunction {
     parameters: serde_json::Value,
 }
 
+fn chat_tool_choice(tools: &[ToolDefinition], choice: super::ToolChoice) -> Option<&'static str> {
+    (!tools.is_empty()).then(|| choice.as_openai())
+}
+
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            let mut canonical = serde_json::Map::new();
+            for (key, value) in entries {
+                canonical.insert(key.clone(), canonical_json(value));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        value => value.clone(),
+    }
+}
+
 fn openai_tools(tools: &[ToolDefinition]) -> Vec<OpenAiTool> {
-    tools
+    let mut tools = tools
         .iter()
         .map(|tool| OpenAiTool {
             kind: "function",
             function: OpenAiToolFunction {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: tool.input_schema.clone(),
+                parameters: canonical_json(&tool.input_schema),
             },
         })
-        .collect()
+        .collect::<Vec<_>>();
+    tools.sort_by(|left, right| left.function.name.cmp(&right.function.name));
+    tools
 }
 
 fn chat_response_to_message(message: Option<ChatChoiceMessage>) -> Result<Message> {
@@ -1801,16 +2055,18 @@ struct CodexTool {
 }
 
 fn codex_tools(tools: &[ToolDefinition]) -> Vec<CodexTool> {
-    tools
+    let mut tools = tools
         .iter()
         .map(|tool| CodexTool {
             kind: "function",
             name: tool.name.clone(),
             description: tool.description.clone(),
-            parameters: tool.input_schema.clone(),
+            parameters: canonical_json(&tool.input_schema),
             strict: None,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    tools
 }
 
 #[derive(Debug, Serialize)]
@@ -1844,13 +2100,11 @@ enum ResponsesInput {
 
 fn codex_instructions(messages: &[Message]) -> String {
     let mut instructions = String::from("You are a helpful coding assistant.");
-    for message in messages {
-        if matches!(message.role, Role::System) {
-            let text = message.text_content();
-            if !text.trim().is_empty() {
-                instructions.push_str("\n\n");
-                instructions.push_str(&text);
-            }
+    for message in &messages[..leading_system_message_count(messages)] {
+        let text = message.text_content();
+        if !text.trim().is_empty() {
+            instructions.push_str("\n\n");
+            instructions.push_str(&text);
         }
     }
     instructions
@@ -1903,12 +2157,16 @@ fn codex_inputs(messages: &[Message]) -> Vec<ResponsesInput> {
         })
         .collect::<std::collections::HashSet<_>>();
 
+    let leading_system_count = leading_system_message_count(messages);
     let mut inputs = Vec::new();
     let mut tool_images = Vec::new();
-    for message in messages {
-        if matches!(message.role, Role::System) {
+    for (index, message) in messages.iter().enumerate() {
+        if index < leading_system_count {
             continue;
         }
+        let late_guidance =
+            matches!(message.role, Role::System).then(|| late_system_guidance_message(message));
+        let message = late_guidance.as_ref().unwrap_or(message);
         if !matches!(message.role, Role::Tool) && !tool_images.is_empty() {
             inputs.push(ResponsesInput::Message {
                 role: "user",
@@ -3264,7 +3522,7 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::Off,
+                ProviderRequestOptions::default(),
                 &mut |event| events.push(event),
                 None,
             )
@@ -3297,7 +3555,7 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::Off,
+                ProviderRequestOptions::default(),
                 &mut |event| events.push(event),
                 None,
             )
@@ -3328,7 +3586,7 @@ data: {"type":"response.completed","response":{"output":[]}}
         let provider = OpenAiCodexProvider::new(base_url, auth_path).unwrap();
 
         let response = provider
-            .complete("test-model", &[], &[], ThinkingLevel::Off)
+            .complete("test-model", &[], &[], ProviderRequestOptions::default())
             .await
             .unwrap();
 
@@ -3356,7 +3614,7 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::Off,
+                ProviderRequestOptions::default(),
                 &mut |event| events.push(event),
                 None,
             )
@@ -3395,7 +3653,10 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::High,
+                ProviderRequestOptions {
+                    thinking: ThinkingLevel::High,
+                    ..ProviderRequestOptions::default()
+                },
                 &mut |event| events.push(event),
                 None,
             )
@@ -3431,7 +3692,7 @@ data: {"type":"response.completed","response":{"output":[]}}
         let provider = OpenAiCodexProvider::new(base_url, auth_path).unwrap();
 
         let response = provider
-            .complete("test-model", &[], &[], ThinkingLevel::Off)
+            .complete("test-model", &[], &[], ProviderRequestOptions::default())
             .await
             .unwrap();
 
@@ -3453,7 +3714,7 @@ data: {"type":"response.completed","response":{"output":[]}}
         )
         .unwrap();
         let response = provider
-            .complete("test-model", &[], &[], ThinkingLevel::Off)
+            .complete("test-model", &[], &[], ProviderRequestOptions::default())
             .await
             .unwrap();
         assert_eq!(response.message.display_text(), "buffered");
@@ -3475,7 +3736,7 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::Off,
+                ProviderRequestOptions::default(),
                 &mut |_| {},
                 None,
             )
@@ -3630,7 +3891,7 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::Off,
+                ProviderRequestOptions::default(),
                 &mut |_| {},
                 cancelled,
             )
@@ -3722,7 +3983,7 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::Off,
+                ProviderRequestOptions::default(),
                 &mut |_| {},
                 Some(cancelled),
             )
@@ -3743,7 +4004,7 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::Off,
+                ProviderRequestOptions::default(),
                 &mut |event| events.push(event),
                 None,
             )
@@ -3770,7 +4031,7 @@ data: {"type":"response.completed","response":{"output":[]}}
                 "test-model",
                 &[],
                 &[],
-                ThinkingLevel::Off,
+                ProviderRequestOptions::default(),
                 &mut |event| events.push(event),
                 None,
             ),
@@ -3859,7 +4120,7 @@ data: {"type":"response.completed","response":{"output":[]}}
     }
 
     #[test]
-    fn chat_requests_merge_and_frontload_system_messages() {
+    fn chat_requests_keep_late_system_guidance_after_the_conversation() {
         let messages = vec![
             Message::text(Role::System, "runtime context"),
             Message::text(Role::System, "project context"),
@@ -3869,18 +4130,284 @@ data: {"type":"response.completed","response":{"output":[]}}
         ];
 
         let chat = normalized_chat_messages(&messages, ChatReasoningHistoryField::ReasoningContent);
-        assert_eq!(chat.len(), 3);
+        assert_eq!(chat.len(), 4);
         assert_eq!(chat[0].role, "system");
-        assert_eq!(
-            chat[0].content,
-            "runtime context\n\nproject context\n\nlate guidance"
-        );
+        assert_eq!(chat[0].content, "runtime context\n\nproject context");
         assert_eq!(
             chat.iter().map(|message| message.role).collect::<Vec<_>>(),
-            vec!["system", "user", "assistant",]
+            vec!["system", "user", "assistant", "user"]
         );
         assert_eq!(chat[1].content, "hello");
         assert_eq!(chat[2].content, "working");
+        assert_eq!(chat[3].content, "Ferrum runtime guidance:\nlate guidance");
+    }
+
+    #[test]
+    fn codex_keeps_late_system_guidance_out_of_immutable_instructions() {
+        let messages = vec![
+            Message::text(Role::System, "immutable"),
+            Message::text(Role::User, "hello"),
+            Message::text(Role::System, "temporary"),
+        ];
+
+        assert_eq!(
+            codex_instructions(&messages),
+            "You are a helpful coding assistant.\n\nimmutable"
+        );
+        let inputs = serde_json::to_value(codex_inputs(&messages)).unwrap();
+        assert_eq!(inputs[0]["role"], "user");
+        assert_eq!(inputs[0]["content"], "hello");
+        assert_eq!(inputs[1]["role"], "user");
+        assert_eq!(inputs[1]["content"], "Ferrum runtime guidance:\ntemporary");
+    }
+
+    #[test]
+    fn tool_serialization_is_canonical_across_discovery_order() {
+        fn schema(reverse: bool) -> serde_json::Value {
+            let mut nested = serde_json::Map::new();
+            let entries = if reverse {
+                [
+                    ("zeta", json!({"type":"string"})),
+                    ("alpha", json!({"type":"number"})),
+                ]
+            } else {
+                [
+                    ("alpha", json!({"type":"number"})),
+                    ("zeta", json!({"type":"string"})),
+                ]
+            };
+            for (key, value) in entries {
+                nested.insert(key.to_string(), value);
+            }
+            let mut root = serde_json::Map::new();
+            if reverse {
+                root.insert("properties".to_string(), serde_json::Value::Object(nested));
+                root.insert("type".to_string(), json!("object"));
+            } else {
+                root.insert("type".to_string(), json!("object"));
+                root.insert("properties".to_string(), serde_json::Value::Object(nested));
+            }
+            serde_json::Value::Object(root)
+        }
+        let first = vec![
+            ToolDefinition {
+                name: "z-tool".to_string(),
+                description: "z".to_string(),
+                input_schema: schema(true),
+            },
+            ToolDefinition {
+                name: "a-tool".to_string(),
+                description: "a".to_string(),
+                input_schema: schema(false),
+            },
+        ];
+        let second = vec![
+            ToolDefinition {
+                name: "a-tool".to_string(),
+                description: "a".to_string(),
+                input_schema: schema(true),
+            },
+            ToolDefinition {
+                name: "z-tool".to_string(),
+                description: "z".to_string(),
+                input_schema: schema(false),
+            },
+        ];
+
+        assert_eq!(
+            serde_json::to_vec(&openai_tools(&first)).unwrap(),
+            serde_json::to_vec(&openai_tools(&second)).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_vec(&codex_tools(&first)).unwrap(),
+            serde_json::to_vec(&codex_tools(&second)).unwrap()
+        );
+    }
+
+    #[test]
+    fn cache_diagnostics_report_first_divergence_without_content() {
+        let key = [7u8; 32];
+        let tools = openai_tools(&[ToolDefinition {
+            name: "read".to_string(),
+            description: "safe metadata".to_string(),
+            input_schema: json!({"type":"object"}),
+        }]);
+        let secret = "do-not-log-this-prompt";
+        let initial = normalized_chat_messages(
+            &[
+                Message::text(Role::System, "immutable"),
+                Message::text(Role::User, secret),
+            ],
+            ChatReasoningHistoryField::ReasoningContent,
+        );
+        let appended = normalized_chat_messages(
+            &[
+                Message::text(Role::System, "immutable"),
+                Message::text(Role::User, secret),
+                Message::text(Role::Assistant, "answer"),
+            ],
+            ChatReasoningHistoryField::ReasoningContent,
+        );
+        let first = cache_diagnostic_manifest(&key, &initial, &tools).unwrap();
+        let second = cache_diagnostic_manifest(&key, &appended, &tools).unwrap();
+        let context = CacheDiagnosticContext {
+            scope: [1u8; 32],
+            request: 2,
+            expected_reset: None,
+        };
+        let output = format_cache_diagnostics(context, Some(&first), &second).join("\n");
+
+        assert!(output.contains("comparison=append-only"), "{output}");
+        assert!(
+            output.contains("first_changed=message[2]:assistant"),
+            "{output}"
+        );
+        assert!(!output.contains(secret));
+        assert!(output.contains("digest="));
+        assert!(output.contains("bytes="));
+
+        let changed_tools = openai_tools(&[ToolDefinition {
+            name: "read".to_string(),
+            description: "changed metadata".to_string(),
+            input_schema: json!({"type":"object"}),
+        }]);
+        let changed = cache_diagnostic_manifest(&key, &initial, &changed_tools).unwrap();
+        let output = format_cache_diagnostics(context, Some(&first), &changed).join("\n");
+        assert!(output.contains("first_changed=tools"), "{output}");
+    }
+
+    #[test]
+    fn tool_rounds_and_temporary_guidance_preserve_normalized_prefix_segments() {
+        let key = [8u8; 32];
+        let definitions = [ToolDefinition {
+            name: "read".to_string(),
+            description: "read".to_string(),
+            input_schema: json!({"type":"object"}),
+        }];
+        let tools = openai_tools(&definitions);
+        let initial_messages = [
+            Message::text(Role::System, "immutable"),
+            Message::text(Role::User, "inspect"),
+        ];
+        let initial = cache_diagnostic_manifest(
+            &key,
+            &normalized_chat_messages(
+                &initial_messages,
+                ChatReasoningHistoryField::ReasoningContent,
+            ),
+            &tools,
+        )
+        .unwrap();
+        let tool_round_messages = [
+            Message::text(Role::System, "immutable"),
+            Message::text(Role::User, "inspect"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "read".to_string(),
+                    input: json!({"path":"Cargo.toml"}),
+                }],
+                usage: None,
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".to_string(),
+                    content: "result".to_string(),
+                    is_error: false,
+                }],
+                usage: None,
+            },
+        ];
+        let tool_round = cache_diagnostic_manifest(
+            &key,
+            &normalized_chat_messages(
+                &tool_round_messages,
+                ChatReasoningHistoryField::ReasoningContent,
+            ),
+            &tools,
+        )
+        .unwrap();
+        let output = format_cache_diagnostics(
+            CacheDiagnosticContext {
+                scope: [3u8; 32],
+                request: 2,
+                expected_reset: None,
+            },
+            Some(&initial),
+            &tool_round,
+        )
+        .join("\n");
+        assert!(output.contains("comparison=append-only"), "{output}");
+
+        let mut guidance_messages = tool_round_messages.to_vec();
+        guidance_messages.push(Message::text(Role::System, "temporary"));
+        let guidance = cache_diagnostic_manifest(
+            &key,
+            &normalized_chat_messages(
+                &guidance_messages,
+                ChatReasoningHistoryField::ReasoningContent,
+            ),
+            &tools,
+        )
+        .unwrap();
+        assert_eq!(tool_round.segments[0], guidance.segments[0]);
+        assert_eq!(tool_round.segments[1], guidance.segments[1]);
+        assert_eq!(guidance.segments.last().unwrap().label, "message[4]:user");
+    }
+
+    #[test]
+    fn cache_diagnostics_classify_compaction_as_expected_reset() {
+        let key = [9u8; 32];
+        let before = cache_diagnostic_manifest(
+            &key,
+            &normalized_chat_messages(
+                &[Message::text(Role::System, "before")],
+                ChatReasoningHistoryField::ReasoningContent,
+            ),
+            &[],
+        )
+        .unwrap();
+        let after = cache_diagnostic_manifest(
+            &key,
+            &normalized_chat_messages(
+                &[Message::text(Role::System, "after")],
+                ChatReasoningHistoryField::ReasoningContent,
+            ),
+            &[],
+        )
+        .unwrap();
+        let output = format_cache_diagnostics(
+            CacheDiagnosticContext {
+                scope: [2u8; 32],
+                request: 3,
+                expected_reset: Some(super::super::CacheResetReason::Compaction),
+            },
+            Some(&before),
+            &after,
+        )
+        .join("\n");
+
+        assert!(output.contains("comparison=expected-reset"), "{output}");
+        assert!(output.contains("expected_reason=compaction"), "{output}");
+        assert!(output.contains("first_changed=leading-system"), "{output}");
+        assert!(!output.contains("before"));
+        assert!(!output.contains("after"));
+    }
+
+    #[test]
+    fn final_requests_keep_tools_but_disable_tool_calls() {
+        let tools = vec![ToolDefinition {
+            name: "read".to_string(),
+            description: "read".to_string(),
+            input_schema: json!({"type":"object"}),
+        }];
+        assert_eq!(
+            chat_tool_choice(&tools, super::super::ToolChoice::None),
+            Some("none")
+        );
+        assert_eq!(openai_tools(&tools).len(), 1);
     }
 
     #[test]
@@ -4049,6 +4576,7 @@ data: {"type":"response.completed","response":{"output":[]}}
         assert_eq!(usage.output_tokens, Some(3));
         assert_eq!(usage.total_tokens, Some(13));
         assert_eq!(usage.cache_read_tokens, 4);
+        assert!(usage.cache_read_tokens_reported);
     }
 
     #[test]

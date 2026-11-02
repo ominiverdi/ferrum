@@ -113,8 +113,8 @@ Supported values are \f[B]low\f[R], \f[B]medium\f[R], and
 Set the session title.
 .TP
 \f[B]\[en]perf\f[R]
-Enable compact model-performance summaries on stderr after each completed
-turn, and save that preference in the opened session.
+Enable compact model-performance summaries on stderr after each
+completed turn, and save that preference in the opened session.
 Omitting the flag preserves a saved setting.
 This keeps print-mode stdout pipe-safe.
 .TP
@@ -215,10 +215,10 @@ model.
 Prefix slash-leading text with a space to send it as a model prompt;
 Ferrum removes the escape whitespace.
 .PP
-Pickers open an in-place menu: Up/Down move the highlight, Enter
-selects it, typing a number on its own selects that displayed item,
-typing any other text filters labels and descriptions, and Esc returns
-to the prompt without changing anything.
+Pickers open an in-place menu: Up/Down move the highlight, Enter selects
+it, typing a number on its own selects that displayed item, typing any
+other text filters labels and descriptions, and Esc returns to the
+prompt without changing anything.
 .PP
 Common slash commands:
 .TP
@@ -229,26 +229,26 @@ Show interactive help.
 Show Ferrum version.
 .TP
 \f[B]/session\f[R]
-Show current session information.
-.TP
-\f[B]/new\f[R]
-Start a new session.
-This is the short alias for \f[B]/sessions new\f[R].
-.TP
-\f[B]/sessions\f[R]
 Open the numbered, searchable interactive-session picker.
-Up/Down move the highlight and Enter opens it; press Esc to return to the
-prompt without switching.
+Up/Down move the highlight and Enter opens it; press Esc to return to
+the prompt without switching.
 .TP
-\f[B]/sessions all\f[R]
+\f[B]/session all\f[R]
 Include print, ACP, and legacy sessions.
 Selecting one marks it interactive.
 .TP
-\f[B]/sessions del\f[R]
+\f[B]/session new\f[R]
+Start a new session.
+.TP
+\f[B]/session delete\f[R]
 Open an interactive session deletion picker.
 .TP
-\f[B]/sessions new\f[R]
+\f[B]/session info\f[R]
+Show detailed current-session information.
+.TP
+\f[B]/new\f[R]
 Start a new session.
+This is the short alias for \f[B]/session new\f[R].
 .TP
 \f[B]/title\f[R] TEXT
 Set session title.
@@ -302,25 +302,27 @@ Show token usage summary.
 Show model performance for the last completed turn, or toggle automatic
 summaries and save the setting in the current session and user-config
 default for fresh sessions.
-Resume and session switching prefer the session's saved setting;
+Resume and session switching prefer the session\[cq]s saved setting;
 \f[V]/new\f[R] inherits the current setting.
 Timing samples remain process-local.
-Compact TTFT and t/s triplets are low/average/high across measured completed
-requests; a single measured request shows one value.
-TTFT includes the first non-empty reasoning, text, or tool-call activity;
-its average is arithmetic.
+Compact TTFT and t/s triplets are low/average/high across measured
+completed requests; a single measured request shows one value.
+TTFT includes the first non-empty reasoning, text, or tool-call
+activity; its average is arithmetic.
 Each rate covers first output to request completion; average t/s is
 generation-time weighted.
-\f[V]tot\f[R] sums output tokens across recorded requests, including thinking
-and tool calls; provider totals are not counted twice.
-Interrupted requests contribute to \f[V]tot\f[R] but not to completed-request
-timing statistics.
-Unavailable timings are \f[V]n/a\f[R]; estimated token counts and rates use
-\f[V]\[ti]\f[R].
-\f[V]ctx\f[R] shows current context tokens over the configured window after
-the turn, using the same boundary-aware accounting as \f[V]/session\f[R];
-local estimates are marked with \f[V]\[ti]\f[R] and detailed output names the
-accounting source.
+\f[V]tot\f[R] sums output tokens across recorded requests, including
+thinking and tool calls; provider totals are not counted twice.
+Interrupted requests contribute to \f[V]tot\f[R] but not to
+completed-request timing statistics.
+Provider-reported cached input is shown as a weighted
+\f[V]cached/input\f[R] percentage; missing cache data is not estimated.
+Unavailable timings are \f[V]n/a\f[R]; estimated token counts and rates
+use \f[V]\[ti]\f[R].
+\f[V]ctx\f[R] shows current context tokens over the configured window
+after the turn, using the same boundary-aware accounting as
+\f[V]/session info\f[R]; local estimates are marked with \f[V]\[ti]\f[R]
+and detailed output names the accounting source.
 Detailed output includes measured counts and per-request values.
 .TP
 \f[B]/skills\f[R]
@@ -474,9 +476,9 @@ binary and man page:
 .IP
 .nf
 \f[C]
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.7.12-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.7.12-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.7.13-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.7.13-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -487,9 +489,9 @@ Optional checksum verification:
 .IP
 .nf
 \f[C]
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz.sha256
 \f[R]
 .fi
 .SS From source

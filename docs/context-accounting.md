@@ -18,7 +18,7 @@ context_source: usage+estimate
 context_usage_percent: 92
 ```
 
-The compaction result is based on Ferrum's local estimate of the compacted in-memory message set. The later `/session` value can still use provider-reported usage from a retained assistant message that was produced before compaction. That usage reflected the old large context, so it is stale after compaction.
+The compaction result is based on Ferrum's local estimate of the compacted in-memory message set. The later `/session info` value can still use provider-reported usage from a retained assistant message that was produced before compaction. That usage reflected the old large context, so it is stale after compaction.
 
 ## Current Ferrum behavior
 
@@ -72,12 +72,12 @@ Provider usage must not cross a compaction boundary.
 More precisely:
 
 - Provider usage on an assistant response is valid for current-context accounting only if that assistant response is after the latest compaction boundary.
-- Provider usage before the latest compaction remains valid for historical `/usage` totals, but not for `/session` context pressure.
+- Provider usage before the latest compaction remains valid for historical `/usage` totals, but not for `/session info` context pressure.
 - Local estimates remain acceptable for current context pressure when no post-compaction provider usage exists.
 
 ## Proposed behavior
 
-Implemented in Ferrum after this note was written: `/session` no longer reports stale pre-compaction usage. After compaction, current-context accounting falls back to a local estimate until a fresh post-compaction assistant response exists.
+Implemented in Ferrum after this note was written: `/session info` no longer reports stale pre-compaction usage. After compaction, current-context accounting falls back to a local estimate until a fresh post-compaction assistant response exists.
 
 Expected shape immediately after compaction:
 
@@ -128,7 +128,7 @@ Extend context source labels:
 
 Add regression tests for:
 
-1. A session with high assistant usage compacts and then `/session` no longer reports the stale high value.
+1. A session with high assistant usage compacts and then `/session info` no longer reports the stale high value.
 2. Context source becomes `estimate_after_compaction` after compaction if no post-compaction assistant usage exists.
 3. A new assistant message with fresh usage after compaction restores `usage+estimate`.
 4. Historical usage totals remain independent from current context accounting.
@@ -153,4 +153,4 @@ Older sessions without these fields should continue to load. For old sessions, F
 
 ## Recommendation
 
-Implement boundary-aware current-context accounting first. Keep provider usage for historical accounting, but use it for `/session` and compaction pressure only when it is post-compaction. Display `estimate_after_compaction` between compaction and the next assistant response.
+Implement boundary-aware current-context accounting first. Keep provider usage for historical accounting, but use it for `/session info` and compaction pressure only when it is post-compaction. Display `estimate_after_compaction` between compaction and the next assistant response.

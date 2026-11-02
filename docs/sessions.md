@@ -90,30 +90,30 @@ ferrum --title "Quick check" -p "summarize this repo"
 
 ```text
 /session
+/session all
+/session new
+/session delete
+/session info
 /title [text]
 /goal [text|clear]
 /new
-/sessions
-/sessions all
-/sessions del
-/sessions new
 /perf [on|off]
 /compact
 ```
 
-`/session` shows the current session status.
+`/session info` shows the current session status.
 
 When an interactive session is resumed with `--resume`, `--continue`, or `--session REF`, Ferrum prints the last 40 visible conversation lines before prompting. This is UI-only: it does not add anything to model context and does not create a new model turn.
 
-`/sessions` opens a numbered picker containing only interactive sessions in the current directory. `/sessions all` also shows print, ACP, and legacy sessions, with their modes in the picker. Selecting a non-interactive or legacy session marks it interactive immediately; no model prompt is required. Up/Down move the highlight and Enter opens it, typing a number on its own opens that session directly, any other text filters session titles and details, and Esc returns to the prompt without switching. `/sessions del` opens the interactive-session deletion picker. `/new` and `/sessions new` both start a fresh interactive session.
+`/session` opens a numbered picker containing only interactive sessions in the current directory. `/session all` also shows print, ACP, and legacy sessions, with their modes in the picker. Selecting a non-interactive or legacy session marks it interactive immediately; no model prompt is required. Up/Down move the highlight and Enter opens it, typing a number on its own opens that session directly, any other text filters session titles and details, and Esc returns to the prompt without switching. `/session delete` opens the interactive-session deletion picker. `/new` and `/session new` both start a fresh interactive session.
 
-Header-only and metadata-only sessions are retained so a failed start or state transition never unlinks an active file handle. `/sessions` hides non-interactive and old empty sessions by default, while still showing the current empty session so you can see where you are. Automatic latest-session selection skips abandoned anonymous header-only sessions. Sessions with a saved `/perf` preference remain selectable and resumable even before the first prompt.
+Header-only and metadata-only sessions are retained so a failed start or state transition never unlinks an active file handle. `/session` hides non-interactive and old empty sessions by default, while still showing the current empty session so you can see where you are. Automatic latest-session selection skips abandoned anonymous header-only sessions. Sessions with a saved `/perf` preference remain selectable and resumable even before the first prompt.
 
-`/title` shows the current session title. `/title <text>` sets an explicit title used by `/sessions`. `--title <text>` sets the title when starting, resuming, or running a print-mode session. If no title is set, Ferrum falls back to a title inferred from the first user message.
+`/title` shows the current session title. `/title <text>` sets an explicit title used by `/session`. `--title <text>` sets the title when starting, resuming, or running a print-mode session. If no title is set, Ferrum falls back to a title inferred from the first user message.
 
 `/goal` shows a single session-scoped note. `/goal <text>` replaces the note, and `/goal clear` removes it. Goal notes are limited to 4096 bytes and remain available after compaction and session resume. They are operator metadata only: Ferrum does not inject them into model context, expose goal tools, or start additional turns.
 
-`/perf` shows model-request performance for the last completed turn in the current process. `/perf on|off` saves the compact-summary preference both in the current session's JSONL metadata and as `perf_enabled` in the user config, so fresh sessions after a restart remember your choice. Saving preserves config comments, unrelated settings, and file permissions. Resuming or switching sessions restores the destination session's saved preference; older sessions without this metadata use the user-config default (off if unset). `/new` and `/sessions new` inherit and save the current setting. `--perf` explicitly enables summaries and saves that setting only in the opened session; it does not change the user-config default. Omitting the flag does not override a saved preference. Timing samples are not persisted, and switching or resuming sessions clears the last-turn measurement. Print-mode summaries stay on stderr; ACP does not emit terminal performance summaries.
+`/perf` shows model-request performance for the last completed turn in the current process. `/perf on|off` saves the compact-summary preference both in the current session's JSONL metadata and as `perf_enabled` in the user config, so fresh sessions after a restart remember your choice. Saving preserves config comments, unrelated settings, and file permissions. Resuming or switching sessions restores the destination session's saved preference; older sessions without this metadata use the user-config default (off if unset). `/new` and `/session new` inherit and save the current setting. `--perf` explicitly enables summaries and saves that setting only in the opened session; it does not change the user-config default. Omitting the flag does not override a saved preference. Timing samples are not persisted, and switching or resuming sessions clears the last-turn measurement. Print-mode summaries stay on stderr; ACP does not emit terminal performance summaries.
 
 Compact summaries cover the whole turn:
 
@@ -121,7 +121,7 @@ Compact summaries cover the whole turn:
 perf: 2 requests | TTFT 1.00/1.09/1.18s | 50.0/60.4/67.3 t/s | tot 302 tok | ctx ~24k/256k 9% | turn 21.4s
 ```
 
-`ctx` shows the current context size over the configured window after the completed turn, using the same boundary-aware accounting as `/session`: provider usage plus a trailing estimate when available, otherwise a local estimate marked with `~`. The percentage is context usage against `max_context_tokens`. Compact counts round to whole thousands (`k`) at 10,000 tokens and above; detailed `/perf` output keeps exact numbers and names the accounting source (`usage+estimate`, `estimate`, or `estimate_after_compaction`).
+`ctx` shows the current context size over the configured window after the completed turn, using the same boundary-aware accounting as `/session info`: provider usage plus a trailing estimate when available, otherwise a local estimate marked with `~`. The percentage is context usage against `max_context_tokens`. Compact counts round to whole thousands (`k`) at 10,000 tokens and above; detailed `/perf` output keeps exact numbers and names the accounting source (`usage+estimate`, `estimate`, or `estimate_after_compaction`). When a provider reports cached input tokens, `cache` shows the weighted `cached/input` percentage and exact token counts; Ferrum does not estimate missing cache data.
 
 Triplets are **low / average / high**; a single measured request shows one value. TTFT measures the first non-empty streamed model output, including provider-supplied thinking or tool-call activity. Its average is the arithmetic mean across measured completed requests. Each request's t/s uses its output tokens divided by the interval from first output to request completion; the aggregate average is generation-time weighted (sum of measured tokens divided by sum of generation times), not an arithmetic mean of rates. Buffered requests and zero-duration generation have no rate; unavailable values are `n/a`. Detailed `/perf` reports measured-request counts and per-request values. Interrupted requests appear in details and contribute to `tot`, but not to completed-request timing statistics.
 
@@ -147,7 +147,7 @@ Model-facing history tools, `history_search` and `history_read`, stream bounded 
 
 A successfully returned session append is a durability checkpoint: the complete JSON record and newline have been flushed and synced. Session creation also syncs the containing session directory after its header is durable. Normal exit and session switching issue an additional sync checkpoint before dropping the old session. Filesystem or hardware behavior can still affect guarantees below the operating system's `fsync` contract.
 
-`/session` shows:
+`/session info` shows:
 
 - path
 - message count

@@ -260,7 +260,7 @@ Default:
 max_context_tokens = 256000
 ```
 
-Ferrum warns as context usage rises: 75-84% every 5%, 85-91% every 3%, and 92-94% every 1%. It compacts automatically at 95%, before the configured budget is fully exhausted. `/session` shows estimated tokens, max context tokens, and context usage percent.
+Ferrum warns as context usage rises: 75-84% every 5%, 85-91% every 3%, and 92-94% every 1%. It compacts automatically at 95%, before the configured budget is fully exhausted. `/session info` shows estimated tokens, max context tokens, and context usage percent.
 
 ### max_tool_rounds
 
@@ -589,7 +589,7 @@ FERRUM_METRICS
 
 `FERRUM_FAKE_SCRIPT` is only used with the fake provider for deterministic local harness tests. Current scripts: `repeat_read`, `missing_read`, `mixed_write_read`, `edit_preview`, and `history_search_read`.
 
-`FERRUM_METRICS=1` prints developer-oriented per-request model/tool metrics to stderr, including message bytes, tool schema bytes, estimated payload tokens, model latency, tool latency, and result bytes. Model-end lines report both `response_tool_calls` for that individual provider response and cumulative `turn_tool_calls`, so a final text-only response does not hide tool calls made by earlier requests in the same turn. For compact user-facing TTFT and throughput reporting, use `--perf` or interactive `/perf [on|off]` instead.
+`FERRUM_METRICS=1` prints developer-oriented per-request model/tool metrics to stderr, including message bytes, tool schema bytes, estimated payload tokens, model latency, tool latency, and result bytes. For OpenAI-compatible requests it also reports the normalized leading-system, tool, and message segment sizes and per-process keyed digests, plus the first segment that differs from the preceding request. Prompt, schema, image, and credential content is never printed; the keyed digests are comparable only within the current process. Compaction is labeled as an expected prefix reset. Model-end lines report both `response_tool_calls` for that individual provider response and cumulative `turn_tool_calls`, so a final text-only response does not hide tool calls made by earlier requests in the same turn. For compact user-facing TTFT, throughput, and provider-reported cache-hit reporting, use `--perf` or interactive `/perf [on|off]` instead.
 
 OpenAI-compatible providers read API keys from the environment variable named by `api_key_env`.
 

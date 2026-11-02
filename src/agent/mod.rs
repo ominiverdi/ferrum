@@ -37,6 +37,7 @@ use rustyline::{
     validate::Validator,
 };
 use session::jsonl::SessionMode;
+use sha2::{Digest, Sha256};
 use similar::{ChangeTag, TextDiff};
 use std::{
     collections::{HashMap, HashSet},
@@ -224,10 +225,6 @@ impl Completer for FerrumLineHelper {
             let start = pos - prefix.len();
             return Ok((start, complete_from_words(prefix, session_words())));
         }
-        if let Some(prefix) = command_before.strip_prefix("/sessions ") {
-            let start = pos - prefix.len();
-            return Ok((start, complete_from_words(prefix, sessions_words())));
-        }
         if let Some(prefix) = command_before.strip_prefix("/model ") {
             let start = pos - prefix.len();
             return Ok((start, complete_from_owned_words(prefix, &self.model_names)));
@@ -294,9 +291,8 @@ impl FerrumLineHelper {
         let mut command_hints = HashMap::new();
         command_hints.insert("/image", " <path>");
         command_hints.insert("/paste-image", "");
-        command_hints.insert("/session", "");
+        command_hints.insert("/session", " [all|new|delete|info]");
         command_hints.insert("/goal", " <text>|clear");
-        command_hints.insert("/sessions", " all | del | new");
         command_hints.insert("/colors", " auto|on|off");
         command_hints.insert("/palette", " <name>  (/palettes to list)");
         command_hints.insert("/palettes", "");
@@ -350,7 +346,6 @@ fn slash_command_words() -> &'static [&'static str] {
         "/version",
         "/session",
         "/new",
-        "/sessions",
         "/title",
         "/goal",
         "/skills",
@@ -450,11 +445,7 @@ fn palette_command_words(config: &Config) -> Vec<String> {
 }
 
 fn session_words() -> &'static [&'static str] {
-    &[]
-}
-
-fn sessions_words() -> &'static [&'static str] {
-    &["all", "del", "new"]
+    &["all", "new", "delete", "info"]
 }
 
 fn login_provider_words() -> &'static [&'static str] {
@@ -1028,7 +1019,7 @@ pub async fn run_interactive(
     let suspended_shortcut = Arc::new(Mutex::new(None));
     for (key, action) in [
         ('i', PromptShortcutAction::AttachClipboardImage),
-        ('s', PromptShortcutAction::RunCommand("/sessions")),
+        ('s', PromptShortcutAction::RunCommand("/session")),
         ('p', PromptShortcutAction::RunCommand("/provider")),
         ('m', PromptShortcutAction::RunCommand("/model")),
         ('c', PromptShortcutAction::RunCommand("/compact")),
@@ -1557,7 +1548,7 @@ fn runtime_context(config: &Config, cwd: &Path) -> Result<String> {
 }
 
 fn default_system_prompt_template() -> &'static str {
-    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /new\n- /title [text]\n- /goal [text|clear]\n- /sessions\n- /sessions all\n- /sessions del\n- /sessions new\n- /model [name]\n- /usage [day|week|month]\n- /perf [on|off]\n- /provider [name]\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
+    "You are running inside Ferrum, a Rust-native Linux coding agent.\n\nRuntime metadata:\n- ferrum_version: {{ferrum_version}}\n- provider: {{provider}}\n- model: {{model}}\n- provider_model: {{provider_model}}\n- thinking: {{thinking}}\n- cwd: {{cwd}}\n- config_dir: {{config_dir}}\n- max_context_tokens: {{max_context_tokens}}\n- mcp_enabled: {{mcp_enabled}}\n- diff_mode: {{diff_mode}}\n- safety: {{safety}}\n- readable_roots: {{readable_roots}}\n- writable_roots: {{writable_roots}}\n- project_config: {{project_config}}\n\nAgent behavior:\n- Be proactive. If the user asks you to investigate local state, use tools before asking for information that Ferrum can inspect.\n- Do not claim you searched something unless a tool result supports it.\n- Prefer targeted evidence over broad noisy scans. Start narrow, then widen deliberately.\n- For Linux desktop/service issues, check likely systemd user units, service files, logs, running processes, executable paths, environment/session type, and relevant config.\n- When using tools, read important files directly and cite exact paths, commands, and error messages.\n- After several tool calls, synthesize what is known, what is still unknown, and the next concrete action. Do not loop indefinitely.\n\nTool usage guidance:\n- Use read for known files.\n- Batch independent tool calls in the same turn when possible, especially file inspection commands such as ls, read, grep, and find.\n- Prefer native ls/find/grep for filesystem exploration when they fit. They are safer and avoid noisy dependency/build directories.\n- Avoid broad bash find/grep over \".\" unless needed. If using shell find/grep, prune .git, target, node_modules, and other dependency/build directories.\n- Use bash for shell commands, systemctl, journalctl, process inspection, package checks, and focused pipelines.\n- Keep bash commands focused and safe. Avoid destructive commands unless the user explicitly asked for them.\n- Keep write, edit, and shell mutation paths under the configured writable roots; ask the user to change trusted config when another root is genuinely required.\n- For long-running or background scripts, use nohup with redirected logs and verify separately when the selected execution policy permits detached work; otherwise report the policy denial.\n\nInteractive commands available to the user:\n- /help\n- /version\n- /login\n- /session\n- /session all\n- /session new\n- /session delete\n- /session info\n- /new\n- /title [text]\n- /goal [text|clear]\n- /model [name]\n- /usage [day|week|month]\n- /perf [on|off]\n- /provider [name]\n- /mcp [on|off|status|list]\n- /colors [auto|on|off]\n- /palette [name]\n- /palettes\n- /thinking [off|minimal|low|medium|high|xhigh]\n- /safety [low|medium|high]\n- /diff [unified|compact|full|words|side_by_side]\n- /skills\n- /skill <name> [args]\n- /skill:<name> [args]\n- /image <path>\n- /paste-image\n- /compact\n- /quit\n- /exit\n\nShell shortcuts available to the user:\n- !<cmd>: run a shell command and send output to the model\n- !!<cmd>: run a shell command and show output only to the user\n\nThese slash commands and shell shortcuts are handled by Ferrum before user messages are sent to you. You cannot execute them by printing them; tell the user which command to run when needed."
 }
 
 fn render_system_prompt_template(template: &str, config: &Config, cwd: &Path) -> String {
@@ -1732,6 +1723,7 @@ async fn complete_model_request(
     config: &Config,
     messages: &[messages::Message],
     tools: &[tools::ToolDefinition],
+    request_options: providers::ProviderRequestOptions,
     options: &TurnOptions,
     sink: &mut dyn AgentEventSink,
     performance: &mut ModelPerformanceTimer,
@@ -1806,12 +1798,12 @@ async fn complete_model_request(
                 &config.provider_model,
                 messages,
                 tools,
-                config.thinking,
+                request_options,
                 &mut on_event,
                 Some(Arc::clone(&request_cancel)),
             )
         } else {
-            provider.complete(&config.provider_model, messages, tools, config.thinking)
+            provider.complete(&config.provider_model, messages, tools, request_options)
         };
         tokio::pin!(future);
         tokio::select! {
@@ -1855,6 +1847,7 @@ async fn complete_model_request(
                 output_tokens: Some(output),
                 total_tokens: Some(input.saturating_add(output)),
                 cache_read_tokens: 0,
+                cache_read_tokens_reported: false,
                 cache_write_tokens: 0,
                 source: "estimated".to_string(),
             }
@@ -1885,6 +1878,10 @@ async fn complete_model_request(
         .into());
     }
     Ok(response)
+}
+
+fn cache_diagnostic_scope(path: &Path) -> [u8; 32] {
+    Sha256::digest(path.as_os_str().as_encoded_bytes()).into()
 }
 
 fn metrics_enabled() -> bool {
@@ -1989,6 +1986,7 @@ fn estimated_usage_for_response(
         output_tokens: Some(output_tokens),
         total_tokens: Some(input_tokens.saturating_add(output_tokens)),
         cache_read_tokens: 0,
+        cache_read_tokens_reported: false,
         cache_write_tokens: 0,
         source: "estimated".to_string(),
     }
@@ -2739,6 +2737,7 @@ fn immutable_system_messages(
     Ok(immutable)
 }
 
+#[cfg(test)]
 fn message_is_runtime_context(message: &messages::Message) -> bool {
     matches!(message.role, messages::Role::System)
         && message.content.iter().any(|block| match block {
@@ -2845,6 +2844,8 @@ pub(crate) struct AgentSession {
     last_context_warning_bucket: Option<usize>,
     perf_enabled: bool,
     last_performance: Option<TurnPerformance>,
+    cache_diagnostic_scope: [u8; 32],
+    pending_cache_reset: Option<providers::CacheResetReason>,
 }
 
 impl AgentSession {
@@ -2902,6 +2903,7 @@ impl AgentSession {
         if config.perf_enabled {
             session.append_perf_enabled(true)?;
         }
+        let cache_diagnostic_scope = cache_diagnostic_scope(session.path());
         Ok(Self {
             session,
             messages,
@@ -2922,6 +2924,8 @@ impl AgentSession {
             last_context_warning_bucket: None,
             perf_enabled: config.perf_enabled,
             last_performance: None,
+            cache_diagnostic_scope,
+            pending_cache_reset: None,
         })
     }
 
@@ -3057,9 +3061,20 @@ impl AgentSession {
             .and_then(|info| info.perf_enabled)
             .unwrap_or(config.perf_enabled);
         let saved_tool_names = info.and_then(|info| info.tools);
-        let mut messages = session::jsonl::load_messages(&path)?;
+        let mut conversation = session::jsonl::load_messages(&path)?;
+        // Older Ferrum versions persisted generated runtime replacements as ordinary system
+        // records. Drop them during resume, while demoting legacy system-role compaction summaries
+        // to untrusted user conversation context.
+        for message in &mut conversation {
+            if matches!(message.role, messages::Role::System)
+                && message_is_compaction_summary(message)
+            {
+                message.role = messages::Role::User;
+            }
+        }
+        conversation.retain(|message| !matches!(message.role, messages::Role::System));
         if show_preview {
-            print_session_preview(&messages, 2);
+            print_session_preview(&conversation, 2);
         }
         let skills = skills::discover(
             &config.config_dir,
@@ -3069,8 +3084,10 @@ impl AgentSession {
             config.skills_allow.as_deref(),
             &config.skills_deny,
         )?;
-        messages.extend(immutable_system_messages(config, &cwd, &skills)?);
+        let mut messages = immutable_system_messages(config, &cwd, &skills)?;
+        messages.extend(conversation);
         let readable_roots = readable_roots_with_skills(config.readable_roots.clone(), &skills);
+        let cache_diagnostic_scope = cache_diagnostic_scope(session.path());
         Ok(Self {
             session,
             messages,
@@ -3091,6 +3108,8 @@ impl AgentSession {
             last_context_warning_bucket: None,
             perf_enabled,
             last_performance: None,
+            cache_diagnostic_scope,
+            pending_cache_reset: Some(providers::CacheResetReason::SessionResume),
         })
     }
 
@@ -3247,13 +3266,18 @@ impl AgentSession {
                 sink,
             )
             .await?;
+            model_request_index += 1;
+            let provider_request_options = self.provider_request_options(
+                model_request_index,
+                config.thinking,
+                providers::ToolChoice::Auto,
+            );
             let request_messages = request_guidance.as_ref().map(|guidance| {
                 let mut messages = self.messages.clone();
                 messages.push(guidance.clone());
                 messages
             });
             let provider_messages = request_messages.as_deref().unwrap_or(&self.messages);
-            model_request_index += 1;
             sink.emit(AgentEvent::ModelRequestStarted {
                 request: model_request_index,
                 kind: ModelRequestKind::Agent,
@@ -3269,6 +3293,7 @@ impl AgentSession {
                 config,
                 provider_messages,
                 &tools,
+                provider_request_options,
                 &options,
                 sink,
                 &mut performance_timer,
@@ -3481,7 +3506,7 @@ impl AgentSession {
         );
         self.ensure_provider_request_budget(
             config,
-            &[],
+            &tools,
             std::slice::from_ref(&final_instruction),
             "final synthesis",
             Some(Arc::clone(&turn_cancel)),
@@ -3493,12 +3518,17 @@ impl AgentSession {
         let mut final_overflow_recovery_attempted = overflow_recovery_attempted;
         let (final_response, final_performance_timer) = loop {
             model_request_index += 1;
+            let provider_request_options = self.provider_request_options(
+                model_request_index,
+                config.thinking,
+                providers::ToolChoice::None,
+            );
             sink.emit(AgentEvent::ModelRequestStarted {
                 request: model_request_index,
                 kind: ModelRequestKind::FinalSynthesis,
             })?;
             if metrics_enabled {
-                emit_model_metrics_start(model_request_index, &final_messages, &[]);
+                emit_model_metrics_start(model_request_index, &final_messages, &tools);
             }
             let mut performance_timer = ModelPerformanceTimer::start(
                 options.stream_responses && provider.supports_live_streaming(),
@@ -3507,7 +3537,8 @@ impl AgentSession {
                 provider.as_ref(),
                 config,
                 &final_messages,
-                &[],
+                &tools,
+                provider_request_options,
                 &options,
                 sink,
                 &mut performance_timer,
@@ -3576,7 +3607,7 @@ impl AgentSession {
                     })?;
                     self.ensure_provider_request_budget(
                         config,
-                        &[],
+                        &tools,
                         std::slice::from_ref(&final_instruction),
                         "final synthesis retry",
                         Some(Arc::clone(&turn_cancel)),
@@ -3595,7 +3626,7 @@ impl AgentSession {
         let token_usage = usage_for_response(
             provider_usage.or_else(|| final_response.usage.clone()),
             &final_messages,
-            &[],
+            &tools,
             &final_response,
         );
         if final_response.usage.is_none() {
@@ -3776,15 +3807,6 @@ impl AgentSession {
         if !enabled {
             self.mcp = None;
         }
-        let message = messages::Message::text(
-            messages::Role::System,
-            format!(
-                "Runtime MCP availability changed. MCP tools are now {} for future turns.",
-                if enabled { "enabled" } else { "disabled" }
-            ),
-        );
-        self.session.append_message(&message)?;
-        self.messages.push(message);
         println!("MCP: {}", if enabled { "on" } else { "off" });
         Ok(())
     }
@@ -4493,6 +4515,24 @@ impl AgentSession {
         self.session.sync_checkpoint()
     }
 
+    fn provider_request_options(
+        &mut self,
+        request: usize,
+        thinking: ThinkingLevel,
+        tool_choice: providers::ToolChoice,
+    ) -> providers::ProviderRequestOptions {
+        let expected_reset = self.pending_cache_reset.take();
+        providers::ProviderRequestOptions {
+            thinking,
+            tool_choice,
+            cache_diagnostics: metrics_enabled().then_some(providers::CacheDiagnosticContext {
+                scope: self.cache_diagnostic_scope,
+                request,
+                expected_reset,
+            }),
+        }
+    }
+
     fn promote_to_interactive(&mut self) -> Result<()> {
         let mode = session::jsonl::session_info(self.session.path())?.and_then(|info| info.mode);
         if mode != Some(SessionMode::Interactive) {
@@ -4502,18 +4542,22 @@ impl AgentSession {
     }
 
     fn replace_runtime_context_message(&mut self, message: messages::Message) {
-        if let Some(index) = self.messages.iter().position(message_is_runtime_context) {
-            self.messages[index] = message;
+        if self
+            .messages
+            .first()
+            .is_some_and(|message| matches!(message.role, messages::Role::System))
+        {
+            self.messages[0] = message;
         } else {
-            self.messages.push(message);
+            self.messages.insert(0, message);
         }
     }
 
     fn refresh_runtime_context(&mut self, config: &Config) -> Result<()> {
         let message =
             messages::Message::text(messages::Role::System, runtime_context(config, &self.cwd)?);
-        self.session.append_message(&message)?;
         self.replace_runtime_context_message(message);
+        self.pending_cache_reset = Some(providers::CacheResetReason::RuntimeContextChanged);
         Ok(())
     }
 
@@ -4529,6 +4573,7 @@ impl AgentSession {
         self.session
             .append_provider_model_transition(&candidate.provider_name, &candidate.model)?;
         self.replace_runtime_context_message(message);
+        self.pending_cache_reset = Some(providers::CacheResetReason::RuntimeContextChanged);
         *config = candidate;
         Ok(())
     }
@@ -4566,7 +4611,7 @@ impl AgentSession {
 
     fn open_session_by_index(&mut self, config: &mut Config, index: usize) -> Result<()> {
         if self.last_session_list.is_empty() {
-            anyhow::bail!("no session list is active. Run /sessions first")
+            anyhow::bail!("no session list is active. Run /session first")
         }
         let Some(session) = self.last_session_list.get(index.saturating_sub(1)) else {
             anyhow::bail!("no session [{index}] in the active session list")
@@ -4590,7 +4635,7 @@ impl AgentSession {
 
     fn delete_session_by_index(&mut self, index: usize) -> Result<()> {
         if self.last_session_list.is_empty() {
-            anyhow::bail!("no session list is active. Run /sessions or /sessions del first")
+            anyhow::bail!("no session list is active. Run /session or /session delete first")
         }
         let Some(session) = self.last_session_list.get(index.saturating_sub(1)) else {
             anyhow::bail!("no session [{index}] in the active session list")
@@ -4598,7 +4643,7 @@ impl AgentSession {
         let path = session.path.clone();
         if path == *self.session.path() {
             anyhow::bail!(
-                "cannot delete the active session; switch sessions or start /sessions new first"
+                "cannot delete the active session; switch sessions or start /session new first"
             )
         }
         fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
@@ -4742,11 +4787,11 @@ impl AgentSession {
 
         let mut compacted_messages =
             Vec::with_capacity(1 + retained_messages.len() + immutable_messages.len());
+        // Preserve one stable leading immutable system block. The generated summary remains
+        // untrusted user content immediately after it.
+        compacted_messages.extend(immutable_messages);
         compacted_messages.push(summary_message.clone());
         compacted_messages.extend(retained_messages.iter().cloned());
-        // Immutable runtime and repository policy is deliberately placed after the
-        // generated summary so summarized user/tool text cannot gain system authority.
-        compacted_messages.extend(immutable_messages);
         let after_tokens = estimated_tokens_for_messages(&compacted_messages);
 
         if !force && after_tokens >= before_tokens {
@@ -4762,6 +4807,7 @@ impl AgentSession {
             self.session.append_message(message)?;
         }
         self.messages = compacted_messages;
+        self.pending_cache_reset = Some(providers::CacheResetReason::Compaction);
         Ok(CompactionOutcome::Compacted {
             before_tokens,
             after_tokens,
@@ -4803,7 +4849,10 @@ impl AgentSession {
                 &config.provider_model,
                 &request_messages,
                 &[],
-                config.thinking,
+                providers::ProviderRequestOptions {
+                    thinking: config.thinking,
+                    ..providers::ProviderRequestOptions::default()
+                },
                 &mut on_event,
                 cancel,
             )
@@ -5826,35 +5875,40 @@ mod context_pressure_tests {
     }
 
     #[test]
-    fn completes_sessions_subcommands_only_in_command_position() {
+    fn completes_session_subcommands_only_in_command_position() {
         let temp = tempfile::tempdir().unwrap();
         let helper = FerrumLineHelper::new(&[], &test_config(temp.path().to_path_buf()));
         let history = DefaultHistory::default();
         let ctx = rustyline::Context::new(&history);
 
-        let command = "/sessions d";
+        let command = "/session d";
         let (start, candidates) = helper.complete(command, command.len(), &ctx).unwrap();
 
         assert_eq!(start, command.len() - 1);
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].replacement, "del");
-        assert_completion(&helper, &ctx, "/sessions a", "all");
+        assert_eq!(candidates[0].replacement, "delete");
+        assert_completion(&helper, &ctx, "/session a", "all");
+        assert_completion(&helper, &ctx, "/session i", "info");
+        assert_completion(&helper, &ctx, "/session n", "new");
 
-        let escaped = " /sessions d";
+        let escaped = " /session d";
         let (start, candidates) = helper.complete(escaped, escaped.len(), &ctx).unwrap();
         assert_eq!(start, escaped.len());
         assert!(candidates.is_empty());
-        assert_eq!(helper.hint(" /sessions", " /sessions".len(), &ctx), None);
+        assert_eq!(helper.hint(" /session", " /session".len(), &ctx), None);
     }
 
     #[test]
-    fn provider_and_model_commands_use_only_singular_names() {
+    fn session_provider_and_model_commands_use_only_singular_names() {
         let commands = slash_command_words();
+        assert!(commands.contains(&"/session"));
         assert!(commands.contains(&"/model"));
         assert!(commands.contains(&"/provider"));
+        assert!(!commands.contains(&"/sessions"));
         assert!(!commands.contains(&"/models"));
         assert!(!commands.contains(&"/providers"));
         let prompt = default_system_prompt_template();
+        assert!(!prompt.lines().any(|line| line.starts_with("- /sessions")));
         assert!(!prompt.lines().any(|line| line == "- /models"));
         assert!(!prompt.lines().any(|line| line == "- /providers"));
 
@@ -6060,10 +6114,10 @@ mod context_pressure_tests {
         let ctx = rustyline::Context::new(&history);
 
         assert_eq!(
-            helper.hint("/sessions", "/sessions".len(), &ctx),
-            Some(" all | del | new".to_string())
+            helper.hint("/session", "/session".len(), &ctx),
+            Some(" [all|new|delete|info]".to_string())
         );
-        assert_eq!(helper.hint("/sessions ", "/sessions ".len(), &ctx), None);
+        assert_eq!(helper.hint("/session ", "/session ".len(), &ctx), None);
         assert_eq!(
             helper.hint("/palette", "/palette".len(), &ctx),
             Some(" <name>  (/palettes to list)".to_string())
@@ -6307,11 +6361,13 @@ mod context_pressure_tests {
             "/version",
             "/login",
             "/session",
+            "/session all",
+            "/session new",
+            "/session delete",
+            "/session info",
             "/new",
             "/title [text]",
             "/goal [text|clear]",
-            "/sessions all",
-            "/sessions del",
             "/skill <name> [args]",
             "/skill:<name> [args]",
             "/usage [day|week|month]",
@@ -6325,7 +6381,7 @@ mod context_pressure_tests {
         ] {
             assert!(prompt.contains(command), "missing {command}");
         }
-        assert!(!prompt.contains("/sessions <number|id-prefix|path>"));
+        assert!(!prompt.contains("/sessions"));
         assert!(!prompt.contains("max_tool_rounds"));
         assert!(!prompt.to_ascii_lowercase().contains("loop guard"));
     }
@@ -6404,6 +6460,7 @@ mod context_pressure_tests {
             output_tokens: Some(200),
             total_tokens: Some(300),
             cache_read_tokens: 0,
+            cache_read_tokens_reported: false,
             cache_write_tokens: 0,
             source: "provider".to_string(),
         };
@@ -7179,7 +7236,7 @@ mod context_pressure_tests {
     }
 
     #[tokio::test]
-    async fn compaction_keeps_one_untrusted_summary_before_immutable_policy() {
+    async fn compaction_keeps_one_untrusted_summary_after_immutable_policy() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         config.max_context_tokens = 20_000;
@@ -7239,7 +7296,7 @@ mod context_pressure_tests {
             .iter()
             .position(message_is_runtime_context)
             .unwrap();
-        assert!(summary_index < runtime_index);
+        assert!(runtime_index < summary_index);
         assert!(!state.messages.iter().any(|message| {
             message
                 .text_content()
@@ -7530,18 +7587,100 @@ mod context_pressure_tests {
     }
 
     #[test]
-    fn refresh_runtime_context_updates_model_metadata() {
+    fn resumed_session_has_one_current_runtime_context_first() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = test_config(temp.path().to_path_buf());
+        let mut session = session::JsonlSession::create(
+            config.sessions_dir(),
+            Some("fake".to_string()),
+            Some("old-model".to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        session
+            .append_message(&messages::Message::text(
+                messages::Role::System,
+                "old generated runtime context",
+            ))
+            .unwrap();
+        session
+            .append_message(&messages::Message::text(
+                messages::Role::System,
+                "Runtime MCP availability changed. MCP tools are now disabled for future turns.",
+            ))
+            .unwrap();
+        session
+            .append_message(&messages::Message::text(
+                messages::Role::System,
+                "Conversation summary from previous compaction:\nlegacy summary",
+            ))
+            .unwrap();
+        session
+            .append_message(&messages::Message::text(messages::Role::User, "hello"))
+            .unwrap();
+        let path = session.path().clone();
+        drop(session);
+
+        let state =
+            AgentSession::open_session_at_cwd(&config, path, temp.path().to_path_buf()).unwrap();
+
+        assert!(matches!(state.messages[0].role, messages::Role::System));
+        assert!(
+            state.messages[0]
+                .text_content()
+                .contains("provider_model: actual-model")
+        );
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .filter(|message| message_is_runtime_context(message))
+                .count(),
+            1
+        );
+        assert!(
+            !state
+                .messages
+                .iter()
+                .any(|message| message.text_content().contains("old generated"))
+        );
+        assert!(!state.messages.iter().any(|message| {
+            message
+                .text_content()
+                .contains("Runtime MCP availability changed")
+        }));
+        assert!(state.messages.iter().any(|message| {
+            matches!(message.role, messages::Role::User)
+                && message.text_content().contains("legacy summary")
+        }));
+        assert_eq!(state.messages.last().unwrap().text_content(), "hello");
+    }
+
+    #[test]
+    fn refresh_runtime_context_updates_model_metadata_without_persisting_messages() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = test_config(temp.path().to_path_buf());
         let mut state = AgentSession::new(&config).unwrap();
         config.model = "new-model".to_string();
         config.provider_model = "new-provider-model".to_string();
 
+        let persisted_before = session::jsonl::load_messages(state.session.path())
+            .unwrap()
+            .len();
         state.refresh_runtime_context(&config).unwrap();
 
         let text = state.messages[0].text_content();
         assert!(text.contains("model: new-model"));
         assert!(text.contains("provider_model: new-provider-model"));
+        assert_eq!(
+            session::jsonl::load_messages(state.session.path())
+                .unwrap()
+                .len(),
+            persisted_before
+        );
     }
 
     #[test]
@@ -8088,6 +8227,7 @@ mod context_pressure_tests {
                 output_tokens: Some(1),
                 total_tokens: Some(total_tokens),
                 cache_read_tokens: 0,
+                cache_read_tokens_reported: false,
                 cache_write_tokens: 0,
                 source: "test".to_string(),
             }),
@@ -10040,14 +10180,14 @@ fn handle_command(
             println!("commands:");
             println!("  /quit | /exit          exit");
             println!("  /version              show Ferrum version");
-            println!("  /session              show session path/status/size");
+            println!("  /session              choose an interactive session");
+            println!("  /session all          choose from all session modes");
+            println!("  /session new          start a new session");
+            println!("  /session delete       delete session via picker");
+            println!("  /session info         show session path/status/size");
             println!("  /title [text]         show or set session title");
             println!("  /goal [text|clear]    show, set, or clear the session goal note");
             println!("  /new                  start a new session");
-            println!("  /sessions             choose an interactive session");
-            println!("  /sessions all         choose from all session modes");
-            println!("  /sessions del         delete session via picker");
-            println!("  /sessions new         start a new session");
             println!("  /skills               list available skills");
             println!("  /skill <name> [args]  load a skill into context");
             println!("  /skill:<name> [args]  load a skill into context");
@@ -10068,7 +10208,7 @@ fn handle_command(
                 "  /diff [mode]          choose or set edit diff: unified|compact|full|words|side_by_side"
             );
             println!("  Alt+I                 attach clipboard image to current draft");
-            println!("  Alt+S                 open /sessions picker");
+            println!("  Alt+S                 open /session picker");
             println!("  Alt+P                 open /provider picker");
             println!("  Alt+M                 open /model picker");
             println!("  Alt+C                 compact current conversation context");
@@ -10088,11 +10228,16 @@ fn handle_command(
             Ok(CommandAction::Continue)
         }
         "/session" => {
-            match parts.next() {
-                Some(other) => {
-                    anyhow::bail!("unknown /session subcommand: {other}");
-                }
-                None => {
+            let subcommand = parts.next();
+            if let Some(extra) = parts.next() {
+                anyhow::bail!("usage: /session [all|new|delete|info], got extra argument: {extra}");
+            }
+            match subcommand {
+                None => state.pick_session(config, false)?,
+                Some("all") => state.pick_session(config, true)?,
+                Some("new") => state.new_session(config)?,
+                Some("delete") => state.delete_session_picker(config)?,
+                Some("info") => {
                     println!(
                         "path: {}",
                         terminal_text::sanitize(&state.session.path().display().to_string())
@@ -10148,6 +10293,9 @@ fn handle_command(
                         terminal_text::sanitize(&config.provider_name)
                     );
                 }
+                Some(other) => anyhow::bail!(
+                    "unknown /session subcommand: {other}. Use /session, /session all, /session new, /session delete, or /session info"
+                ),
             }
             Ok(CommandAction::Continue)
         }
@@ -10189,20 +10337,6 @@ fn handle_command(
                 anyhow::bail!("usage: /new, got extra argument: {extra}");
             }
             state.new_session(config)?;
-            Ok(CommandAction::Continue)
-        }
-        "/sessions" => {
-            match parts.next() {
-                None | Some("pick") => state.pick_session(config, false)?,
-                Some("all") => state.pick_session(config, true)?,
-                Some("del") => state.delete_session_picker(config)?,
-                Some("new") => state.new_session(config)?,
-                Some(reference) => {
-                    anyhow::bail!(
-                        "unknown /sessions subcommand: {reference}. Use /sessions, /sessions all, /sessions del, or /sessions new"
-                    )
-                }
-            }
             Ok(CommandAction::Continue)
         }
         "/skills" => {

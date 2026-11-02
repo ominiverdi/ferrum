@@ -73,6 +73,63 @@ pub enum StreamEvent {
     OutputActivity,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    None,
+}
+
+impl ToolChoice {
+    pub(super) fn as_openai(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheResetReason {
+    Compaction,
+    RuntimeContextChanged,
+    SessionResume,
+}
+
+impl CacheResetReason {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            Self::Compaction => "compaction",
+            Self::RuntimeContextChanged => "runtime-context-changed",
+            Self::SessionResume => "session-resume",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheDiagnosticContext {
+    pub scope: [u8; 32],
+    pub request: usize,
+    pub expected_reset: Option<CacheResetReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderRequestOptions {
+    pub thinking: ThinkingLevel,
+    pub tool_choice: ToolChoice,
+    pub cache_diagnostics: Option<CacheDiagnosticContext>,
+}
+
+impl Default for ProviderRequestOptions {
+    fn default() -> Self {
+        Self {
+            thinking: ThinkingLevel::Off,
+            tool_choice: ToolChoice::Auto,
+            cache_diagnostics: None,
+        }
+    }
+}
+
 pub trait Provider: Send + Sync {
     fn supports_live_streaming(&self) -> bool {
         false
@@ -83,7 +140,7 @@ pub trait Provider: Send + Sync {
         model: &'a str,
         messages: &'a [Message],
         tools: &'a [ToolDefinition],
-        thinking: ThinkingLevel,
+        options: ProviderRequestOptions,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>>;
 
     fn complete_streaming<'a>(
@@ -91,11 +148,11 @@ pub trait Provider: Send + Sync {
         model: &'a str,
         messages: &'a [Message],
         tools: &'a [ToolDefinition],
-        thinking: ThinkingLevel,
+        options: ProviderRequestOptions,
         _on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
         _cancelled: Option<Arc<AtomicBool>>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
-        self.complete(model, messages, tools, thinking)
+        self.complete(model, messages, tools, options)
     }
 }
 

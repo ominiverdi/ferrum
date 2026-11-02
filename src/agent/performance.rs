@@ -11,7 +11,9 @@ pub(super) struct ModelPerformance {
     kind: ModelRequestKind,
     total: Duration,
     time_to_first_output: Option<Duration>,
+    input_tokens: Option<u64>,
     output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
     estimated_tokens: bool,
     interrupted: bool,
 }
@@ -26,6 +28,25 @@ impl ModelPerformance {
         let tokens = self.output_tokens?;
         let seconds = self.generation_duration()?.as_secs_f64();
         (seconds > 0.0).then(|| tokens as f64 / seconds)
+    }
+
+    fn cache_hit(&self) -> Option<(u64, u64, f64)> {
+        let input = self.input_tokens?;
+        let cached = self.cache_read_tokens?;
+        (input > 0).then(|| (cached, input, cached as f64 * 100.0 / input as f64))
+    }
+}
+
+#[derive(Debug, Default)]
+struct CacheSummary {
+    cached: u64,
+    input: u64,
+    samples: usize,
+}
+
+impl CacheSummary {
+    fn percent(&self) -> f64 {
+        self.cached as f64 * 100.0 / self.input as f64
     }
 }
 
@@ -97,6 +118,15 @@ impl TurnPerformance {
                 ),
                 format_total_output_tokens(&self.requests),
             );
+            if let Some(summary) = self.cache_summary() {
+                let _ = write!(
+                    output,
+                    " | cache {:.1}% ({}/{})",
+                    summary.percent(),
+                    format_token_count(summary.cached),
+                    format_token_count(summary.input),
+                );
+            }
         }
         if let Some(context) = &self.context {
             let _ = write!(output, " | {}", context.compact());
@@ -160,6 +190,21 @@ impl TurnPerformance {
                 .as_ref()
                 .map_or(0, |(summary, _)| summary.samples),
         );
+        if let Some(summary) = self.cache_summary() {
+            let _ = write!(
+                output,
+                "\n  cache: {}/{} input tok ({:.1}%, provider; {} {})",
+                format_token_count(summary.cached),
+                format_token_count(summary.input),
+                summary.percent(),
+                summary.samples,
+                if summary.samples == 1 {
+                    "request"
+                } else {
+                    "requests"
+                },
+            );
+        }
         for request in &self.requests {
             let source = if request.estimated_tokens {
                 "estimated"
@@ -192,6 +237,14 @@ impl TurnPerformance {
                 source,
                 format_duration(request.total),
             );
+            if let Some((cached, input, percent)) = request.cache_hit() {
+                let _ = write!(
+                    output,
+                    ", cache {}/{} ({percent:.1}%, provider)",
+                    format_token_count(cached),
+                    format_token_count(input),
+                );
+            }
         }
         output
     }
@@ -203,6 +256,18 @@ impl TurnPerformance {
                 .filter(|request| !request.interrupted)
                 .filter_map(|request| request.time_to_first_output.map(|time| time.as_secs_f64())),
         )
+    }
+
+    fn cache_summary(&self) -> Option<CacheSummary> {
+        let mut summary = CacheSummary::default();
+        for request in &self.requests {
+            if let Some((cached, input, _)) = request.cache_hit() {
+                summary.cached = summary.cached.saturating_add(cached);
+                summary.input = summary.input.saturating_add(input);
+                summary.samples = summary.samples.saturating_add(1);
+            }
+        }
+        (summary.samples > 0 && summary.input > 0).then_some(summary)
     }
 
     fn throughput_summary(&self) -> Option<(ValueSummary, bool)> {
@@ -369,7 +434,14 @@ impl ModelPerformanceTimer {
             kind,
             total: self.started.elapsed(),
             time_to_first_output: self.time_to_first_output,
+            input_tokens: if usage.source == "provider" {
+                usage.input_tokens
+            } else {
+                None
+            },
             output_tokens: usage.output_tokens,
+            cache_read_tokens: (usage.source == "provider" && usage.cache_read_tokens_reported)
+                .then_some(usage.cache_read_tokens),
             estimated_tokens: usage.source != "provider",
             interrupted: false,
         }
@@ -468,7 +540,9 @@ mod tests {
             kind,
             total: Duration::from_millis(total_ms),
             time_to_first_output: ttft_ms.map(Duration::from_millis),
+            input_tokens: None,
             output_tokens,
+            cache_read_tokens: None,
             estimated_tokens,
             interrupted: false,
         }
@@ -547,6 +621,64 @@ mod tests {
             performance.compact_summary(),
             "perf: 1 request | TTFT 100ms | ~20.0 t/s | tot ~20 tok | turn 2.0s"
         );
+    }
+
+    #[test]
+    fn timer_retains_only_reported_provider_cache_usage() {
+        let usage = TokenUsage {
+            input_tokens: Some(200),
+            output_tokens: Some(10),
+            total_tokens: Some(210),
+            cache_read_tokens: 150,
+            cache_read_tokens_reported: true,
+            cache_write_tokens: 0,
+            source: "provider".to_string(),
+        };
+        let performance =
+            ModelPerformanceTimer::start(false).finish(1, ModelRequestKind::Agent, &usage);
+        assert_eq!(performance.input_tokens, Some(200));
+        assert_eq!(performance.cache_read_tokens, Some(150));
+
+        let mut unreported = usage;
+        unreported.cache_read_tokens_reported = false;
+        let performance =
+            ModelPerformanceTimer::start(false).finish(2, ModelRequestKind::Agent, &unreported);
+        assert_eq!(performance.cache_read_tokens, None);
+    }
+
+    #[test]
+    fn reports_weighted_provider_cache_hit_percentage() {
+        let mut first = request(
+            1,
+            ModelRequestKind::Agent,
+            1_000,
+            Some(100),
+            Some(20),
+            false,
+        );
+        first.input_tokens = Some(100);
+        first.cache_read_tokens = Some(100);
+        let mut second = request(
+            2,
+            ModelRequestKind::Agent,
+            1_000,
+            Some(100),
+            Some(20),
+            false,
+        );
+        second.input_tokens = Some(900);
+        second.cache_read_tokens = Some(0);
+        let performance = turn(vec![first, second]);
+
+        assert!(
+            performance
+                .compact_summary()
+                .contains("cache 10.0% (100/1,000)")
+        );
+        let detail = performance.detailed_summary();
+        assert!(detail.contains("cache: 100/1,000 input tok (10.0%, provider; 2 requests)"));
+        assert!(detail.contains("cache 100/100 (100.0%, provider)"));
+        assert!(detail.contains("cache 0/900 (0.0%, provider)"));
     }
 
     #[test]
@@ -633,6 +765,7 @@ mod tests {
             output_tokens: Some(20),
             total_tokens: Some(30),
             cache_read_tokens: 0,
+            cache_read_tokens_reported: false,
             cache_write_tokens: 0,
             source: "estimated".to_string(),
         };
@@ -871,6 +1004,7 @@ mod tests {
             output_tokens: Some(150),
             total_tokens: Some(170),
             cache_read_tokens: 0,
+            cache_read_tokens_reported: false,
             cache_write_tokens: 0,
             source: "provider".to_string(),
         };

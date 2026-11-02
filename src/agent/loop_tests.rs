@@ -242,7 +242,7 @@ async fn failed_provider_response_retains_error_even_if_final_tail_repeats() {
             _model: &'a str,
             _messages: &'a [messages::Message],
             _tools: &'a [tools::ToolDefinition],
-            _thinking: ThinkingLevel,
+            _options: providers::ProviderRequestOptions,
         ) -> std::pin::Pin<Box<dyn Future<Output = Result<providers::ProviderResponse>> + Send + 'a>>
         {
             Box::pin(async { anyhow::bail!("test provider transport failure") })
@@ -252,7 +252,7 @@ async fn failed_provider_response_retains_error_even_if_final_tail_repeats() {
             _model: &'a str,
             _messages: &'a [messages::Message],
             _tools: &'a [tools::ToolDefinition],
-            _thinking: ThinkingLevel,
+            _options: providers::ProviderRequestOptions,
             on_event: &'a mut (dyn FnMut(providers::StreamEvent) + Send),
             _cancelled: Option<Arc<AtomicBool>>,
         ) -> std::pin::Pin<Box<dyn Future<Output = Result<providers::ProviderResponse>> + Send + 'a>>
@@ -276,6 +276,7 @@ async fn failed_provider_response_retains_error_even_if_final_tail_repeats() {
         &config,
         &[],
         &[],
+        providers::ProviderRequestOptions::default(),
         &options,
         &mut sink,
         &mut timer,
@@ -342,7 +343,7 @@ async fn stream_loop_cleanup_is_bounded_for_uncooperative_provider() {
             _model: &'a str,
             _messages: &'a [messages::Message],
             _tools: &'a [tools::ToolDefinition],
-            _thinking: ThinkingLevel,
+            _options: providers::ProviderRequestOptions,
         ) -> std::pin::Pin<Box<dyn Future<Output = Result<providers::ProviderResponse>> + Send + 'a>>
         {
             Box::pin(std::future::pending())
@@ -352,7 +353,7 @@ async fn stream_loop_cleanup_is_bounded_for_uncooperative_provider() {
             _model: &'a str,
             _messages: &'a [messages::Message],
             _tools: &'a [tools::ToolDefinition],
-            _thinking: ThinkingLevel,
+            _options: providers::ProviderRequestOptions,
             on_event: &'a mut (dyn FnMut(providers::StreamEvent) + Send),
             _cancelled: Option<Arc<AtomicBool>>,
         ) -> std::pin::Pin<Box<dyn Future<Output = Result<providers::ProviderResponse>> + Send + 'a>>
@@ -387,6 +388,7 @@ async fn stream_loop_cleanup_is_bounded_for_uncooperative_provider() {
             &config,
             &[],
             &[],
+            providers::ProviderRequestOptions::default(),
             &options,
             &mut sink,
             &mut timer,

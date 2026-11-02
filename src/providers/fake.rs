@@ -1,10 +1,7 @@
-use super::{Provider, ProviderResponse, StreamEvent};
-use crate::{
-    agent::{
-        messages::{ContentBlock, Message, Role},
-        tools::ToolDefinition,
-    },
-    config::ThinkingLevel,
+use super::{Provider, ProviderRequestOptions, ProviderResponse, StreamEvent, ToolChoice};
+use crate::agent::{
+    messages::{ContentBlock, Message, Role},
+    tools::ToolDefinition,
 };
 use anyhow::Result;
 use std::{
@@ -24,9 +21,10 @@ impl Provider for FakeProvider {
         _model: &'a str,
         messages: &'a [Message],
         tools: &'a [ToolDefinition],
-        _thinking: ThinkingLevel,
+        options: ProviderRequestOptions,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
         Box::pin(async move {
+            let tools_disabled = tools.is_empty() || options.tool_choice == ToolChoice::None;
             if let Ok(script) = std::env::var("FERRUM_FAKE_SCRIPT") {
                 if script == "fail" {
                     anyhow::bail!("scripted fake provider failure");
@@ -34,7 +32,7 @@ impl Provider for FakeProvider {
                 let response = if script == "inspect_images" {
                     image_inspection_response(messages)
                 } else {
-                    scripted_response(&script, messages, tools.is_empty())
+                    scripted_response(&script, messages, tools_disabled)
                 };
                 return Ok(ProviderResponse::message(response));
             }
@@ -96,7 +94,7 @@ impl Provider for FakeProvider {
             if last_user == "__ferrum_test_repeat_read__" {
                 return Ok(ProviderResponse::message(repeat_read_response(
                     messages,
-                    tools.is_empty(),
+                    tools_disabled,
                 )));
             }
             #[cfg(test)]
@@ -107,7 +105,7 @@ impl Provider for FakeProvider {
                 return Ok(ProviderResponse::message(scripted_response(
                     script,
                     messages,
-                    tools.is_empty(),
+                    tools_disabled,
                 )));
             }
             #[cfg(test)]
@@ -125,7 +123,7 @@ impl Provider for FakeProvider {
         model: &'a str,
         messages: &'a [Message],
         tools: &'a [ToolDefinition],
-        thinking: ThinkingLevel,
+        options: ProviderRequestOptions,
         on_event: &'a mut (dyn FnMut(StreamEvent) + Send),
         cancelled: Option<Arc<AtomicBool>>,
     ) -> Pin<Box<dyn Future<Output = Result<ProviderResponse>> + Send + 'a>> {
@@ -168,7 +166,7 @@ impl Provider for FakeProvider {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             }
-            let response = self.complete(model, messages, tools, thinking).await?;
+            let response = self.complete(model, messages, tools, options).await?;
             if cancelled
                 .as_ref()
                 .is_some_and(|flag| flag.load(Ordering::Relaxed))

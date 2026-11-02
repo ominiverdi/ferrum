@@ -29,7 +29,7 @@ Ferrum is an early Linux-native Rust coding agent. This roadmap tracks shipped w
 - Agent Skills discovery and Pi-style `/skill:<name> [args]` expansion.
 - Pi-like shell shortcuts: `!<cmd>` and `!!<cmd>`.
 - Runtime self-awareness context.
-- Current-directory session picker/switching with `/sessions`.
+- Current-directory session picker/switching with `/session`.
 - Model-generated compaction with recent-context retention.
 - Plain multiline tool rendering, bounded tool-result previews, session-aware colors, and unified diff-style `edit` rendering.
 - Final no-tools synthesis when the adaptive loop guard or an explicit tool-round cap ends a tool phase.

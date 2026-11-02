@@ -60,10 +60,10 @@ Behavior:
 - Ctrl+D exits.
 - Ctrl+C once clears/returns to prompt; double Ctrl+C exits.
 - Alt+I attaches one clipboard image while preserving the current draft and cursor position.
-- Alt+S, Alt+P, and Alt+M open the `/sessions`, `/provider`, and `/model` pickers while preserving the current draft and cursor position.
+- Alt+S, Alt+P, and Alt+M open the `/session`, `/provider`, and `/model` pickers while preserving the current draft and cursor position.
 - Alt+C runs `/compact`; Alt+T and Alt+D open the `/thinking` and `/diff` pickers; Alt+G shows the current `/goal`. The current draft and cursor position are preserved.
 - Input beginning with `/` in column zero is always handled locally. Unknown slash commands never reach the provider. Leading whitespace escapes slash-command handling and is removed before the prompt is sent.
-- `/perf` reports the last completed turn's process-local model timings. `/perf on|off` saves the automatic-summary preference in session metadata and the user-config default for fresh sessions. Resume and session switching prefer the session's saved setting; older sessions use `perf_enabled` from config (off if unset), and `/new` inherits the current setting. `--perf` enables and saves it only in the opened session; omitting the flag preserves the saved preference. Print-mode summaries use stderr; ACP emits no terminal summaries.
+- `/perf` reports the last completed turn's process-local model timings and provider-reported cached-input percentage when available. `/perf on|off` saves the automatic-summary preference in session metadata and the user-config default for fresh sessions. Resume and session switching prefer the session's saved setting; older sessions use `perf_enabled` from config (off if unset), and `/new` inherits the current setting. `--perf` enables and saves it only in the opened session; omitting the flag preserves the saved preference. Print-mode summaries use stderr; ACP emits no terminal summaries.
 
 Slash commands:
 
@@ -71,13 +71,13 @@ Slash commands:
 - `/help`
 - `/version`
 - `/session`
+- `/session all`
+- `/session new`
+- `/session delete`
+- `/session info`
 - `/new`
 - `/title [text]`
 - `/goal [text|clear]`
-- `/sessions`
-- `/sessions all`
-- `/sessions del`
-- `/sessions new`
 - `/model [name]`
 - `/login <openai|openai-codex>`
 - `/usage [day|week|month]`
@@ -110,11 +110,12 @@ Session resume:
 - `ferrum --session <path|id-prefix>` opens a specific JSONL session in interactive mode.
 - Opening a specific print, ACP, or legacy session in interactive mode marks it interactive immediately.
 - Resumed interactive sessions show the last 40 visible conversation lines before prompting.
-- `/sessions` provides a numbered picker for interactive sessions in the current directory.
-- `/sessions all` also shows print, ACP, and legacy sessions; selecting one marks it interactive.
-- `/sessions del` provides a deletion picker for interactive sessions.
-- `/sessions new` starts a fresh session.
-- `/new` is the short alias for `/sessions new`.
+- `/session` provides a numbered picker for interactive sessions in the current directory.
+- `/session all` also shows print, ACP, and legacy sessions; selecting one marks it interactive.
+- `/session delete` provides a deletion picker for interactive sessions.
+- `/session new` starts a fresh session.
+- `/session info` reports detailed current-session state.
+- `/new` is the short alias for `/session new`.
 - `/model` and `/provider` provide numbered pickers when used without an argument; explicit arguments select directly.
 - `/model` queries the active provider before opening its picker and caches the returned model IDs for argument completion.
 - `/provider` includes a `providerless` entry when configured model aliases omit `provider`; selecting it opens those aliases in a nested picker.

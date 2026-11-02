@@ -74,7 +74,7 @@ OpenAI Codex streaming usage is parsed from completed response events when the C
 
 Ferrum also uses usage information for context pressure when available.
 
-The `/session` command reports:
+The `/session info` command reports:
 
 ```text
 context_tokens: 13864
@@ -90,7 +90,7 @@ context_source: usage+estimate
 This is intentionally separate from `/usage` totals:
 
 - `/usage` tracks completed model requests for cost/accounting trends
-- `/session` tracks the current active context size for compaction pressure
+- `/session info` tracks the current active context size for compaction pressure
 
 These numbers do not need to match exactly.
 

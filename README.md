@@ -40,9 +40,9 @@ GitHub mirror and backup binary releases: https://github.com/ominiverdi/ferrum
 Download the latest release asset from Codeberg.
 
 ```bash
-curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo install -Dm755 ferrum-v0.7.12-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
-sudo install -Dm644 ferrum-v0.7.12-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
+curl -L https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo install -Dm755 ferrum-v0.7.13-x86_64-unknown-linux-gnu/ferrum /usr/local/bin/ferrum
+sudo install -Dm644 ferrum-v0.7.13-x86_64-unknown-linux-gnu/docs/ferrum.1 /usr/local/share/man/man1/ferrum.1
 sudo mandb 2>/dev/null || true
 ferrum --help
 man ferrum
@@ -51,16 +51,16 @@ man ferrum
 Optional checksum verification:
 
 ```bash
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.12/ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz.sha256
-sha256sum -c ferrum-v0.7.12-x86_64-unknown-linux-gnu.tar.gz.sha256
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://codeberg.org/ominiverdi/ferrum/releases/download/v0.7.13/ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c ferrum-v0.7.13-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 Debian and RPM packages are also available on the release page:
 
 ```bash
-sudo apt install ./ferrum_0.7.12_amd64.deb
-sudo dnf install ./ferrum-0.7.12-1.x86_64.rpm
+sudo apt install ./ferrum_0.7.13_amd64.deb
+sudo dnf install ./ferrum-0.7.13-1.x86_64.rpm
 ```
 
 ### From source
@@ -248,13 +248,13 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /help
 /version
 /session
+/session all
+/session new
+/session delete
+/session info
 /title [text]
 /goal [text|clear]
 /new
-/sessions
-/sessions all
-/sessions del
-/sessions new
 /model [name]
 /login <provider>
 /usage [day|week|month]
@@ -276,7 +276,7 @@ In active interactive turns, `Esc` aborts the current model/tool turn and return
 /exit
 ```
 
-`/new` and `/sessions new` both start a fresh session. `/sessions` shows interactive sessions; `/sessions all` includes print, ACP, and legacy sessions. Selecting a non-interactive or legacy session marks it interactive. `/model`, `/provider`, and `/palettes` open numbered, searchable pickers. When configured model aliases omit `provider`, `/provider` includes a `providerless` entry that opens those aliases. `/thinking`, `/safety`, `/diff`, and `/colors` also open pickers when used without an argument. Use Up/Down to move the highlight and Enter to select it. Typing a displayed number on its own selects that item without filtering, while any other text filters labels and descriptions live; press Esc to return to the prompt without changing state. Explicit arguments such as `/model gpt-5` remain available for direct selection.
+`/session` shows interactive sessions; `/session all` includes print, ACP, and legacy sessions; `/session delete` opens the deletion picker; and `/session info` shows detailed current-session diagnostics. `/new` and `/session new` both start a fresh session. Selecting a non-interactive or legacy session marks it interactive. `/model`, `/provider`, and `/palettes` open numbered, searchable pickers. When configured model aliases omit `provider`, `/provider` includes a `providerless` entry that opens those aliases. `/thinking`, `/safety`, `/diff`, and `/colors` also open pickers when used without an argument. Use Up/Down to move the highlight and Enter to select it. Typing a displayed number on its own selects that item without filtering, while any other text filters labels and descriptions live; press Esc to return to the prompt without changing state. Explicit arguments such as `/model gpt-5` remain available for direct selection.
 
 `/goal` shows one session-scoped note, `/goal <text>` replaces it, and `/goal clear` removes it. The note is limited to 4096 bytes, persists with the session, and does not trigger model work.
 
